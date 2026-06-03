@@ -23,6 +23,7 @@ except ImportError:  # pragma: no cover - exercised only without optional depend
     Observer = None
 
 from agit.actions import AgitActions
+from agit.backend_setup import BackendUnavailable, backend_installed, ensure_installed_backend, install_hint
 from agit.backends.proxy_agents import available_backends, make_proxy_agent
 from agit.commit_message import build_agent_commit_message, build_user_commit_message
 from agit.git import GitRepo
@@ -302,6 +303,8 @@ class ProxyRunner:
     def run(self) -> int:
         if not sys.stdin.isatty() or not sys.stdout.isatty():
             raise RuntimeError("Proxy mode requires an interactive terminal. Use --mode json for non-TTY use.")
+        if not self._ensure_backend_available():
+            return 1
         self.state.save()
         if self.actions.has_pre_agent_user_changes():
             print("User changes detected before the agent starts.")
@@ -339,6 +342,17 @@ class ProxyRunner:
                     os.close(self.master_fd)
                 except OSError:
                     pass
+
+    def _ensure_backend_available(self) -> bool:
+        try:
+            resolved = ensure_installed_backend(self.state.backend, self.global_config, interactive=True)
+        except BackendUnavailable as error:
+            print(error)
+            return False
+        if resolved != self.state.backend:
+            self.state.backend = resolved
+            self.backend = make_proxy_agent(resolved)
+        return True
 
     def _spawn(self) -> None:
         resume = self._should_continue_session()
@@ -408,6 +422,10 @@ class ProxyRunner:
         self._render()
 
     def _switch_backend(self, name: str) -> None:
+        if not backend_installed(name):
+            self._set_message(f"'{name}' is not installed.\n{install_hint(name)}", seconds=8.0)
+            self._render()
+            return
         # Remember the current backend's session, then bring up the newly
         # selected backend (restoring its own session for this repo if known).
         self.state.remember_backend_session()

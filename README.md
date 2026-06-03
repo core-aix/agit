@@ -37,7 +37,7 @@ agit --backend claude
 agit --backend opencode
 ```
 
-The default backend is read from `~/.agit/config.json` (`default_backend`); a fresh install defaults to OpenCode. You can also switch backends mid-session with the `agent-backend` command below.
+On the first run, aGiT asks which backend should be the default (listed alphabetically, with each backend's install status). If the chosen backend's CLI is not installed, aGiT shows install instructions and lets you install it or pick a different one. The choice is saved in `~/.agit/config.json` (`default_backend`) and reused for future runs. You can also switch backends mid-session with the `agent-backend` command below.
 
 aGiT tracks one session per repository and stays pinned to the session it launched (so it does not drift to other sessions you open). Use the `session` command (`Ctrl-G`, then `session`) to start a new session, switch the tracked session to another existing one, or sync tracking to the most recently active session — for example after starting a new conversation inside the backend's own TUI. This works the same for both backends.
 

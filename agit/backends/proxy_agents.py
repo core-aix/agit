@@ -110,7 +110,7 @@ _AGENTS: dict[str, type] = {
 
 
 def available_backends() -> list[str]:
-    return list(_AGENTS)
+    return sorted(_AGENTS)
 
 
 def make_proxy_agent(name: str) -> ProxyAgent:

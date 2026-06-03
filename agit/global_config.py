@@ -43,6 +43,9 @@ class GlobalConfig:
             json.dump(self.data, handle, indent=2, sort_keys=True)
             handle.write("\n")
 
+    def has_default_backend(self) -> bool:
+        return bool(self.data.get("default_backend"))
+
     @property
     def default_backend(self) -> str:
         value = self.data.get("default_backend")

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import sys
+
 from agit.actions import AgitActions
+from agit.backend_setup import BackendUnavailable, backend_installed, ensure_installed_backend, install_hint
 from agit.backends.claude import ClaudeBackend
 from agit.backends.opencode import OpenCodeBackend
 from agit.git import GitRepo
@@ -33,6 +36,13 @@ class AgitShell:
         self.actions = AgitActions(repo, self.state, verbose=verbose)
 
     def run(self) -> None:
+        try:
+            resolved = ensure_installed_backend(self.state.backend, self.global_config, interactive=sys.stdin.isatty())
+        except BackendUnavailable as error:
+            print(error)
+            return
+        if resolved != self.state.backend:
+            self.state.backend = resolved
         self.state.save()
         if self.verbose:
             print(f"aGiT session {self.state.session_id}")
@@ -64,7 +74,10 @@ class AgitShell:
         elif command == ":agent-backend":
             agent = arg.strip()
             if agent not in BACKENDS:
-                print(f"Unknown backend: {agent or '(none)'}. Available: {', '.join(BACKENDS)}")
+                print(f"Unknown backend: {agent or '(none)'}. Available: {', '.join(sorted(BACKENDS))}")
+            elif not backend_installed(agent):
+                print(f"'{agent}' is not installed.")
+                print(install_hint(agent))
             else:
                 self.state.remember_backend_session()
                 self.state.backend = agent

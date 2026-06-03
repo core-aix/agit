@@ -96,5 +96,7 @@ aGiT stands for agent + git. It is a Python library and interactive CLI that com
 
 - The selected backend is stored per repository in `.agit/state.json`.
 - A user-wide config at `~/.agit/config.json` (override the directory with `AGIT_CONFIG_DIR`) stores `default_backend`, used when a repository has no backend recorded yet.
-- `agit --backend <opencode|claude>` selects the backend for a run and saves it as the new global default.
+- On the first run (no global default yet and no `--backend`), prompt the user to choose the default backend. List backends in alphabetical order and show whether each is installed.
+- Check that the backend's CLI is installed (on `PATH`) before launching it. If it is not, show install instructions and let the user install it or choose a different (installed) backend; backend switching is likewise blocked for backends that are not installed.
+- `agit --backend <claude|opencode>` selects the backend for a run and saves it as the new global default.
 - Switching backends saves the current backend's session id and restores the target backend's last session id for the repository, so each backend keeps its own conversation.
