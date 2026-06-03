@@ -13,11 +13,36 @@ import tty
 
 import pyte
 
+try:
+    from watchdog.events import FileSystemEvent, FileSystemEventHandler
+    from watchdog.observers import Observer
+except ImportError:  # pragma: no cover - exercised only without optional dependency
+    FileSystemEvent = None
+    FileSystemEventHandler = object
+    Observer = None
+
 from agit.actions import AgitActions
 from agit.commit_message import build_agent_commit_message, build_user_commit_message
 from agit.git import GitRepo
 from agit.opencode_session import export_session, latest_session_id, session_belongs_to_repo, turns_after
 from agit.state import AgitState
+
+
+class RepoChangeHandler(FileSystemEventHandler):
+    IGNORED_PARTS = {".agit", ".git", ".pytest_cache", ".venv", "__pycache__"}
+
+    def __init__(self, repo_path, changed: threading.Event) -> None:
+        self.repo_path = repo_path
+        self.changed = changed
+
+    def on_any_event(self, event: FileSystemEvent) -> None:
+        try:
+            relative = os.path.relpath(event.src_path, self.repo_path)
+        except ValueError:
+            relative = event.src_path
+        if any(part in self.IGNORED_PARTS for part in relative.split(os.sep)):
+            return
+        self.changed.set()
 
 
 def _escape_sequence_complete(sequence: bytes) -> bool:
@@ -125,6 +150,7 @@ class ProxyRunner:
     FILE_STABLE_SECONDS = 8.0
     CHILD_IDLE_SECONDS = 4.0
     POLL_SECONDS = 2.0
+    PARSE_COOLDOWN_SECONDS = 10.0
 
     def __init__(self, repo: GitRepo, *, verbose: bool = False) -> None:
         self.repo = repo
@@ -135,6 +161,11 @@ class ProxyRunner:
         self.child_pid: int | None = None
         self.master_fd: int | None = None
         self.last_poll = 0.0
+        self.status_check_pending = False
+        self.file_change_event = threading.Event()
+        self.file_observer = None
+        self.parse_pending = False
+        self.last_parse_start = 0.0
         self.running = True
         self.old_attrs = None
         self.original_sigwinch = None
@@ -152,7 +183,10 @@ class ProxyRunner:
         self.agent_parse_result = None
         self.agent_in_flight = False
         self.pre_agent_reconciled_status = ""
+        self.last_parse_attempt_status = ""
         self.passthrough_prompt = bytearray()
+        self.pending_forwarded: list[bytes] | None = None
+        self.pending_prompt_text = ""
 
     def run(self) -> int:
         if not sys.stdin.isatty() or not sys.stdout.isatty():
@@ -164,6 +198,7 @@ class ProxyRunner:
         self._initialize_session_baseline()
         self._init_screen()
         self._spawn()
+        self._start_file_watcher()
         self.old_attrs = termios.tcgetattr(sys.stdin.fileno())
         try:
             self._enter_host_screen()
@@ -183,6 +218,7 @@ class ProxyRunner:
                 signal.signal(signal.SIGWINCH, self.original_sigwinch)
             for signum, handler in self.original_signal_handlers.items():
                 signal.signal(signum, handler)
+            self._stop_file_watcher()
             self._cleanup_child()
             self._restore_terminal()
             if self.master_fd is not None:
@@ -210,6 +246,22 @@ class ProxyRunner:
         if self.state.backend_session_matches_repo():
             return True
         return session_belongs_to_repo(self.repo.repo, session_id)
+
+    def _start_file_watcher(self) -> None:
+        if Observer is None:
+            return
+        observer = Observer()
+        observer.schedule(RepoChangeHandler(self.repo.repo, self.file_change_event), str(self.repo.repo), recursive=True)
+        observer.start()
+        self.file_observer = observer
+
+    def _stop_file_watcher(self) -> None:
+        observer = self.file_observer
+        if observer is None:
+            return
+        observer.stop()
+        observer.join(timeout=2.0)
+        self.file_observer = None
 
     def _loop(self) -> int:
         assert self.master_fd is not None
@@ -245,6 +297,8 @@ class ProxyRunner:
                     if submit:
                         prompt_text = self.passthrough_prompt.decode(errors="ignore").strip()
                         if not self._pre_agent_commit_if_needed(prompt_text):
+                            self.pending_forwarded = [chunk for chunk in forwarded if chunk in {b"\r", b"\n"}]
+                            self.pending_prompt_text = prompt_text
                             forwarded = [chunk for chunk in forwarded if chunk not in {b"\r", b"\n"}]
                             submit = False
                     if submit:
@@ -255,6 +309,7 @@ class ProxyRunner:
                         os.write(self.master_fd, b"".join(forwarded))
                 if command:
                     self._run_command(command)
+            self._resume_pending_prompt_if_ready()
             self._maybe_agent_commit()
             if self.child_pid is not None:
                 done, status = os.waitpid(self.child_pid, os.WNOHANG)
@@ -301,12 +356,7 @@ class ProxyRunner:
             return
         parts = ["\x1b[0m\x1b[?25l\x1b[H"]
         for row in range(max(self.rows - 1, 1)):
-            # Prefer reliable visibility over partial color fidelity. pyte does
-            # not preserve every terminal color/palette mode OpenCode uses, and
-            # reconstructing styles cell-by-cell can render text invisible when
-            # foreground/background defaults are interpreted differently by the
-            # host terminal.
-            parts.append("\x1b[0m" + self._plain_row(row))
+            parts.append("\x1b[0m" + self._render_row(row))
             parts.append("\r\n")
         parts.append(self._status_line())
         if self.input.capturing:
@@ -375,21 +425,28 @@ class ProxyRunner:
         assert self.screen is not None
         cells = self.screen.buffer.get(row, {})
         rendered = []
-        current_style = ""
+        highlighting = False
         for col in range(self.cols):
             cell = cells.get(col)
             if cell is None:
-                style = "\x1b[0m"
+                highlight = False
                 char = " "
             else:
-                style = self._cell_style(cell)
+                highlight = self._is_highlight_cell(cell)
                 char = cell.data or " "
-            if style != current_style:
-                rendered.append(style)
-                current_style = style
+            if highlight != highlighting:
+                rendered.append("\x1b[37;40m" if highlight else "\x1b[0m")
+                highlighting = highlight
             rendered.append(char)
         rendered.append("\x1b[0m")
         return "".join(rendered)
+
+    def _is_highlight_cell(self, cell) -> bool:
+        if getattr(cell, "reverse", False):
+            return True
+        fg = getattr(cell, "fg", "default")
+        bg = getattr(cell, "bg", "default")
+        return bg == "black" and fg in {"default", "white", "brightwhite"}
 
     def _cell_style(self, cell) -> str:
         codes = []
@@ -400,9 +457,12 @@ class ProxyRunner:
         if getattr(cell, "underscore", False):
             codes.append("4")
         if getattr(cell, "reverse", False):
-            codes.append("7")
+            codes.extend(["37", "40"])
         raw_fg = getattr(cell, "fg", "default")
         raw_bg = getattr(cell, "bg", "default")
+        if getattr(cell, "reverse", False):
+            raw_fg = "default"
+            raw_bg = "default"
         # Avoid invisible text when a TUI emits the same foreground/background.
         if raw_fg == raw_bg and raw_fg != "default":
             raw_fg = "default"
@@ -716,11 +776,11 @@ class ProxyRunner:
             self.pre_agent_reconciled_status = status
         if status and status != self.pre_agent_reconciled_status:
             if self.agent_parse_thread and self.agent_parse_thread.is_alive():
-                self._set_message("aGiT is reconciling previous agent changes. Press Enter again shortly.")
+                self._set_message("aGiT is checking existing git changes before sending your prompt...", seconds=60)
                 self._render()
                 return False
             if self._start_agent_parse():
-                self._set_message("aGiT is reconciling previous agent changes. Press Enter again shortly.")
+                self._set_message("aGiT is checking existing git changes before sending your prompt...", seconds=60)
                 self._render()
                 return False
         if self.actions.has_pre_agent_user_changes():
@@ -728,6 +788,39 @@ class ProxyRunner:
             self._render()
             self._create_user_commit_popup()
         return True
+
+    def _resume_pending_prompt_if_ready(self) -> None:
+        if self.pending_forwarded is None:
+            return
+        finished = self._finish_agent_parse_if_ready(quiet=True)
+        if finished is None:
+            if self.agent_parse_thread and self.agent_parse_thread.is_alive():
+                self._set_message("aGiT is checking existing git changes before sending your prompt...", seconds=60)
+            return
+        if finished is False and self.actions.has_pre_agent_user_changes():
+            self._set_message("User changes detected before agent runs.")
+            self._render()
+            if not self._create_user_commit_popup():
+                self.pending_forwarded = None
+                self.pending_prompt_text = ""
+                self._set_message("Prompt not sent because existing user changes were not committed.")
+                self._render()
+                return
+        self._forward_pending_prompt()
+
+    def _forward_pending_prompt(self) -> None:
+        if self.pending_forwarded is None or self.master_fd is None:
+            return
+        forwarded = self.pending_forwarded
+        prompt_text = self.pending_prompt_text
+        self.pending_forwarded = None
+        self.pending_prompt_text = ""
+        self.passthrough_prompt.clear()
+        if prompt_text:
+            self._record_user_prompt(prompt_text)
+        self.agent_in_flight = True
+        self._clear_message()
+        os.write(self.master_fd, b"".join(forwarded))
 
     def _prune_declined_untracked(self) -> None:
         self.state.keep_declined(self.repo.untracked_files())
@@ -767,6 +860,7 @@ class ProxyRunner:
             session = export_session(self.repo.repo, session_id) if session_id else None
             self.agent_parse_result = (session_id, session, last_message_id)
 
+        self.last_parse_start = time.monotonic()
         self.agent_parse_thread = threading.Thread(target=worker, name="agit-opencode-session-parse", daemon=True)
         self.agent_parse_thread.start()
         return True
@@ -808,15 +902,30 @@ class ProxyRunner:
 
     def _maybe_agent_commit(self) -> None:
         now = time.monotonic()
-        if now - self.last_poll < self.POLL_SECONDS:
-            return
-        self.last_poll = now
+        if self.file_change_event.is_set():
+            self.file_change_event.clear()
+            self.status_check_pending = True
+        elif Observer is None:
+            if now - self.last_poll < self.POLL_SECONDS:
+                return
+            self.last_poll = now
+            self.status_check_pending = True
         self._clear_agent_in_flight_if_idle()
-        status = self.repo.status_short()
-        self._prune_declined_untracked()
-        if status != self.last_status:
-            self.last_status = status
-            self.last_status_change = now
+        if self.status_check_pending:
+            status = self.repo.status_short()
+            self._prune_declined_untracked()
+            self.status_check_pending = False
+            if status != self.last_status:
+                self.last_status = status
+                self.last_status_change = now
+            if status.strip():
+                self.parse_pending = True
+                self.last_parse_attempt_status = ""
+            else:
+                self.parse_pending = False
+                self.last_parse_attempt_status = ""
+        else:
+            status = self.last_status
         if not status.strip():
             if self.verbose:
                 self._render_status("no git changes")
@@ -829,7 +938,25 @@ class ProxyRunner:
             if self.verbose:
                 self._render_status("git changes found; waiting for OpenCode to become idle")
             return
-        committed = self._commit_available_agent_turns(quiet=not self.verbose)
+        finished = self._finish_agent_parse_if_ready(quiet=not self.verbose)
+        if finished is True:
+            self.parse_pending = False
+            self.last_parse_attempt_status = ""
+            committed = True
+        else:
+            if finished is False:
+                self.parse_pending = False
+                self.last_parse_attempt_status = status
+            if not self.parse_pending or status == self.last_parse_attempt_status:
+                if self.verbose:
+                    self._render_status("git changes found; waiting for new file changes")
+                return
+            if now - self.last_parse_start < self.PARSE_COOLDOWN_SECONDS:
+                if self.verbose:
+                    self._render_status("git changes found; waiting for parse cooldown")
+                return
+            self._start_agent_parse()
+            return
         if not committed:
             if self.verbose:
                 self._render_status("git changes found; no new final response available")

@@ -1,3 +1,7 @@
+import os
+import threading
+import time
+
 from agit.backends.base import TokenUsage
 from agit.opencode_session import SessionTurn
 from agit.proxy import ProxyInput, ProxyRunner, _escape_sequence_complete
@@ -243,6 +247,230 @@ def test_proxy_plain_row_handles_empty_pyte_cell_data():
     runner.screen = Screen()
 
     assert runner._plain_row(0) == "  "
+
+
+def test_proxy_reverse_cells_render_white_on_black():
+    runner = ProxyRunner.__new__(ProxyRunner)
+
+    class Cell:
+        bold = False
+        italics = False
+        underscore = False
+        reverse = True
+        fg = "default"
+        bg = "default"
+
+    assert runner._cell_style(Cell()) == "\x1b[37;40m"
+
+
+def test_proxy_render_row_only_styles_reverse_cells():
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.cols = 3
+
+    class Cell:
+        def __init__(self, data, reverse=False, fg="white", bg="default"):
+            self.data = data
+            self.reverse = reverse
+            self.fg = fg
+            self.bg = bg
+
+    class Screen:
+        buffer = {0: {0: Cell("a"), 1: Cell("b", reverse=True), 2: Cell("c")}}
+
+    runner.screen = Screen()
+
+    assert runner._render_row(0) == "a\x1b[37;40mb\x1b[0mc\x1b[0m"
+
+
+def test_proxy_render_row_styles_explicit_white_on_black_cells():
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.cols = 3
+
+    class Cell:
+        def __init__(self, data, fg="default", bg="default", reverse=False):
+            self.data = data
+            self.fg = fg
+            self.bg = bg
+            self.reverse = reverse
+
+    class Screen:
+        buffer = {0: {0: Cell("a", fg="white"), 1: Cell("b", fg="white", bg="black"), 2: Cell("c", fg="brightwhite", bg="black")}}
+
+    runner.screen = Screen()
+
+    assert runner._render_row(0) == "a\x1b[37;40mbc\x1b[0m"
+
+
+def test_proxy_status_check_runs_after_file_event_only():
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.file_change_event = threading.Event()
+    runner.status_check_pending = False
+    runner.last_poll = 0.0
+    runner.agent_in_flight = False
+    runner.agent_parse_thread = None
+    runner.agent_parse_result = None
+    runner.last_child_output = 0.0
+    runner.last_status = ""
+    runner.last_status_change = 0.0
+    runner.verbose = False
+    runner.CHILD_IDLE_SECONDS = 4.0
+    runner.FILE_STABLE_SECONDS = 8.0
+    runner._prune_declined_untracked = lambda: None
+    runner._commit_available_agent_turns = lambda quiet: False
+
+    class Repo:
+        calls = 0
+
+        def status_short(self):
+            self.calls += 1
+            return " M file.txt\n"
+
+    runner.repo = Repo()
+    runner.file_change_event.set()
+
+    runner._maybe_agent_commit()
+    runner._maybe_agent_commit()
+
+    assert runner.repo.calls == 1
+
+
+def test_proxy_parse_starts_only_after_cooldown_between_file_events():
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.file_change_event = threading.Event()
+    runner.status_check_pending = False
+    runner.parse_pending = False
+    runner.last_poll = 0.0
+    runner.agent_in_flight = False
+    runner.agent_parse_thread = None
+    runner.agent_parse_result = None
+    runner.last_child_output = 0.0
+    runner.last_status = ""
+    runner.last_status_change = 0.0
+    runner.last_parse_start = 0.0
+    runner.last_parse_attempt_status = ""
+    runner.verbose = False
+    runner.CHILD_IDLE_SECONDS = 0.0
+    runner.FILE_STABLE_SECONDS = 0.0
+    runner.PARSE_COOLDOWN_SECONDS = 60.0
+    runner._prune_declined_untracked = lambda: None
+
+    class Repo:
+        def status_short(self):
+            return " M file.txt\n"
+
+    starts = []
+    runner.repo = Repo()
+
+    def start_parse():
+        runner.last_parse_start = time.monotonic()
+        starts.append(True)
+        return True
+
+    runner._start_agent_parse = start_parse
+
+    runner.file_change_event.set()
+    runner._maybe_agent_commit()
+    runner.file_change_event.set()
+    runner._maybe_agent_commit()
+
+    assert len(starts) == 1
+
+
+def test_proxy_pending_prompt_forwards_after_agent_parse_commit(tmp_path):
+    runner = ProxyRunner.__new__(ProxyRunner)
+    read_fd, write_fd = os.pipe()
+    try:
+        runner.master_fd = write_fd
+        runner.pending_forwarded = [b"\r"]
+        runner.pending_prompt_text = "fix it"
+        runner.passthrough_prompt = bytearray(b"fix it")
+        runner.state = AgitState(tmp_path)
+        runner.agent_parse_thread = None
+        runner.agent_in_flight = False
+        runner.message = "waiting"
+        runner.message_until = 1.0
+        runner._finish_agent_parse_if_ready = lambda quiet: True
+
+        runner._resume_pending_prompt_if_ready()
+
+        assert os.read(read_fd, 1) == b"\r"
+        assert runner.pending_forwarded is None
+        assert runner.agent_in_flight is True
+        assert runner.state.pending_trace() == [{"role": "user", "content": "fix it"}]
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+
+
+def test_proxy_pending_prompt_user_commit_then_forwards(tmp_path):
+    runner = ProxyRunner.__new__(ProxyRunner)
+    read_fd, write_fd = os.pipe()
+    try:
+        runner.master_fd = write_fd
+        runner.pending_forwarded = [b"\r"]
+        runner.pending_prompt_text = "fix it"
+        runner.passthrough_prompt = bytearray(b"fix it")
+        runner.state = AgitState(tmp_path)
+        runner.agent_parse_thread = None
+        runner.agent_in_flight = False
+        runner.screen = None
+        runner.message = None
+        runner.message_until = 0.0
+        runner._finish_agent_parse_if_ready = lambda quiet: False
+        runner._create_user_commit_popup = lambda: True
+
+        class Actions:
+            def has_pre_agent_user_changes(self):
+                return True
+
+        runner.actions = Actions()
+
+        runner._resume_pending_prompt_if_ready()
+
+        assert os.read(read_fd, 1) == b"\r"
+        assert runner.pending_forwarded is None
+        assert runner.agent_in_flight is True
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+
+
+def test_proxy_pending_prompt_cancelled_user_commit_does_not_forward(tmp_path):
+    runner = ProxyRunner.__new__(ProxyRunner)
+    read_fd, write_fd = os.pipe()
+    try:
+        os.set_blocking(read_fd, False)
+        runner.master_fd = write_fd
+        runner.pending_forwarded = [b"\r"]
+        runner.pending_prompt_text = "fix it"
+        runner.passthrough_prompt = bytearray(b"fix it")
+        runner.state = AgitState(tmp_path)
+        runner.agent_parse_thread = None
+        runner.agent_in_flight = False
+        runner.screen = None
+        runner.message = None
+        runner.message_until = 0.0
+        runner._finish_agent_parse_if_ready = lambda quiet: False
+        runner._create_user_commit_popup = lambda: False
+
+        class Actions:
+            def has_pre_agent_user_changes(self):
+                return True
+
+        runner.actions = Actions()
+
+        runner._resume_pending_prompt_if_ready()
+
+        try:
+            written = os.read(read_fd, 1)
+        except BlockingIOError:
+            written = b""
+        assert written == b""
+        assert runner.pending_forwarded is None
+        assert runner.agent_in_flight is False
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
 
 
 def test_proxy_agent_active_does_not_depend_on_recent_output():
