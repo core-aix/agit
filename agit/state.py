@@ -29,6 +29,15 @@ class AgitState:
             "backend_session_id": None,
             "declined_untracked_files": [],
             "pending_trace": [],
+            "pending_token_usage": {
+                "context": None,
+                "total": 0,
+                "input": 0,
+                "output": 0,
+                "reasoning": 0,
+                "cache_read": 0,
+                "cache_write": 0,
+            },
         }
 
     def save(self) -> None:
@@ -108,4 +117,19 @@ class AgitState:
 
     def clear_trace(self) -> None:
         self.data["pending_trace"] = []
+        self.data["pending_token_usage"] = self._default()["pending_token_usage"]
+        self.save()
+
+    def pending_token_usage(self) -> dict[str, int | None]:
+        usage = dict(self._default()["pending_token_usage"])
+        usage.update(self.data.get("pending_token_usage") or {})
+        return usage
+
+    def add_token_usage(self, usage) -> None:
+        current = self.pending_token_usage()
+        if usage.context is not None:
+            current["context"] = usage.context
+        for key in ("total", "input", "output", "reasoning", "cache_read", "cache_write"):
+            current[key] = int(current.get(key) or 0) + int(getattr(usage, key, 0) or 0)
+        self.data["pending_token_usage"] = current
         self.save()

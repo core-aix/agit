@@ -68,15 +68,23 @@ class AgitPrompt:
         verbose = " | verbose" if state.verbose else ""
         hint = " | type : for aGiT controls, / for OpenCode controls"
         left = f" aGiT {state.backend} | {state.repo.name} | model: {model}{verbose}{hint}"
-        width = get_terminal_size(fallback=(100, 24)).columns
-        if right:
-            available = max(width - len(left) - len(right) - 1, 1)
-            text = f"{left}{' ' * available}{right} "
-        else:
-            text = f"{left} "
+        if not right:
+            return [("class:bottom-toolbar", f"{left} ")]
+        width = self._terminal_width()
+        padding = " " * max(width - len(left) - len(right) - 2, 1)
         return [
-            ("class:bottom-toolbar", text)
+            ("class:bottom-toolbar", left),
+            ("class:bottom-toolbar", padding),
+            ("class:bottom-toolbar", f"{right} "),
         ]
+
+    def _terminal_width(self) -> int:
+        try:
+            from prompt_toolkit.application.current import get_app
+
+            return get_app().output.get_size().columns
+        except Exception:
+            return get_terminal_size(fallback=(100, 24)).columns
 
 
 try:

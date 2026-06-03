@@ -26,6 +26,7 @@ aGiT stands for agent + git. It is a Python library and interactive CLI that com
 - The interaction trace includes full user prompts and final agent responses.
 - Do not include thinking tokens or intermediate responses.
 - Commit bodies include metadata such as backend, backend session ID, aGiT session ID, model, commit type, and timestamps.
+- Agent commit metadata includes the current context token count and token usage accumulated since the last code-changing commit.
 
 ## Staging Behavior
 
@@ -49,6 +50,7 @@ aGiT stands for agent + git. It is a Python library and interactive CLI that com
 - Plain text input is sent to the active agent backend.
 - aGiT commands use `:` instead of `/` so OpenCode-native slash controls are not intercepted.
 - The interactive UI should show status information and contextual command hints for both `:` aGiT controls and `/` OpenCode-native controls.
+- Intentionally unstaged-file notices should live in the status bar, not in the main transcript.
 - `:user-commit` creates a user commit.
 - `:stage` reviews and optionally stages untracked files, including previously declined files.
 - `:unstaged` shows intentionally unstaged files.

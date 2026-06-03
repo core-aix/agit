@@ -63,5 +63,6 @@ When running in a terminal, aGiT shows a bottom status bar with the active backe
 - New untracked files require confirmation before staging.
 - Declined untracked files are remembered in repository-local `.agit/state.json`.
 - Agent commits use the `<agent>` tag and include the full interaction trace since the last code-changing commit.
+- Agent commit metadata includes context token count and token usage accumulated since the last code-changing commit.
 - User commits use the `<user>` tag and include aGiT metadata.
 - Commits are created only when staged changes exist.

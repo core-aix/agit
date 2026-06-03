@@ -31,3 +31,20 @@ def test_opencode_parse_nested_text_part():
     assert final == "Hi. What would you like to work on?"
     assert session_id == "ses-1"
     assert model is None
+
+
+def test_opencode_parse_token_usage():
+    backend = OpenCodeBackend(Path("."))
+    parsed = backend._parse_event_line(
+        '{"type":"step_finish","sessionID":"ses-1","part":{"type":"step-finish","tokens":{"total":8883,"input":8869,"output":14,"reasoning":0,"cache":{"write":3,"read":2}}}}'
+    )
+
+    assert parsed is not None
+    _display, _final, session_id, _model, tokens = parsed
+    assert session_id == "ses-1"
+    assert tokens.context == 8869
+    assert tokens.total == 8883
+    assert tokens.input == 8869
+    assert tokens.output == 14
+    assert tokens.cache_write == 3
+    assert tokens.cache_read == 2

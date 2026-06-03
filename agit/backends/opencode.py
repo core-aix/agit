@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 from typing import TextIO
 
-from agit.backends.base import AgentResult
+from agit.backends.base import AgentResult, TokenUsage
 
 
 class OpenCodeBackend:
@@ -38,7 +38,7 @@ class OpenCodeBackend:
             stderr=subprocess.STDOUT,
             stdout=subprocess.PIPE,
         )
-        final_response, parsed_session_id, parsed_model = self._read_events(process.stdout)
+        final_response, parsed_session_id, parsed_model, tokens = self._read_events(process.stdout)
         exit_code = process.wait()
 
         return AgentResult(
@@ -47,15 +47,17 @@ class OpenCodeBackend:
             model=parsed_model or model,
             final_response=final_response.strip(),
             exit_code=exit_code,
+            tokens=tokens,
         )
 
-    def _read_events(self, output: TextIO | None) -> tuple[str, str | None, str | None]:
+    def _read_events(self, output: TextIO | None) -> tuple[str, str | None, str | None, TokenUsage]:
         if output is None:
-            return "", None, None
+            return "", None, None, TokenUsage()
 
         final_parts: list[str] = []
         session_id = None
         model = None
+        tokens = TokenUsage()
         for line in output:
             parsed = self._parse_event_line(line)
             if parsed is None:
@@ -63,15 +65,16 @@ class OpenCodeBackend:
                     print(line.rstrip())
                 continue
 
-            display_text, final_text, parsed_session_id, parsed_model = parsed
+            display_text, final_text, parsed_session_id, parsed_model, parsed_tokens = parsed
             session_id = session_id or parsed_session_id
             model = model or parsed_model
+            self._add_tokens(tokens, parsed_tokens)
             if display_text:
                 print(display_text, end="" if display_text.endswith("\n") else "\n")
             if final_text:
                 final_parts.append(final_text)
 
-        return "".join(final_parts).strip(), session_id, model
+        return "".join(final_parts).strip(), session_id, model, tokens
 
     def _split_slash_command(self, prompt: str) -> tuple[str | None, list[str]]:
         parts = prompt[1:].strip().split()
@@ -92,7 +95,7 @@ class OpenCodeBackend:
             if parsed is None:
                 continue
 
-            _display_text, final_text, parsed_session_id, parsed_model = parsed
+            _display_text, final_text, parsed_session_id, parsed_model, _tokens = parsed
             session_id = session_id or parsed_session_id
             model = model or parsed_model
             if final_text:
@@ -100,7 +103,7 @@ class OpenCodeBackend:
 
         return final_response.strip(), session_id, model
 
-    def _parse_event_line(self, line: str) -> tuple[str | None, str | None, str | None, str | None] | None:
+    def _parse_event_line(self, line: str) -> tuple[str | None, str | None, str | None, str | None, TokenUsage] | None:
         line = line.strip()
         if not line:
             return None
@@ -111,6 +114,7 @@ class OpenCodeBackend:
 
         session_id = self._find_value(event, {"sessionID", "sessionId", "session_id"})
         model = self._find_value(event, {"model"})
+        tokens = self._event_tokens(event)
         event_type = str(event.get("type", "")).lower()
         part = event.get("part") if isinstance(event.get("part"), dict) else {}
         part_type = str(part.get("type", "")).lower()
@@ -121,10 +125,10 @@ class OpenCodeBackend:
         text = self._event_text(event)
         if text:
             is_final = self._is_final_text(event, part)
-            return text, text if is_final else None, session_id, model
+            return text, text if is_final else None, session_id, model, tokens
 
         status = self._event_status(event, part)
-        return status, None, session_id, model
+        return status, None, session_id, model, tokens
 
     def _extract_final_text(self, event: dict) -> str | None:
         event_type = str(event.get("type", "")).lower()
@@ -180,6 +184,37 @@ class OpenCodeBackend:
             if isinstance(tool, str) and tool:
                 return f"[{tool}]"
         return None
+
+    def _event_tokens(self, event: dict) -> TokenUsage:
+        part = event.get("part")
+        tokens = part.get("tokens") if isinstance(part, dict) else event.get("tokens")
+        if not isinstance(tokens, dict):
+            return TokenUsage()
+
+        cache = tokens.get("cache") if isinstance(tokens.get("cache"), dict) else {}
+        input_tokens = self._int_value(tokens.get("input"))
+        return TokenUsage(
+            context=input_tokens or None,
+            total=self._int_value(tokens.get("total")),
+            input=input_tokens,
+            output=self._int_value(tokens.get("output")),
+            reasoning=self._int_value(tokens.get("reasoning")),
+            cache_read=self._int_value(cache.get("read")),
+            cache_write=self._int_value(cache.get("write")),
+        )
+
+    def _add_tokens(self, current: TokenUsage, addition: TokenUsage) -> None:
+        if addition.context is not None:
+            current.context = addition.context
+        current.total += addition.total
+        current.input += addition.input
+        current.output += addition.output
+        current.reasoning += addition.reasoning
+        current.cache_read += addition.cache_read
+        current.cache_write += addition.cache_write
+
+    def _int_value(self, value: object) -> int:
+        return value if isinstance(value, int) else 0
 
     def _find_value(self, value: object, keys: set[str]) -> str | None:
         if isinstance(value, dict):

@@ -20,6 +20,7 @@ def build_agent_commit_message(
     backend_session_id: str | None,
     agit_session_id: str,
     model: str | None,
+    token_usage: dict[str, int | None] | None = None,
     created_at: str | None = None,
 ) -> str:
     subject_prompt = _subject_text(latest_prompt)
@@ -38,6 +39,13 @@ def build_agent_commit_message(
             f"model: {model or 'unknown'}",
             f"agit_session_id: {agit_session_id}",
             f"backend_session_id: {backend_session_id or 'unknown'}",
+            f"context_tokens: {_token_value(token_usage, 'context')}",
+            f"tokens_since_last_commit_total: {_token_value(token_usage, 'total')}",
+            f"tokens_since_last_commit_input: {_token_value(token_usage, 'input')}",
+            f"tokens_since_last_commit_output: {_token_value(token_usage, 'output')}",
+            f"tokens_since_last_commit_reasoning: {_token_value(token_usage, 'reasoning')}",
+            f"tokens_since_last_commit_cache_read: {_token_value(token_usage, 'cache_read')}",
+            f"tokens_since_last_commit_cache_write: {_token_value(token_usage, 'cache_write')}",
             f"agit_version: {__version__}",
             f"created_at: {created_at or utc_now()}",
         ]
@@ -71,3 +79,10 @@ def build_user_commit_message(
 def _subject_text(text: str) -> str:
     one_line = " ".join(text.strip().split()) or DEFAULT_USER_MESSAGE
     return shorten(one_line, width=120, placeholder="...")
+
+
+def _token_value(token_usage: dict[str, int | None] | None, key: str) -> int | str:
+    if not token_usage:
+        return "unknown"
+    value = token_usage.get(key)
+    return value if value is not None else "unknown"

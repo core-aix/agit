@@ -85,11 +85,13 @@ class AgitShell:
             self.state.model = result.model
         if result.exit_code != 0:
             self.state.append_trace("agent", result.final_response or f"Backend exited with code {result.exit_code}")
+            self.state.add_token_usage(result.tokens)
             if self.verbose:
                 print(f"Backend exited with code {result.exit_code}; no automatic agent commit was made.")
             return
 
         self.state.append_trace("agent", result.final_response)
+        self.state.add_token_usage(result.tokens)
         self.repo.add_tracked()
         self._review_untracked(include_declined=False)
         if self.repo.has_staged_changes():
@@ -100,6 +102,7 @@ class AgitShell:
                 backend_session_id=self.state.backend_session_id,
                 agit_session_id=self.state.session_id,
                 model=self.state.model,
+                token_usage=self.state.pending_token_usage(),
             )
             self.repo.commit(message)
             self.state.clear_trace()
