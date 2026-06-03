@@ -5,7 +5,7 @@ aGiT stands for agent + git. It is a Python library and interactive CLI that com
 ## Goals
 
 - Provide a common interactive interface for coding-agent backends and Git commit automation.
-- Start with OpenCode as the first backend.
+- Support OpenCode and Claude (Claude Code) as interchangeable backends; every aGiT feature works the same regardless of the selected backend.
 - Keep the user experience similar to the selected backend CLI, while adding aGiT commands for agent switching, user commits, staging, status, and configuration.
 - Make agentic code changes traceable by automatically committing code changes made after agent prompts.
 - Support running aGiT from any folder against a target working repository.
@@ -41,7 +41,7 @@ aGiT stands for agent + git. It is a Python library and interactive CLI that com
 
 - Store state in `.agit/state.json` in the target repository.
 - Ignore `.agit/` by default.
-- State includes the aGiT session ID, selected backend, selected model, backend session ID, declined untracked files, and pending interaction trace.
+- State includes the aGiT session ID, selected backend, selected model, backend session ID, per-backend session IDs, declined untracked files, and pending interaction trace.
 - Optional repository-local config lives in `.agit/config.json`; `trace_turn_limit` defaults to `5` and controls the maximum recent user turns included in an agent commit body.
 
 ## MVP Interface
@@ -59,12 +59,12 @@ aGiT stands for agent + git. It is a Python library and interactive CLI that com
 - Proxy mode renders the backend screen itself, so it must reproduce each cell's colors and attributes (bold/italic/underline/reverse) exactly as the backend emitted them.
 - Proxy mode must re-emit colors in the same encoding/depth the backend used, chosen from the shared terminal color support (truecolor stays 24-bit; 256-color stays a palette index so the host terminal's own palette renders it; named ANSI stays named). Upconverting 256-color output to truecolor breaks terminals without truecolor support (e.g. Apple Terminal) and shifts colors on terminals with customized palettes.
 - Proxy mode must answer the terminal capability queries the backend makes (foreground/background via OSC 10/11, palette via OSC 4, cursor position, device attributes) using the host terminal's real responses, so the backend detects the same theme it would in a native session. Without this the backend cannot match the host terminal's light/dark theme and colors render wrong.
-- Proxy mode commands after `Ctrl-G`: `user-commit`, `stage`, `unstaged`, `status`, `agent-backend opencode`, and `exit`.
+- Proxy mode commands after `Ctrl-G`: `user-commit`, `stage`, `unstaged`, `status`, `agent-backend`, and `exit`.
 - `:user-commit` creates a user commit.
 - `:stage` reviews and optionally stages untracked files, including previously declined files.
 - `:unstaged` shows intentionally unstaged files.
 - `:status` shows Git status.
-- `:agent-backend opencode` selects OpenCode.
+- `:agent-backend <opencode|claude>` selects the agent backend; with no argument it shows a picker. Switching relaunches the backend TUI, restores that backend's previous session for the repo if known, and updates the saved global default.
 - `:exit` exits.
 
 ## OpenCode Backend
@@ -73,3 +73,18 @@ aGiT stands for agent + git. It is a Python library and interactive CLI that com
 - Proxy mode uses the native OpenCode TUI and recovers metadata through `opencode session list --format json` and `opencode export`.
 - Parse the final response, backend session ID, and model when available.
 - Preserve only the final response in commit messages.
+
+## Claude Backend
+
+- Use the Claude Code CLI: proxy mode launches the native `claude` TUI; JSON mode uses `claude -p <prompt> --output-format json`.
+- Proxy mode starts a fresh session with an explicit `claude --session-id <uuid>` so aGiT knows which transcript to read, and continues an existing session with `claude --resume <id>`.
+- Recover metadata by reading the session transcript JSONL under `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl` (override the base directory with `CLAUDE_CONFIG_DIR`); the project directory name is the absolute working directory with every non-alphanumeric character replaced by a dash.
+- Parse turns into user prompts and final assistant text responses; exclude thinking blocks, tool calls, tool results, sidechain (subagent) messages, and slash-command artifacts.
+- Map Claude token usage (input/output/cache-read/cache-creation) onto the shared token model; reasoning/thinking tokens are not reported separately.
+
+## Backend Selection and Global Config
+
+- The selected backend is stored per repository in `.agit/state.json`.
+- A user-wide config at `~/.agit/config.json` (override the directory with `AGIT_CONFIG_DIR`) stores `default_backend`, used when a repository has no backend recorded yet.
+- `agit --backend <opencode|claude>` selects the backend for a run and saves it as the new global default.
+- Switching backends saves the current backend's session id and restores the target backend's last session id for the repository, so each backend keeps its own conversation.

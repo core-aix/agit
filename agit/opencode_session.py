@@ -5,28 +5,21 @@ import os
 import pty
 import subprocess
 import time
-from dataclasses import dataclass
 from pathlib import Path
 
 from agit.backends.base import TokenUsage
+from agit.session import ExportedSession, SessionTurn, turns_after
 
-
-@dataclass
-class SessionTurn:
-    user_message_id: str
-    assistant_message_id: str
-    user_prompt: str
-    final_response: str
-    tokens: TokenUsage
-    model: str | None
-
-
-@dataclass
-class ExportedSession:
-    session_id: str
-    model: str | None
-    updated: int | None
-    turns: list[SessionTurn]
+__all__ = [
+    "ExportedSession",
+    "SessionTurn",
+    "turns_after",
+    "latest_session_id",
+    "session_belongs_to_repo",
+    "export_session",
+    "parse_exported_session",
+    "looks_like_event_blob",
+]
 
 
 def latest_session_id(repo: Path) -> str | None:
@@ -195,15 +188,6 @@ def _build_turn(user_message: dict, assistants: list[dict], session_model: str |
     )
 
 
-def turns_after(session: ExportedSession, last_message_id: str | None) -> list[SessionTurn]:
-    if not last_message_id:
-        return session.turns
-    for index, turn in enumerate(session.turns):
-        if turn.assistant_message_id == last_message_id or turn.user_message_id == last_message_id:
-            return session.turns[index + 1 :]
-    return session.turns
-
-
 def _extract_json_object(output: str) -> str | None:
     start = output.find("{")
     end = output.rfind("}")
@@ -240,7 +224,7 @@ def _final_response(parts: object, *, finish: object = None) -> str:
     return "".join(texts).strip()
 
 
-def _looks_like_event_blob(text: str) -> bool:
+def looks_like_event_blob(text: str) -> bool:
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if len(lines) < 2:
         return False
@@ -249,6 +233,9 @@ def _looks_like_event_blob(text: str) -> bool:
         if line.startswith("{") and '"type"' in line and ('"sessionID"' in line or '"part"' in line):
             event_lines += 1
     return event_lines >= min(len(lines), 2)
+
+
+_looks_like_event_blob = looks_like_event_blob
 
 
 def _final_text_from_event_blob(text: str) -> str:

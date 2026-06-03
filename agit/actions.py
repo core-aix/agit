@@ -53,7 +53,7 @@ class AgitActions:
         if not self.repo.has_staged_changes():
             return False
 
-        latest_prompt = next((turn.user_prompt for turn in reversed(turns) if turn.user_prompt), "OpenCode changes")
+        latest_prompt = next((turn.user_prompt for turn in reversed(turns) if turn.user_prompt), f"{backend} changes")
         message = build_agent_commit_message(
             latest_prompt=latest_prompt,
             trace=self.state.pending_trace(),

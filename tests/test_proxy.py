@@ -4,6 +4,7 @@ import time
 
 from agit.backends.base import TokenUsage
 from agit.opencode_session import SessionTurn
+from agit.backends.proxy_agents import make_proxy_agent
 from agit.proxy import ProxyInput, ProxyRunner, _escape_sequence_complete, detect_color_mode
 from agit.state import AgitState
 
@@ -577,6 +578,7 @@ def test_proxy_sanitizes_raw_opencode_event_agent_trace(tmp_path):
     runner = ProxyRunner.__new__(ProxyRunner)
     runner.repo = type("Repo", (), {"repo": tmp_path})()
     runner.state = AgitState(tmp_path)
+    runner.backend = make_proxy_agent("opencode")
     runner.debug_proxy = False
     runner.state.append_trace("user", "hi")
     runner.state.append_trace(

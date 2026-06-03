@@ -23,9 +23,11 @@ except ImportError:  # pragma: no cover - exercised only without optional depend
     Observer = None
 
 from agit.actions import AgitActions
+from agit.backends.proxy_agents import available_backends, make_proxy_agent
 from agit.commit_message import build_agent_commit_message, build_user_commit_message
 from agit.git import GitRepo
-from agit.opencode_session import export_session, latest_session_id, session_belongs_to_repo, turns_after
+from agit.global_config import GlobalConfig
+from agit.session import turns_after
 from agit.state import AgitState
 
 
@@ -215,9 +217,17 @@ class ProxyRunner:
     POLL_SECONDS = 2.0
     PARSE_COOLDOWN_SECONDS = 10.0
 
-    def __init__(self, repo: GitRepo, *, verbose: bool = False) -> None:
+    def __init__(self, repo: GitRepo, *, verbose: bool = False, backend: str | None = None) -> None:
         self.repo = repo
-        self.state = AgitState(repo.repo)
+        self.global_config = GlobalConfig()
+        self.state = AgitState(repo.repo, default_backend=self.global_config.default_backend)
+        if backend and backend != self.state.backend:
+            self.state.remember_backend_session()
+            self.state.backend = backend
+            self.global_config.default_backend = backend
+            self.state.backend_session_id = self.state.stored_backend_session(backend)
+            self.state.last_backend_message_id = None
+        self.backend = make_proxy_agent(self.state.backend)
         self.actions = AgitActions(repo, self.state, verbose=verbose)
         self.verbose = verbose
         self.input = ProxyInput()
@@ -270,7 +280,7 @@ class ProxyRunner:
             raise RuntimeError("Proxy mode requires an interactive terminal. Use --mode json for non-TTY use.")
         self.state.save()
         if self.actions.has_pre_agent_user_changes():
-            print("User changes detected before OpenCode starts.")
+            print("User changes detected before the agent starts.")
             self.actions.create_user_commit()
         self._sanitize_state_trace()
         self._initialize_session_baseline()
@@ -307,10 +317,14 @@ class ProxyRunner:
                     pass
 
     def _spawn(self) -> None:
-        command = ["opencode"]
-        if self._should_continue_session():
-            command.extend(["--session", self.state.backend_session_id])
-        command.append(str(self.repo.repo))
+        resume = self._should_continue_session()
+        if resume:
+            session_id = self.state.backend_session_id
+        else:
+            session_id = self.backend.new_session_id()
+            if session_id:
+                self.state.backend_session_id = session_id
+        command = self.backend.spawn_command(self.repo.repo, session_id=session_id, resume=resume)
         pid, fd = pty.fork()
         if pid == 0:
             os.chdir(self.repo.repo)
@@ -324,7 +338,46 @@ class ProxyRunner:
             return False
         if self.state.backend_session_matches_repo():
             return True
-        return session_belongs_to_repo(self.repo.repo, session_id)
+        return self.backend.session_belongs_to_repo(self.repo.repo, session_id)
+
+    def _switch_backend(self, name: str) -> None:
+        # Remember the current backend's session, tear down its TUI, then bring
+        # up the newly selected backend (restoring its own session if known).
+        self.state.remember_backend_session()
+        self._cleanup_child()
+        if self.master_fd is not None:
+            try:
+                os.close(self.master_fd)
+            except OSError:
+                pass
+            self.master_fd = None
+        self.child_pid = None
+
+        self.global_config.default_backend = name
+        self.state.backend = name
+        self.backend = make_proxy_agent(name)
+        self.state.backend_session_id = self.state.stored_backend_session(name)
+        self.state.last_backend_message_id = None
+        self.state.clear_trace()
+
+        self.agent_in_flight = False
+        self.agent_parse_thread = None
+        self.agent_parse_result = None
+        self.agent_parse_active = False
+        self.pending_forwarded = None
+        self.pending_prompt_text = ""
+        self.passthrough_prompt.clear()
+        self.last_status = ""
+        self.parse_pending = False
+        self.status_check_pending = False
+
+        self._sanitize_state_trace()
+        self._initialize_session_baseline()
+        self._init_screen()
+        self._spawn()
+        self._resize_child()
+        self._set_message(f"Backend set to {name}")
+        self._render()
 
     def _start_file_watcher(self) -> None:
         if Observer is None:
@@ -418,31 +471,21 @@ class ProxyRunner:
         for item in self.state.pending_trace():
             role = item.get("role")
             content = item.get("content")
-            if role == "agent" and isinstance(content, str) and self._looks_like_opencode_event_blob(content):
+            if role == "agent" and isinstance(content, str) and self.backend.is_event_blob(content):
                 changed = True
                 continue
             clean.append(item)
         if changed:
             self.state.data["pending_trace"] = clean
             self.state.save()
-            self._debug("removed raw opencode event blob from pending trace")
-
-    def _looks_like_opencode_event_blob(self, content: str) -> bool:
-        lines = [line.strip() for line in content.splitlines() if line.strip()]
-        if not lines:
-            return False
-        event_lines = 0
-        for line in lines[:5]:
-            if line.startswith("{") and '"type"' in line and ('"sessionID"' in line or '"part"' in line):
-                event_lines += 1
-        return event_lines >= min(len(lines), 2)
+            self._debug("removed raw backend event blob from pending trace")
 
     def _initialize_session_baseline(self) -> None:
         if not self._should_continue_session():
             self.state.backend_session_id = None
             self.state.last_backend_message_id = None
             return
-        session = export_session(self.repo.repo, self.state.backend_session_id)
+        session = self.backend.export_session(self.repo.repo, self.state.backend_session_id)
         if not session:
             self.state.last_backend_message_id = None
             return
@@ -709,7 +752,7 @@ class ProxyRunner:
 
     def _status_line(self) -> str:
         declined = len([path for path in self.state.declined_untracked() if (self.repo.repo / path).exists()])
-        left = " aGiT Ctrl-G commands | OpenCode passthrough "
+        left = f" aGiT Ctrl-G commands | {self.backend.name} passthrough "
         right = f" unstaged:{declined} " if declined else ""
         padding = " " * max(self.cols - len(left) - len(right), 0)
         return f"\x1b[7m{left}{padding}{right}\x1b[0m"
@@ -749,16 +792,19 @@ class ProxyRunner:
             else:
                 self._set_message("No intentionally unstaged files.")
         elif name == "agent-backend":
-            selected = arg.strip() or self._select_popup("Backend Agent", ["opencode"])
+            backends = available_backends()
+            selected = arg.strip() or self._select_popup("Backend Agent", backends)
             if selected is None:
                 self._set_message("Cancelled.")
                 self._render()
                 return
-            if selected == "opencode":
-                self.state.backend = "opencode"
-                self._set_message("Backend set to opencode")
+            if selected not in backends:
+                self._set_message(f"Unknown backend: {selected}. Available: {', '.join(backends)}")
+            elif selected == self.state.backend:
+                self._set_message(f"Backend already set to {selected}")
             else:
-                self._set_message("Only the opencode backend is available.")
+                self._switch_backend(selected)
+                return
         elif name == "":
             self._set_message("Select an aGiT command.")
         else:
@@ -905,7 +951,7 @@ class ProxyRunner:
         if not self.repo.has_staged_changes():
             return False
 
-        latest_prompt = " / ".join(subject_prompts) or "OpenCode changes"
+        latest_prompt = " / ".join(subject_prompts) or f"{backend} changes"
         self.repo.commit(
             build_agent_commit_message(
                 latest_prompt=latest_prompt,
@@ -1070,8 +1116,8 @@ class ProxyRunner:
         def worker() -> None:
             try:
                 self._debug("agent parse worker started")
-                session_id = latest_session_id(self.repo.repo) or self.state.backend_session_id
-                session = export_session(self.repo.repo, session_id) if session_id else None
+                session_id = self.backend.latest_session_id(self.repo.repo) or self.state.backend_session_id
+                session = self.backend.export_session(self.repo.repo, session_id) if session_id else None
                 turn_count = len(session.turns) if session else 0
                 final_count = len([turn for turn in session.turns if turn.final_response]) if session else 0
                 self._debug(f"agent parse worker finished session_id={session_id} turns={turn_count} finals={final_count}")
@@ -1107,7 +1153,7 @@ class ProxyRunner:
             return False
         committed = self._create_agent_commit_from_turns_popup(
             turns=turns,
-            backend="opencode",
+            backend=self.backend.name,
             backend_session_id=self.state.backend_session_id,
             model=session.model or self.state.model,
             quiet=quiet,
@@ -1157,11 +1203,11 @@ class ProxyRunner:
             return
         if self.agent_parse_thread and self.agent_parse_thread.is_alive():
             if self.verbose:
-                self._render_status("git changes found; parsing OpenCode session")
+                self._render_status(f"git changes found; parsing {self.backend.name} session")
             return
         if now - self.last_status_change < self.FILE_STABLE_SECONDS or now - self.last_child_output < self.CHILD_IDLE_SECONDS:
             if self.verbose:
-                self._render_status("git changes found; waiting for OpenCode to become idle")
+                self._render_status(f"git changes found; waiting for {self.backend.name} to become idle")
             return
         finished = self._finish_agent_parse_if_ready(quiet=not self.verbose)
         if finished is True:

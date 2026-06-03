@@ -7,10 +7,11 @@ from typing import Any
 
 
 class AgitState:
-    def __init__(self, repo: Path) -> None:
+    def __init__(self, repo: Path, *, default_backend: str = "opencode") -> None:
         self.repo = repo
         self.path = repo / ".agit" / "state.json"
         self.config_path = repo / ".agit" / "config.json"
+        self._default_backend = default_backend
         self.data = self._load()
         self.config = self._load_config()
 
@@ -26,10 +27,11 @@ class AgitState:
     def _default(self) -> dict[str, Any]:
         return {
             "agit_session_id": f"agit-{uuid.uuid4()}",
-            "backend": "opencode",
+            "backend": self._default_backend,
             "model": None,
             "backend_session_id": None,
             "backend_session_repo": None,
+            "backend_session_ids": {},
             "last_backend_message_id": None,
             "declined_untracked_files": [],
             "pending_trace": [],
@@ -111,6 +113,21 @@ class AgitState:
 
     def backend_session_matches_repo(self) -> bool:
         return self.data.get("backend_session_repo") == str(self.repo)
+
+    def remember_backend_session(self) -> None:
+        """Record the current backend's session id so it can be restored when
+        the user switches back to this backend."""
+        sessions = dict(self.data.get("backend_session_ids") or {})
+        if self.backend_session_id:
+            sessions[self.backend] = self.backend_session_id
+        else:
+            sessions.pop(self.backend, None)
+        self.data["backend_session_ids"] = sessions
+        self.save()
+
+    def stored_backend_session(self, backend: str) -> str | None:
+        value = (self.data.get("backend_session_ids") or {}).get(backend)
+        return str(value) if value else None
 
     @property
     def last_backend_message_id(self) -> str | None:

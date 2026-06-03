@@ -1,19 +1,33 @@
 from __future__ import annotations
 
 from agit.actions import AgitActions
+from agit.backends.claude import ClaudeBackend
 from agit.backends.opencode import OpenCodeBackend
 from agit.git import GitRepo
+from agit.global_config import GlobalConfig
 from agit.state import AgitState
 from agit.ui import AgitPrompt, PromptState
 
 
 AGIT_PREFIX = ":"
 
+BACKENDS = {
+    OpenCodeBackend.name: OpenCodeBackend,
+    ClaudeBackend.name: ClaudeBackend,
+}
+
 
 class AgitShell:
-    def __init__(self, repo: GitRepo, *, verbose: bool = False) -> None:
+    def __init__(self, repo: GitRepo, *, verbose: bool = False, backend: str | None = None) -> None:
         self.repo = repo
-        self.state = AgitState(repo.repo)
+        self.global_config = GlobalConfig()
+        self.state = AgitState(repo.repo, default_backend=self.global_config.default_backend)
+        if backend and backend in BACKENDS and backend != self.state.backend:
+            self.state.remember_backend_session()
+            self.state.backend = backend
+            self.global_config.default_backend = backend
+            self.state.backend_session_id = self.state.stored_backend_session(backend)
+            self.state.last_backend_message_id = None
         self.verbose = verbose
         self.prompt = AgitPrompt(self._prompt_state)
         self.actions = AgitActions(repo, self.state, verbose=verbose)
@@ -23,7 +37,8 @@ class AgitShell:
         if self.verbose:
             print(f"aGiT session {self.state.session_id}")
             print(f"Repository: {self.repo.repo}")
-            print("Type :help for aGiT commands. OpenCode / commands are passed through.")
+            print(f"Backend: {self.state.backend}")
+            print("Type :help for aGiT commands. Backend / commands are passed through.")
         while True:
             try:
                 text = self.prompt.prompt().strip()
@@ -48,11 +63,15 @@ class AgitShell:
             print(self.repo.status_short() or "Working tree clean")
         elif command == ":agent-backend":
             agent = arg.strip()
-            if agent != "opencode":
-                print("Only the opencode backend is available in the MVP.")
+            if agent not in BACKENDS:
+                print(f"Unknown backend: {agent or '(none)'}. Available: {', '.join(BACKENDS)}")
             else:
+                self.state.remember_backend_session()
                 self.state.backend = agent
-                print("Backend set to opencode")
+                self.global_config.default_backend = agent
+                self.state.backend_session_id = self.state.stored_backend_session(agent)
+                self.state.last_backend_message_id = None
+                print(f"Backend set to {agent}")
         elif command == ":user-commit":
             self.actions.create_user_commit()
         elif command == ":unstaged":
@@ -113,10 +132,11 @@ class AgitShell:
             if self.verbose:
                 print("No code changes detected; interaction trace remains pending.")
 
-    def _backend(self) -> OpenCodeBackend:
-        if self.state.backend != "opencode":
+    def _backend(self):
+        backend_class = BACKENDS.get(self.state.backend)
+        if backend_class is None:
             raise RuntimeError(f"Unsupported backend: {self.state.backend}")
-        return OpenCodeBackend(self.repo.repo, verbose=self.verbose)
+        return backend_class(self.repo.repo, verbose=self.verbose)
 
     def _print_help(self) -> None:
         print("Commands:")
@@ -125,9 +145,9 @@ class AgitShell:
         print("  :user-commit       create a user commit")
         print("  :stage             review and stage untracked files")
         print("  :unstaged          show intentionally unstaged files")
-        print("  :agent-backend opencode select the OpenCode backend")
+        print(f"  :agent-backend <{'|'.join(BACKENDS)}> select the agent backend")
         print("  :exit              exit")
-        print("OpenCode / commands are not reserved by aGiT and are sent to the backend.")
+        print("Backend / commands are not reserved by aGiT and are sent to the backend.")
 
     def _prompt_state(self) -> PromptState:
         existing = [path for path in self.state.declined_untracked() if (self.repo.repo / path).exists()]
