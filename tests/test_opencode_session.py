@@ -97,6 +97,27 @@ def test_parse_exported_session_counts_reasoning_part_tokens():
     assert session.turns[0].tokens.cache_read == 4
 
 
+def test_parse_exported_session_extracts_final_text_from_event_blob():
+    event_blob = "\n".join(
+        [
+            '{"type":"step_start","timestamp":1,"sessionID":"ses-1","part":{"type":"step-start"}}',
+            '{"type":"text","timestamp":2,"sessionID":"ses-1","part":{"type":"text","text":"Hi.","metadata":{"openai":{"phase":"final_answer"}}}}',
+            '{"type":"step_finish","timestamp":3,"sessionID":"ses-1","part":{"type":"step-finish","tokens":{"total":9529,"input":9523,"output":6,"reasoning":0}}}',
+        ]
+    )
+    session = parse_exported_session(
+        {
+            "info": {"id": "ses-1"},
+            "messages": [
+                {"info": {"role": "user", "id": "u1"}, "parts": [{"type": "text", "text": "hi"}]},
+                {"info": {"role": "assistant", "id": "a1", "finish": "stop"}, "parts": [{"type": "text", "text": event_blob}]},
+            ],
+        }
+    )
+
+    assert session.turns[0].final_response == "Hi."
+
+
 def test_turns_after_last_message_id():
     session = parse_exported_session(
         {

@@ -343,10 +343,12 @@ def test_proxy_parse_starts_only_after_cooldown_between_file_events():
     runner.agent_in_flight = False
     runner.agent_parse_thread = None
     runner.agent_parse_result = None
+    runner.agent_parse_active = False
     runner.last_child_output = 0.0
     runner.last_status = ""
     runner.last_status_change = 0.0
     runner.last_parse_start = 0.0
+    runner.last_parse_finish = 0.0
     runner.last_parse_attempt_status = ""
     runner.verbose = False
     runner.CHILD_IDLE_SECONDS = 0.0
@@ -363,6 +365,7 @@ def test_proxy_parse_starts_only_after_cooldown_between_file_events():
 
     def start_parse():
         runner.last_parse_start = time.monotonic()
+        runner.last_parse_finish = time.monotonic()
         starts.append(True)
         return True
 
@@ -374,6 +377,74 @@ def test_proxy_parse_starts_only_after_cooldown_between_file_events():
     runner._maybe_agent_commit()
 
     assert len(starts) == 1
+
+
+def test_proxy_parse_cooldown_starts_after_parse_finish():
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.file_change_event = threading.Event()
+    runner.status_check_pending = False
+    runner.parse_pending = False
+    runner.last_poll = 0.0
+    runner.agent_in_flight = False
+    runner.agent_parse_thread = None
+    runner.agent_parse_result = None
+    runner.agent_parse_active = False
+    runner.last_child_output = 0.0
+    runner.last_status = ""
+    runner.last_status_change = 0.0
+    runner.last_parse_start = 0.0
+    runner.last_parse_finish = time.monotonic()
+    runner.last_parse_attempt_status = ""
+    runner.verbose = False
+    runner.CHILD_IDLE_SECONDS = 0.0
+    runner.FILE_STABLE_SECONDS = 0.0
+    runner.PARSE_COOLDOWN_SECONDS = 60.0
+    runner._prune_declined_untracked = lambda: None
+
+    class Repo:
+        def status_short(self):
+            return " M file.txt\n"
+
+    starts = []
+    runner.repo = Repo()
+    runner._start_agent_parse = lambda: starts.append(True) or True
+
+    runner.file_change_event.set()
+    runner._maybe_agent_commit()
+
+    assert starts == []
+
+
+def test_proxy_start_agent_parse_rejects_active_parse(tmp_path):
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.repo = type("Repo", (), {"repo": tmp_path})()
+    runner.state = AgitState(tmp_path)
+    runner.agent_parse_thread = None
+    runner.agent_parse_result = None
+    runner.agent_parse_active = True
+
+    assert runner._start_agent_parse() is False
+
+
+def test_proxy_sanitizes_raw_opencode_event_agent_trace(tmp_path):
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.repo = type("Repo", (), {"repo": tmp_path})()
+    runner.state = AgitState(tmp_path)
+    runner.debug_proxy = False
+    runner.state.append_trace("user", "hi")
+    runner.state.append_trace(
+        "agent",
+        "\n".join(
+            [
+                '{"type":"step_start","sessionID":"ses-1","part":{"type":"step-start"}}',
+                '{"type":"text","sessionID":"ses-1","part":{"type":"text","text":"Hi."}}',
+            ]
+        ),
+    )
+
+    runner._sanitize_state_trace()
+
+    assert runner.state.pending_trace() == [{"role": "user", "content": "hi"}]
 
 
 def test_proxy_pending_prompt_forwards_after_agent_parse_commit(tmp_path):

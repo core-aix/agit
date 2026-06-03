@@ -175,18 +175,23 @@ class ProxyRunner:
         self.screen: pyte.Screen | None = None
         self.stream: pyte.ByteStream | None = None
         self.last_child_output = 0.0
+        self.last_child_output_sample = b""
         self.last_status = ""
         self.last_status_change = 0.0
         self.message: str | None = None
         self.message_until = 0.0
         self.agent_parse_thread: threading.Thread | None = None
         self.agent_parse_result = None
+        self.agent_parse_active = False
+        self.agent_parse_lock = threading.Lock()
         self.agent_in_flight = False
         self.pre_agent_reconciled_status = ""
         self.last_parse_attempt_status = ""
+        self.last_parse_finish = 0.0
         self.passthrough_prompt = bytearray()
         self.pending_forwarded: list[bytes] | None = None
         self.pending_prompt_text = ""
+        self.debug_proxy = verbose or os.environ.get("AGIT_DEBUG_PROXY", "").strip().lower() in {"1", "true", "yes"}
 
     def run(self) -> int:
         if not sys.stdin.isatty() or not sys.stdout.isatty():
@@ -195,6 +200,7 @@ class ProxyRunner:
         if self.actions.has_pre_agent_user_changes():
             print("User changes detected before OpenCode starts.")
             self.actions.create_user_commit()
+        self._sanitize_state_trace()
         self._initialize_session_baseline()
         self._init_screen()
         self._spawn()
@@ -275,6 +281,7 @@ class ProxyRunner:
                 if not output:
                     break
                 self.last_child_output = time.monotonic()
+                self.last_child_output_sample = (self.last_child_output_sample + output)[-4096:]
                 self._sync_terminal_modes(output)
                 self._feed_child_output(output)
                 self._render()
@@ -314,8 +321,47 @@ class ProxyRunner:
             if self.child_pid is not None:
                 done, status = os.waitpid(self.child_pid, os.WNOHANG)
                 if done:
-                    return os.waitstatus_to_exitcode(status) if hasattr(os, "waitstatus_to_exitcode") else 0
+                    exit_code = os.waitstatus_to_exitcode(status) if hasattr(os, "waitstatus_to_exitcode") else 0
+                    sample = self.last_child_output_sample[-512:].decode(errors="replace").replace("\x1b", "\\x1b")
+                    self._debug(f"child exited pid={self.child_pid} status={status} exit_code={exit_code} last_output={sample!r}")
+                    return exit_code
         return 0
+
+    def _debug(self, message: str) -> None:
+        if not getattr(self, "debug_proxy", False):
+            return
+        try:
+            path = self.repo.repo / ".agit" / "proxy-debug.log"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} {message}\n")
+        except OSError:
+            pass
+
+    def _sanitize_state_trace(self) -> None:
+        changed = False
+        clean = []
+        for item in self.state.pending_trace():
+            role = item.get("role")
+            content = item.get("content")
+            if role == "agent" and isinstance(content, str) and self._looks_like_opencode_event_blob(content):
+                changed = True
+                continue
+            clean.append(item)
+        if changed:
+            self.state.data["pending_trace"] = clean
+            self.state.save()
+            self._debug("removed raw opencode event blob from pending trace")
+
+    def _looks_like_opencode_event_blob(self, content: str) -> bool:
+        lines = [line.strip() for line in content.splitlines() if line.strip()]
+        if not lines:
+            return False
+        event_lines = 0
+        for line in lines[:5]:
+            if line.startswith("{") and '"type"' in line and ('"sessionID"' in line or '"part"' in line):
+                event_lines += 1
+        return event_lines >= min(len(lines), 2)
 
     def _initialize_session_baseline(self) -> None:
         if not self._should_continue_session():
@@ -848,19 +894,37 @@ class ProxyRunner:
             self.state.append_trace("user", prompt_text)
 
     def _start_agent_parse(self) -> bool:
-        if self.agent_parse_thread and self.agent_parse_thread.is_alive():
-            return False
-        if self.agent_parse_result is not None:
-            return False
+        parse_lock = getattr(self, "agent_parse_lock", None)
+        if parse_lock is None:
+            parse_lock = threading.Lock()
+            self.agent_parse_lock = parse_lock
+        with parse_lock:
+            if getattr(self, "agent_parse_active", False):
+                return False
+            if self.agent_parse_thread and self.agent_parse_thread.is_alive():
+                return False
+            if self.agent_parse_result is not None:
+                return False
+            self.agent_parse_active = True
 
         last_message_id = self.state.last_backend_message_id
 
         def worker() -> None:
-            session_id = latest_session_id(self.repo.repo) or self.state.backend_session_id
-            session = export_session(self.repo.repo, session_id) if session_id else None
-            self.agent_parse_result = (session_id, session, last_message_id)
+            try:
+                self._debug("agent parse worker started")
+                session_id = latest_session_id(self.repo.repo) or self.state.backend_session_id
+                session = export_session(self.repo.repo, session_id) if session_id else None
+                turn_count = len(session.turns) if session else 0
+                final_count = len([turn for turn in session.turns if turn.final_response]) if session else 0
+                self._debug(f"agent parse worker finished session_id={session_id} turns={turn_count} finals={final_count}")
+                self.agent_parse_result = (session_id, session, last_message_id)
+            finally:
+                self.last_parse_finish = time.monotonic()
+                with self.agent_parse_lock:
+                    self.agent_parse_active = False
 
         self.last_parse_start = time.monotonic()
+        self._debug(f"agent parse started last_message_id={last_message_id}")
         self.agent_parse_thread = threading.Thread(target=worker, name="agit-opencode-session-parse", daemon=True)
         self.agent_parse_thread.start()
         return True
@@ -873,6 +937,7 @@ class ProxyRunner:
         session_id, session, last_message_id = self.agent_parse_result
         self.agent_parse_result = None
         if not session:
+            self._debug(f"agent parse consumed without session session_id={session_id}")
             return False
         self.state.backend_session_id = session.session_id or session_id
         if session.model:
@@ -880,6 +945,7 @@ class ProxyRunner:
         turns = turns_after(session, last_message_id)
         complete_turns = [turn for turn in turns if turn.final_response]
         if not complete_turns:
+            self._debug(f"agent parse consumed without final response session_id={self.state.backend_session_id} turns={len(turns)}")
             return False
         committed = self._create_agent_commit_from_turns_popup(
             turns=turns,
@@ -892,6 +958,7 @@ class ProxyRunner:
             self.agent_in_flight = False
             self.state.last_backend_message_id = complete_turns[-1].assistant_message_id
             self.last_status = ""
+            self._debug(f"agent commit created session_id={self.state.backend_session_id} assistant_id={self.state.last_backend_message_id}")
         return committed
 
     def _commit_available_agent_turns(self, *, quiet: bool) -> bool:
@@ -951,7 +1018,7 @@ class ProxyRunner:
                 if self.verbose:
                     self._render_status("git changes found; waiting for new file changes")
                 return
-            if now - self.last_parse_start < self.PARSE_COOLDOWN_SECONDS:
+            if now - getattr(self, "last_parse_finish", 0.0) < self.PARSE_COOLDOWN_SECONDS:
                 if self.verbose:
                     self._render_status("git changes found; waiting for parse cooldown")
                 return

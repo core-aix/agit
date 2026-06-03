@@ -4,6 +4,7 @@ import json
 import os
 import pty
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,6 +30,7 @@ class ExportedSession:
 
 
 def latest_session_id(repo: Path) -> str | None:
+    _debug(repo, "opencode session list starting")
     process = subprocess.run(
         ["opencode", "session", "list", "--format", "json", "--max-count", "10"],
         cwd=repo,
@@ -37,6 +39,7 @@ def latest_session_id(repo: Path) -> str | None:
         stderr=subprocess.PIPE,
         check=False,
     )
+    _debug(repo, f"opencode session list finished returncode={process.returncode} stdout_bytes={len(process.stdout)} stderr_bytes={len(process.stderr)}")
     if process.returncode != 0:
         return None
     try:
@@ -53,6 +56,7 @@ def latest_session_id(repo: Path) -> str | None:
 
 
 def session_belongs_to_repo(repo: Path, session_id: str) -> bool:
+    _debug(repo, f"opencode session belongs check starting session_id={session_id}")
     process = subprocess.run(
         ["opencode", "session", "list", "--format", "json", "--max-count", "50"],
         cwd=repo,
@@ -61,6 +65,7 @@ def session_belongs_to_repo(repo: Path, session_id: str) -> bool:
         stderr=subprocess.PIPE,
         check=False,
     )
+    _debug(repo, f"opencode session belongs check finished session_id={session_id} returncode={process.returncode}")
     if process.returncode != 0:
         return False
     try:
@@ -81,7 +86,9 @@ def _same_repo(directory: object, repo: Path) -> bool:
 
 
 def export_session(repo: Path, session_id: str) -> ExportedSession | None:
+    _debug(repo, f"opencode export starting session_id={session_id}")
     output, returncode = _run_export_pty(repo, session_id)
+    _debug(repo, f"opencode export finished session_id={session_id} returncode={returncode} output_bytes={len(output.encode(errors='replace'))}")
     if returncode != 0:
         return None
     json_text = _extract_json_object(output)
@@ -92,6 +99,18 @@ def export_session(repo: Path, session_id: str) -> ExportedSession | None:
     except json.JSONDecodeError:
         return None
     return parse_exported_session(data)
+
+
+def _debug(repo: Path, message: str) -> None:
+    if os.environ.get("AGIT_DEBUG_PROXY", "").strip().lower() not in {"1", "true", "yes"}:
+        return
+    try:
+        path = repo / ".agit" / "proxy-debug.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} {message}\n")
+    except OSError:
+        pass
 
 
 def _run_export_pty(repo: Path, session_id: str) -> tuple[str, int]:
@@ -199,7 +218,10 @@ def _parts_text(parts: object) -> str:
     texts = []
     for part in parts:
         if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str):
-            texts.append(part["text"])
+            text = part["text"]
+            if _looks_like_event_blob(text):
+                continue
+            texts.append(text)
     return "".join(texts).strip()
 
 
@@ -213,8 +235,44 @@ def _final_response(parts: object, *, finish: object = None) -> str:
         metadata = part.get("metadata")
         phase = _find_value(metadata, {"phase"}) if isinstance(metadata, dict) else None
         if phase == "final_answer" or (finish == "stop" and part.get("type") == "text"):
-            texts.append(part["text"])
+            text = part["text"]
+            texts.append(_final_text_from_event_blob(text) if _looks_like_event_blob(text) else text)
     return "".join(texts).strip()
+
+
+def _looks_like_event_blob(text: str) -> bool:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return False
+    event_lines = 0
+    for line in lines[:5]:
+        if line.startswith("{") and '"type"' in line and ('"sessionID"' in line or '"part"' in line):
+            event_lines += 1
+    return event_lines >= min(len(lines), 2)
+
+
+def _final_text_from_event_blob(text: str) -> str:
+    final_parts: list[str] = []
+    fallback_parts: list[str] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        part = event.get("part") if isinstance(event.get("part"), dict) else {}
+        part_text = part.get("text") if isinstance(part.get("text"), str) else event.get("text")
+        if not isinstance(part_text, str) or not part_text.strip():
+            continue
+        metadata = part.get("metadata")
+        phase = _find_value(metadata, {"phase"}) if isinstance(metadata, dict) else None
+        if phase == "final_answer" or str(event.get("type", "")).lower() in {"final", "complete", "done"}:
+            final_parts.append(part_text)
+        elif str(event.get("type", "")).lower() == "text" or str(part.get("type", "")).lower() == "text":
+            fallback_parts.append(part_text)
+    return "".join(final_parts or fallback_parts).strip()
 
 
 def _tokens(info: dict, parts: object) -> TokenUsage:
