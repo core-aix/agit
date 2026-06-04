@@ -722,43 +722,6 @@ def test_sync_idle_worktree_fast_forwards_to_advanced_base(tmp_path):
 # --- _ensure_worktree_alive ---
 
 
-def _recovery_runner(main, name):
-    from agit.backends.proxy_agents import make_proxy_agent
-    from agit.proxy import ProxyRunner
-    from agit.session_runtime import default_session_fields
-
-    wm = WorktreeManager(main)
-    info = wm.create(name, base=main.current_branch())
-    work = GitRepo.discover(info.path)
-    runner = ProxyRunner.__new__(ProxyRunner)
-    for field, value in default_session_fields().items():
-        setattr(runner, field, value)
-    runner.base_repo = main
-    runner.repo = work
-    runner.worktree = info
-    runner.name = name
-    runner._base_branch = main.current_branch()
-    runner.worktree_manager = wm
-    runner.tracking_enabled = True
-    runner.global_config = type("G", (), {"default_backend": "opencode"})()
-    runner.state = AgitState(info.path, default_backend="opencode")
-    runner.state.backend = "opencode"
-    runner.backend = make_proxy_agent("opencode")
-    runner.actions = AgitActions(work, runner.state)
-    runner.verbose = False
-    runner.child_pid = None
-    runner.master_fd = None
-    runner.file_observer = None
-    runner.passthrough_prompt = bytearray()
-    runner.agent_in_flight = False
-    runner.turn = 0
-    runner.sessions = [None]
-    runner.active_index = 0
-    runner.merge_ctx = None
-    runner.tracking_enabled = True
-    return runner, info, work
-
-
 def test_ensure_worktree_alive_none_returns_early():
     from agit.proxy import ProxyRunner
 
@@ -787,6 +750,10 @@ def test_ensure_worktree_alive_path_exists_returns_early(tmp_path):
 
 
 def test_ensure_worktree_alive_recreates_worktree(tmp_path):
+    from agit.backends.proxy_agents import make_proxy_agent
+    from agit.proxy import ProxyRunner
+    from agit.session_runtime import default_session_fields
+
     main = _init_repo(tmp_path)
     wm = WorktreeManager(main)
     info = wm.create("session-1", base=main.current_branch())
@@ -794,10 +761,31 @@ def test_ensure_worktree_alive_recreates_worktree(tmp_path):
     shutil.rmtree(info.path)
     assert not info.path.exists()
 
-    runner, _, _ = _recovery_runner(main, "session-1")
+    runner = ProxyRunner.__new__(ProxyRunner)
+    for field, value in default_session_fields().items():
+        setattr(runner, field, value)
+    runner.base_repo = main
     runner.repo = work
     runner.worktree = info
+    runner.name = "session-1"
+    runner._base_branch = main.current_branch()
     runner.worktree_manager = wm
+    runner.tracking_enabled = True
+    runner.global_config = type("G", (), {"default_backend": "opencode"})()
+    runner.state = AgitState(info.path, default_backend="opencode")
+    runner.backend = make_proxy_agent("opencode")
+    runner.actions = AgitActions(work, runner.state)
+    runner.verbose = False
+    runner.child_pid = None
+    runner.master_fd = None
+    runner.file_observer = None
+    runner.passthrough_prompt = bytearray()
+    runner.agent_in_flight = False
+    runner.turn = 0
+    runner.sessions = [None]
+    runner.active_index = 0
+    runner.merge_ctx = None
+    runner.tracking_enabled = True
 
     messages = []
     runner._set_message = lambda msg, **kw: messages.append(msg)
@@ -817,10 +805,14 @@ def test_ensure_worktree_alive_recreates_worktree(tmp_path):
     assert runner.worktree is not None
     assert runner.worktree.path == info.path
     assert runner.repo.repo == info.path
-    assert any("recreated" in m for m in messages)
+    assert any("recreated" in m for m in messages), f"messages={messages}"
 
 
 def test_ensure_worktree_alive_falls_back_on_open_session_failure(tmp_path):
+    from agit.backends.proxy_agents import make_proxy_agent
+    from agit.proxy import ProxyRunner
+    from agit.session_runtime import default_session_fields
+
     main = _init_repo(tmp_path)
     wm = WorktreeManager(main)
     info = wm.create("session-1", base=main.current_branch())
@@ -828,10 +820,31 @@ def test_ensure_worktree_alive_falls_back_on_open_session_failure(tmp_path):
     shutil.rmtree(info.path)
     assert not info.path.exists()
 
-    runner, _, _ = _recovery_runner(main, "session-1")
+    runner = ProxyRunner.__new__(ProxyRunner)
+    for field, value in default_session_fields().items():
+        setattr(runner, field, value)
+    runner.base_repo = main
     runner.repo = work
     runner.worktree = info
+    runner.name = "session-1"
+    runner._base_branch = main.current_branch()
     runner.worktree_manager = wm
+    runner.tracking_enabled = True
+    runner.global_config = type("G", (), {"default_backend": "opencode"})()
+    runner.state = AgitState(info.path, default_backend="opencode")
+    runner.backend = make_proxy_agent("opencode")
+    runner.actions = AgitActions(work, runner.state)
+    runner.verbose = False
+    runner.child_pid = None
+    runner.master_fd = None
+    runner.file_observer = None
+    runner.passthrough_prompt = bytearray()
+    runner.agent_in_flight = False
+    runner.turn = 0
+    runner.sessions = [None]
+    runner.active_index = 0
+    runner.merge_ctx = None
+    runner.tracking_enabled = True
 
     messages = []
     runner._set_message = lambda msg, **kw: messages.append(msg)
@@ -855,4 +868,4 @@ def test_ensure_worktree_alive_falls_back_on_open_session_failure(tmp_path):
     assert runner.worktree is None
     assert runner.name == "main"
     assert runner.repo is runner.base_repo
-    assert any("base repo" in m for m in messages)
+    assert any("base repo" in m for m in messages), f"messages={messages}"
