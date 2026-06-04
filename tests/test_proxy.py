@@ -424,6 +424,192 @@ def test_proxy_render_row_emits_reverse_video():
     assert runner._render_row(0) == "a\x1b[7mb\x1b[0mc"
 
 
+def test_drain_child_output_reads_all_available():
+    runner = ProxyRunner.__new__(ProxyRunner)
+    read_fd, write_fd = os.pipe()
+    try:
+        runner.master_fd = read_fd
+        os.write(write_fd, b"hello ")
+        os.write(write_fd, b"world")
+        assert runner._drain_child_output() == b"hello world"
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+
+
+def test_drain_child_output_returns_none_on_eof():
+    runner = ProxyRunner.__new__(ProxyRunner)
+    read_fd, write_fd = os.pipe()
+    os.close(write_fd)  # EOF, nothing buffered
+    try:
+        runner.master_fd = read_fd
+        assert runner._drain_child_output() is None
+    finally:
+        os.close(read_fd)
+
+
+def _history_runner():
+    import pyte
+
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.cols, runner.rows = 12, 5  # 4 visible rows
+    runner.child_mouse = False
+    runner.scroll_back = 0
+    runner.screen = pyte.HistoryScreen(12, 4, history=100, ratio=0.5)
+    stream = pyte.ByteStream(runner.screen)
+    for i in range(20):
+        stream.feed(f"line{i:02d}\r\n".encode())
+    runner._render = lambda: None
+    return runner
+
+
+def test_wheel_scrolls_history_and_strips_mouse_when_backend_has_no_mouse():
+    runner = _history_runner()
+    # Wheel-up consumes the event (returns empty) and scrolls back.
+    assert runner._intercept_scroll(b"\x1b[<64;5;5M") == b""
+    assert runner.scroll_back == 3
+    runner._intercept_scroll(b"\x1b[<64;5;5M")
+    assert runner.scroll_back == 6
+    # Wheel-down moves toward the live view.
+    runner._intercept_scroll(b"\x1b[<65;5;5M")
+    assert runner.scroll_back == 3
+
+
+def test_scrolled_view_shows_history_lines():
+    runner = _history_runner()
+    runner.scroll_back = 9
+
+    def text(lines):
+        return ["".join((c.get(x).data if c.get(x) else " ") for x in range(7)).rstrip() for c in lines]
+
+    assert text(runner._visible_lines()) == ["line08", "line09", "line10", "line11"]
+    runner.scroll_back = 0
+    assert text(runner._visible_lines())[-2] == "line19"
+
+
+def test_hold_incomplete_tail_buffers_split_escape_sequence():
+    runner = ProxyRunner.__new__(ProxyRunner)
+    # A mouse report split across reads must be held back, not leaked as bytes.
+    head, tail = runner._hold_incomplete_tail(b"abc\x1b[<35;10;")
+    assert head == b"abc"
+    assert tail == b"\x1b[<35;10;"
+    head2, tail2 = runner._hold_incomplete_tail(tail + b"5M")
+    assert head2 == b"\x1b[<35;10;5M"
+    assert tail2 == b""
+    # A complete buffer leaves no tail.
+    assert runner._hold_incomplete_tail(b"plain text") == (b"plain text", b"")
+
+
+def test_pageup_pagedown_scroll_history():
+    runner = _history_runner()
+    runner._intercept_scroll(b"\x1b[5~")  # PageUp
+    assert runner.scroll_back == max(runner.rows - 2, 1)
+    runner._intercept_scroll(b"\x1b[6~")  # PageDown
+    assert runner.scroll_back == 0
+
+
+def test_mouse_drag_selects_and_copies():
+    runner = _history_runner()
+    import pyte
+
+    runner.screen = pyte.HistoryScreen(20, 4, history=50, ratio=0.5)
+    pyte.ByteStream(runner.screen).feed(b"hello world\r\n")
+    runner.sel_active = False
+    runner.sel_anchor = runner.sel_point = None
+    copied = []
+    runner._copy_to_clipboard = lambda text: copied.append(text)
+    runner._set_message = lambda *a, **k: None
+
+    runner._intercept_scroll(b"\x1b[<0;1;1M")   # press at col 1, row 1
+    runner._intercept_scroll(b"\x1b[<32;5;1M")  # drag to col 5
+    assert runner._selection_ranges() == {0: (0, 4)}
+    runner._intercept_scroll(b"\x1b[<0;5;1m")   # release
+    assert copied == ["hello"]
+    assert runner.sel_active is False
+
+
+def test_mouse_press_release_copies_without_motion_events():
+    # With only button tracking (no 1002 motion), the release must still capture
+    # the end point so a drag copies correctly.
+    runner = _history_runner()
+    import pyte
+
+    runner.screen = pyte.HistoryScreen(20, 4, history=50, ratio=0.5)
+    pyte.ByteStream(runner.screen).feed(b"hello world\r\n")
+    runner.sel_active = False
+    runner.sel_anchor = runner.sel_point = None
+    copied = []
+    runner._copy_to_clipboard = lambda text: copied.append(text)
+    runner._set_message = lambda *a, **k: None
+
+    runner._intercept_scroll(b"\x1b[<0;1;1M")  # press
+    runner._intercept_scroll(b"\x1b[<0;5;1m")  # release (no motion in between)
+    assert copied == ["hello"]
+
+
+def test_mouse_events_are_stripped_from_forwarded_input():
+    runner = _history_runner()
+    runner.sel_active = False
+    runner.sel_anchor = runner.sel_point = None
+    runner._copy_to_clipboard = lambda text: None
+    runner._set_message = lambda *a, **k: None
+    assert runner._intercept_scroll(b"X\x1b[<0;3;2MY") == b"XY"
+
+
+def test_reset_agent_tracking_reenables_scrollback_for_new_backend():
+    # Switching OpenCode -> Claude must clear child_mouse so aGiT reclaims the
+    # wheel for scrollback instead of forwarding it to a backend that ignores it.
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.child_mouse = True
+    runner.scroll_back = 7
+    runner.passthrough_prompt = bytearray(b"abc")
+    runner.passthrough_escape = None
+
+    runner._reset_agent_tracking()
+
+    assert runner.child_mouse is False
+    assert runner.scroll_back == 0
+
+
+def test_wheel_forwarded_when_backend_manages_mouse():
+    runner = _history_runner()
+    runner.child_mouse = True
+    event = b"\x1b[<64;5;5M"
+    assert runner._intercept_scroll(event) == event  # passed through to backend
+    assert runner.scroll_back == 0
+
+
+def test_read_only_observer_skips_auto_commit():
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.tracking_enabled = False
+    # Should return immediately without touching repo/state/watcher attributes.
+    assert runner._maybe_agent_commit() is None
+
+
+def test_read_only_observer_skips_pre_agent_commit():
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.tracking_enabled = False
+    # Returns True (forward the prompt) without inspecting the repo.
+    assert runner._pre_agent_commit_if_needed("do it") is True
+
+
+def test_confirm_exit_read_only_exits_without_prompt():
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.tracking_enabled = False
+    assert runner._confirm_exit() is True
+
+
+def test_confirm_exit_prompts_when_managing(monkeypatch):
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.tracking_enabled = True
+    monkeypatch.setattr(runner, "_select_popup", lambda *a, **k: "Yes, exit")
+    assert runner._confirm_exit() is True
+    monkeypatch.setattr(runner, "_select_popup", lambda *a, **k: "No, keep working")
+    assert runner._confirm_exit() is False
+    monkeypatch.setattr(runner, "_select_popup", lambda *a, **k: None)  # cancelled
+    assert runner._confirm_exit() is False
+
+
 def test_proxy_passthrough_prompt_drops_escape_sequences():
     runner = ProxyRunner.__new__(ProxyRunner)
     runner.passthrough_prompt = bytearray()

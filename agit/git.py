@@ -61,6 +61,98 @@ class GitRepo:
     def commit(self, message: str) -> None:
         self._run(["git", "commit", "-F", "-"], input_text=message)
 
+    # --- branches / worktrees / merges (used by concurrent-session support) ---
+
+    def current_branch(self) -> str:
+        # Returns the branch name, or "HEAD" when detached.
+        return self._run(["git", "rev-parse", "--abbrev-ref", "HEAD"]).stdout.strip()
+
+    def rev_parse(self, ref: str) -> str:
+        return self._run(["git", "rev-parse", ref]).stdout.strip()
+
+    def branch_exists(self, name: str) -> bool:
+        return self._run(["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{name}"], check=False).returncode == 0
+
+    def create_branch(self, name: str, base: str) -> None:
+        self._run(["git", "branch", name, base])
+
+    def delete_branch(self, name: str, *, force: bool = False) -> None:
+        self._run(["git", "branch", "-D" if force else "-d", name])
+
+    def list_branches(self, prefix: str = "") -> list[str]:
+        output = self._run(["git", "for-each-ref", "--format=%(refname:short)", "refs/heads/"]).stdout
+        names = [line for line in output.splitlines() if line]
+        return [name for name in names if name.startswith(prefix)] if prefix else names
+
+    def switch(self, branch: str, *, create: bool = False, base: str | None = None) -> None:
+        command = ["git", "switch"]
+        if create:
+            command.append("-C")
+        command.append(branch)
+        if create and base:
+            command.append(base)
+        self._run(command)
+
+    def worktree_add(self, path: str, *, branch: str, base: str) -> None:
+        self._run(["git", "worktree", "add", "-b", branch, path, base])
+
+    def worktree_remove(self, path: str, *, force: bool = False) -> None:
+        command = ["git", "worktree", "remove"]
+        if force:
+            command.append("--force")
+        command.append(path)
+        self._run(command)
+
+    def worktree_list(self) -> list[dict[str, str]]:
+        output = self._run(["git", "worktree", "list", "--porcelain"]).stdout
+        worktrees: list[dict[str, str]] = []
+        current: dict[str, str] = {}
+        for line in output.splitlines():
+            if not line.strip():
+                if current:
+                    worktrees.append(current)
+                    current = {}
+                continue
+            key, _, value = line.partition(" ")
+            if key == "worktree":
+                current["path"] = value
+            elif key == "HEAD":
+                current["head"] = value
+            elif key == "branch":
+                current["branch"] = value.removeprefix("refs/heads/")
+            elif key == "detached":
+                current["branch"] = ""
+        if current:
+            worktrees.append(current)
+        return worktrees
+
+    def merge(self, ref: str) -> bool:
+        """Merge ``ref`` into the current branch. Returns True on a clean merge,
+        False if there are conflicts (the merge is left in progress for
+        resolution). Raises GitError on any other failure."""
+        process = self._run(["git", "merge", "--no-edit", ref], check=False)
+        if process.returncode == 0:
+            return True
+        if self.unmerged_paths():
+            return False
+        raise GitError(process.stderr.strip() or process.stdout.strip() or "merge failed")
+
+    def merge_ff_only(self, ref: str) -> None:
+        self._run(["git", "merge", "--ff-only", ref])
+
+    def merge_abort(self) -> None:
+        self._run(["git", "merge", "--abort"], check=False)
+
+    def unmerged_paths(self) -> list[str]:
+        output = self._run(["git", "diff", "--name-only", "--diff-filter=U"], check=False).stdout
+        return [line for line in output.splitlines() if line]
+
+    def log_range(self, base: str, head: str, *, paths: list[str] | None = None) -> str:
+        command = ["git", "log", "--no-color", "--format=%h %s", f"{base}..{head}"]
+        if paths:
+            command.extend(["--", *paths])
+        return self._run(command, check=False).stdout.strip()
+
     def _run(self, command: list[str], *, input_text: str | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
         process = subprocess.run(
             command,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import uuid
 from pathlib import Path
 from typing import Any
@@ -66,8 +67,8 @@ class AgitState:
             handle.write("\n")
 
     def _ensure_repo_local_ignore(self) -> None:
-        exclude = self.repo / ".git" / "info" / "exclude"
-        if not exclude.exists():
+        exclude = self._exclude_path()
+        if exclude is None or not exclude.exists():
             return
         content = exclude.read_text(encoding="utf-8")
         if ".agit/" in content.splitlines():
@@ -76,6 +77,28 @@ class AgitState:
             if content and not content.endswith("\n"):
                 handle.write("\n")
             handle.write(".agit/\n")
+
+    def _exclude_path(self) -> Path | None:
+        # Resolve the info/exclude path via git so it works inside a worktree,
+        # where ``.git`` is a file pointing at the shared git dir rather than a
+        # directory. Fall back to the conventional location when git is not
+        # available (e.g. tests with a fabricated .git/info).
+        fallback = self.repo / ".git" / "info" / "exclude"
+        try:
+            process = subprocess.run(
+                ["git", "rev-parse", "--git-path", "info/exclude"],
+                cwd=self.repo,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+        except OSError:
+            return fallback
+        if process.returncode != 0:
+            return fallback
+        path = Path(process.stdout.strip())
+        return path if path.is_absolute() else self.repo / path
 
     @property
     def session_id(self) -> str:

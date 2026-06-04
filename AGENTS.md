@@ -92,6 +92,22 @@ aGiT stands for agent + git. It is a Python library and interactive CLI that com
 - The `session` command (proxy) lets the user start a new session, switch the tracked session to another existing one, or sync tracking to the most recently active session (useful after starting a new session inside the backend TUI). Switching or starting a new session relaunches the backend TUI and re-baselines so existing history is not re-committed.
 - Session detection, listing, and switching must work identically for both OpenCode and Claude.
 
+## Concurrency and Locking
+
+- Only one aGiT process may auto-commit/merge in a given working tree at a time. A process acquires a single-writer lock at `<tree>/.agit/lock` (PID-based, with stale-owner reclaim). A second aGiT process on the same repo runs **read-only**: it renders the backend TUI but makes no commits, and shows a banner that another aGiT process is managing the repo. (Implemented in `agit/lock.py`, wired into both proxy and JSON modes.)
+- Quitting a managing (non-read-only) proxy instance asks for confirmation before exiting.
+- Concurrent sessions are isolated with git worktrees so changes are never attributed to the wrong session; see Concurrent Sessions below.
+
+## Concurrent Sessions (worktrees + auto-integration)
+
+This is the design aGiT targets for running several sessions at once. Foundations (`agit/lock.py`, `agit/worktree.py`, the worktree/branch/merge helpers in `agit/git.py`, and the `agit/merge_queue.py` coordinator) are implemented and unit-tested; the multiplexer wiring in `agit/proxy.py` is the remaining integration.
+
+- A single aGiT process multiplexes several live sessions; one is displayed, the others keep running and integrating in the background.
+- The main working tree / base branch is mutated only by the serialized merge coordinator; every session runs in its own worktree under `.agit/worktrees/<name>`.
+- A session creates a transient turn branch (`agit/<name>/t<n>`) when it receives a prompt; on the turn's final agent message the branch is integrated into the base and deleted.
+- Integration is serialized and completion-ordered. It runs inside the owning session's worktree (merge base into the turn branch) so the agent can resolve conflicts in place; aGiT auto-prompts the agent with the conflicting commits' context and pauses for the user if it cannot resolve.
+- A `session` view shows running/idle/merging status and can stop sessions; a `base` command switches the base branch after stopping sessions and draining pending integrations; on restart aGiT offers recovery for stale `agit/*` branches and worktrees.
+
 ## Backend Selection and Global Config
 
 - The selected backend is stored per repository in `.agit/state.json`.

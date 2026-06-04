@@ -8,6 +8,7 @@ from agit.backends.claude import ClaudeBackend
 from agit.backends.opencode import OpenCodeBackend
 from agit.git import GitRepo
 from agit.global_config import GlobalConfig
+from agit.lock import RepoLock
 from agit.state import AgitState
 from agit.ui import AgitPrompt, PromptState
 
@@ -34,6 +35,8 @@ class AgitShell:
         self.verbose = verbose
         self.prompt = AgitPrompt(self._prompt_state)
         self.actions = AgitActions(repo, self.state, verbose=verbose)
+        self.management_lock = RepoLock(repo.repo / ".agit" / "lock")
+        self.tracking_enabled = True
 
     def run(self) -> None:
         try:
@@ -43,25 +46,31 @@ class AgitShell:
             return
         if resolved != self.state.backend:
             self.state.backend = resolved
+        self.tracking_enabled = self.management_lock.acquire()
+        if not self.tracking_enabled:
+            print("Another aGiT process is already running on this repo — this instance is read-only (no auto-commits).")
         self.state.save()
         if self.verbose:
             print(f"aGiT session {self.state.session_id}")
             print(f"Repository: {self.repo.repo}")
             print(f"Backend: {self.state.backend}")
             print("Type :help for aGiT commands. Backend / commands are passed through.")
-        while True:
-            try:
-                text = self.prompt.prompt().strip()
-            except (EOFError, KeyboardInterrupt):
-                print()
-                return
-            if not text:
-                continue
-            if text.startswith(AGIT_PREFIX):
-                if self._handle_command(text):
+        try:
+            while True:
+                try:
+                    text = self.prompt.prompt().strip()
+                except (EOFError, KeyboardInterrupt):
+                    print()
                     return
-            else:
-                self._handle_agent_prompt(text)
+                if not text:
+                    continue
+                if text.startswith(AGIT_PREFIX):
+                    if self._handle_command(text):
+                        return
+                else:
+                    self._handle_agent_prompt(text)
+        finally:
+            self.management_lock.release()
 
     def _handle_command(self, text: str) -> bool:
         command, _, arg = text.partition(" ")
@@ -102,7 +111,7 @@ class AgitShell:
         return False
 
     def _handle_agent_prompt(self, prompt: str) -> None:
-        if self.actions.has_pre_agent_user_changes():
+        if self.tracking_enabled and self.actions.has_pre_agent_user_changes():
             print("User changes detected before agent runs.")
             self.actions.create_user_commit()
 
@@ -122,6 +131,8 @@ class AgitShell:
 
         self.state.append_trace("agent", result.final_response)
         self.state.add_token_usage(result.tokens)
+        if not self.tracking_enabled:
+            return  # read-only: another aGiT process owns commits for this repo
         self.repo.add_tracked()
         self.actions.review_untracked(include_declined=False)
         if self.repo.has_staged_changes():

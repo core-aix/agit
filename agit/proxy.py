@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import base64
 import os
 import pty
 import re
 import select
+import shutil
 import signal
+import subprocess
 import sys
 import termios
 import threading
@@ -28,6 +31,7 @@ from agit.backends.proxy_agents import available_backends, make_proxy_agent
 from agit.commit_message import build_agent_commit_message, build_user_commit_message
 from agit.git import GitRepo
 from agit.global_config import GlobalConfig
+from agit.lock import RepoLock
 from agit.session import turns_after
 from agit.state import AgitState
 
@@ -92,6 +96,15 @@ def detect_color_mode(environ=None) -> str:
     if colorterm or term:
         return "16"
     return "16"
+
+
+_SGR_MOUSE_RE = re.compile(rb"\x1b\[<\d+;\d+;\d+[Mm]")
+_SGR_MOUSE_EVENT_RE = re.compile(rb"\x1b\[<(\d+);(\d+);(\d+)([Mm])")
+_PAGE_KEY_RE = re.compile(rb"\x1b\[(5|6)(?:;\d+)?~")  # PageUp / PageDown (with optional modifiers)
+# A trailing, not-yet-complete CSI sequence (e.g. a mouse report split across
+# reads). Held back so it is not forwarded as stray bytes. A lone trailing ESC
+# is deliberately NOT matched so the Escape key is never delayed.
+_INCOMPLETE_TAIL_RE = re.compile(rb"\x1b\[[<0-9;]*$")
 
 
 def _short_session(session_id: str | None) -> str:
@@ -236,6 +249,7 @@ class ProxyRunner:
     CHILD_IDLE_SECONDS = 4.0
     POLL_SECONDS = 2.0
     PARSE_COOLDOWN_SECONDS = 10.0
+    RENDER_MIN_INTERVAL = 0.033  # coalesce output-driven repaints to ~30fps
 
     def __init__(self, repo: GitRepo, *, verbose: bool = False, backend: str | None = None) -> None:
         self.repo = repo
@@ -267,6 +281,18 @@ class ProxyRunner:
         self.cols = 80
         self.screen: pyte.Screen | None = None
         self.stream: pyte.ByteStream | None = None
+        # Scrollback: whether the backend manages the mouse itself (OpenCode) or
+        # aGiT must provide wheel-driven scrollback (Claude streams to the normal
+        # screen and relies on native scrollback, which aGiT's render replaces).
+        self.child_mouse = False
+        self.scroll_back = 0
+        self._last_render = 0.0
+        self._render_pending = False
+        # Mouse drag selection -> clipboard (for backends aGiT renders itself).
+        self.sel_active = False
+        self.sel_anchor: tuple[int, int] | None = None
+        self.sel_point: tuple[int, int] | None = None
+        self._input_tail = b""
         self.last_child_output = 0.0
         self.last_child_output_sample = b""
         self.last_status = ""
@@ -298,6 +324,10 @@ class ProxyRunner:
         self.host_palette: dict[bytes, bytes] = {}
         self.host_da: bytes | None = None
         self.color_mode = detect_color_mode()
+        # Single-writer management: only one aGiT may auto-commit/merge in a
+        # working tree. A second instance runs read-only (tracking disabled).
+        self.management_lock = RepoLock(repo.repo / ".agit" / "lock")
+        self.tracking_enabled = True
         self.debug_proxy = verbose or os.environ.get("AGIT_DEBUG_PROXY", "").strip().lower() in {"1", "true", "yes"}
 
     def run(self) -> int:
@@ -305,8 +335,9 @@ class ProxyRunner:
             raise RuntimeError("Proxy mode requires an interactive terminal. Use --mode json for non-TTY use.")
         if not self._ensure_backend_available():
             return 1
+        self.tracking_enabled = self.management_lock.acquire()
         self.state.save()
-        if self.actions.has_pre_agent_user_changes():
+        if self.tracking_enabled and self.actions.has_pre_agent_user_changes():
             print("User changes detected before the agent starts.")
             self.actions.create_user_commit()
         self._sanitize_state_trace()
@@ -328,6 +359,13 @@ class ProxyRunner:
             signal.signal(signal.SIGWINCH, lambda _signum, _frame: self._resize_child())
             signal.signal(signal.SIGTERM, self._handle_exit_signal)
             signal.signal(signal.SIGHUP, self._handle_exit_signal)
+            if not self.tracking_enabled:
+                self._set_message(
+                    "Another aGiT process is already running on this repo —\n"
+                    "this instance is read-only (no auto-commits).",
+                    seconds=6.0,
+                )
+                self._render()
             return self._loop()
         finally:
             if self.original_sigwinch is not None:
@@ -342,6 +380,7 @@ class ProxyRunner:
                     os.close(self.master_fd)
                 except OSError:
                     pass
+            self.management_lock.release()
 
     def _ensure_backend_available(self) -> bool:
         try:
@@ -407,6 +446,12 @@ class ProxyRunner:
         self.last_status = ""
         self.parse_pending = False
         self.status_check_pending = False
+        # Re-detect mouse ownership for the new backend: OpenCode enables mouse
+        # (so wheel events are forwarded to it), Claude does not (so aGiT keeps
+        # the wheel for scrollback). Without this reset, switching OpenCode→Claude
+        # would leave child_mouse stuck True and break Claude's scrollback.
+        self.child_mouse = False
+        self.scroll_back = 0
 
     def _restart_agent(self, message: str) -> None:
         # Tear down the running TUI and relaunch it for the current backend and
@@ -418,6 +463,9 @@ class ProxyRunner:
         self._init_screen()
         self._spawn()
         self._resize_child()
+        # Re-assert host mouse reporting for the new backend so wheel scrollback
+        # keeps working regardless of what the previous backend left behind.
+        self._enable_host_mouse()
         self._set_message(message)
         self._render()
 
@@ -546,25 +594,32 @@ class ProxyRunner:
     def _loop(self) -> int:
         assert self.master_fd is not None
         while self.running:
-            readable, _, _ = select.select([sys.stdin.fileno(), self.master_fd], [], [], 0.2)
+            timeout = 0.016 if self._render_pending else 0.2
+            readable, _, _ = select.select([sys.stdin.fileno(), self.master_fd], [], [], timeout)
             if self.master_fd in readable:
-                try:
-                    output = os.read(self.master_fd, 4096)
-                except OSError:
+                output = self._drain_child_output()
+                if output is None:
+                    sample = self.last_child_output_sample[-2048:].decode(errors="replace").replace("\x1b", "\\x1b")
+                    self._debug(f"master_fd closed (backend gone); last_output={sample!r}")
                     break
-                if not output:
-                    break
-                self.last_child_output = time.monotonic()
-                self.last_child_output_sample = (self.last_child_output_sample + output)[-4096:]
-                self._answer_terminal_queries(output)
-                self._sync_terminal_modes(output)
-                self._feed_child_output(output)
-                self._render()
+                if output:
+                    self.last_child_output = time.monotonic()
+                    self.last_child_output_sample = (self.last_child_output_sample + output)[-4096:]
+                    self._answer_terminal_queries(output)
+                    self._sync_terminal_modes(output)
+                    self._feed_child_output(output)
+                    self._render_output()
             if sys.stdin.fileno() in readable:
                 data = os.read(sys.stdin.fileno(), 4096)
+                data = self._input_tail + data
+                data, self._input_tail = self._hold_incomplete_tail(data)
+                data = self._intercept_scroll(data)
                 was_capturing = self.input.capturing
                 forwarded, local_echo, command, should_exit = self.input.feed(data)
                 if should_exit:
+                    if not self._confirm_exit():
+                        self._render()
+                        continue
                     self._exit_child()
                     break
                 if local_echo:
@@ -574,6 +629,7 @@ class ProxyRunner:
                 elif was_capturing and command is None:
                     self._render()
                 if forwarded:
+                    self.scroll_back = 0  # interacting snaps back to the live view
                     submit = any(chunk in {b"\r", b"\n"} for chunk in forwarded)
                     self._update_passthrough_prompt(forwarded)
                     if submit:
@@ -592,6 +648,7 @@ class ProxyRunner:
                         os.write(self.master_fd, b"".join(forwarded))
                 if command:
                     self._run_command(command)
+            self._flush_pending_render()
             self._resume_pending_prompt_if_ready()
             self._maybe_agent_commit()
             if self.child_pid is not None:
@@ -602,6 +659,33 @@ class ProxyRunner:
                     self._debug(f"child exited pid={self.child_pid} status={status} exit_code={exit_code} last_output={sample!r}")
                     return exit_code
         return 0
+
+    def _drain_child_output(self) -> bytes | None:
+        # Read all currently-available output in one go (capped) and render once,
+        # instead of re-rendering after every 4 KB. During heavy output (e.g.
+        # fast scrolling in OpenCode) this keeps the PTY drained so the backend's
+        # writes never block, which otherwise stalls/kills the backend.
+        assert self.master_fd is not None
+        chunks: list[bytes] = []
+        total = 0
+        # Bound per-iteration output so the (pure-Python) pyte parse stays small
+        # and the loop keeps draining the PTY promptly; leftover output is read
+        # on the next iteration.
+        while total < 262_144:
+            try:
+                data = os.read(self.master_fd, 65536)
+            except OSError:
+                break
+            if not data:
+                break
+            chunks.append(data)
+            total += len(data)
+            readable, _, _ = select.select([self.master_fd], [], [], 0)
+            if self.master_fd not in readable:
+                break
+        if not chunks:
+            return None  # EOF or read error with nothing buffered
+        return b"".join(chunks)
 
     def _debug(self, message: str) -> None:
         if not getattr(self, "debug_proxy", False):
@@ -646,12 +730,18 @@ class ProxyRunner:
 
     def _init_screen(self) -> None:
         self.rows, self.cols = self._terminal_size()
-        self.screen = pyte.Screen(self.cols, max(self.rows - 1, 1))
+        # HistoryScreen keeps lines that scroll off the top so aGiT can offer
+        # scrollback for backends that stream to the normal screen (Claude).
+        self.screen = pyte.HistoryScreen(self.cols, max(self.rows - 1, 1), history=5000, ratio=0.5)
         self.stream = pyte.ByteStream(self.screen)
+        self.scroll_back = 0
 
     def _feed_child_output(self, output: bytes) -> None:
         if self.stream is not None:
-            self.stream.feed(output)
+            try:
+                self.stream.feed(output)
+            except Exception as error:  # never let a parse hiccup kill the session
+                self._debug(f"pyte feed error: {error!r}")
 
     def _sync_terminal_modes(self, output: bytes) -> None:
         # OpenCode enables mouse reporting on its PTY. Because aGiT renders the
@@ -662,6 +752,13 @@ class ProxyRunner:
                 os.write(sys.stdout.fileno(), b"\x1b[?" + mode + b"h")
             if b"\x1b[?" + mode + b"l" in output:
                 os.write(sys.stdout.fileno(), b"\x1b[?" + mode + b"l")
+        # Track whether the backend drives the mouse itself. If it does, wheel
+        # events are forwarded to it; if not, aGiT uses the wheel for scrollback.
+        for mode in (b"1000", b"1002", b"1003"):
+            if b"\x1b[?" + mode + b"h" in output:
+                self.child_mouse = True
+            if b"\x1b[?" + mode + b"l" in output:
+                self.child_mouse = False
 
     def _detect_host_terminal(self) -> None:
         # Ask the host terminal the same questions OpenCode asks on startup and
@@ -713,6 +810,13 @@ class ProxyRunner:
     def _answer_terminal_queries(self, output: bytes) -> None:
         if self.master_fd is None:
             return
+        # These queries (OSC color/palette, cursor-position, device attributes)
+        # only appear at startup. Skip the regex scans entirely when none of
+        # their cheap markers are present, so heavy scroll output (potentially
+        # megabytes per drain) is not scanned with regexes and never stalls the
+        # event loop — which would otherwise back up the PTY and kill the backend.
+        if b"\x1b]" not in output and b"\x1b[6n" not in output and b"\x1b[c" not in output and b"\x1b[0c" not in output:
+            return
         response = bytearray()
         if self.host_fg_value and re.search(rb"\x1b\]10;\?(?:\x07|\x1b\\)", output):
             response += b"\x1b]10;" + self.host_fg_value + b"\x07"
@@ -735,22 +839,49 @@ class ProxyRunner:
             except OSError:
                 pass
 
+    def _render_output(self) -> None:
+        # Coalesce repaints driven by a flood of backend output (e.g. fast
+        # scrolling) to ~30fps so aGiT does not overwhelm the host terminal's
+        # stdout, which would block the loop and back up the backend's PTY.
+        now = time.monotonic()
+        if now - self._last_render >= self.RENDER_MIN_INTERVAL:
+            self._last_render = now
+            self._render_pending = False
+            self._render()
+        else:
+            self._render_pending = True
+
+    def _flush_pending_render(self) -> None:
+        if not self._render_pending:
+            return
+        now = time.monotonic()
+        if now - self._last_render >= self.RENDER_MIN_INTERVAL:
+            self._last_render = now
+            self._render_pending = False
+            self._render()
+
     def _render(self) -> None:
         if self.screen is None:
             return
         parts = ["\x1b[0m\x1b[?25l\x1b[H"]
-        for row in range(max(self.rows - 1, 1)):
-            parts.append("\x1b[0m" + self._render_row(row))
+        selection = self._selection_ranges()
+        for index, cells in enumerate(self._visible_lines()):
+            parts.append("\x1b[0m" + self._render_line(cells, selection.get(index)))
             parts.append("\r\n")
         parts.append(self._status_line())
         if self.input.capturing:
             self._append_command_palette(parts)
         elif self.message and time.monotonic() < self.message_until:
             self._append_message_popup(parts, self.message)
-        cursor = self.screen.cursor
-        cursor_row = min(cursor.y + 1, max(self.rows - 1, 1))
-        cursor_col = min(cursor.x + 1, self.cols)
-        parts.append(f"\x1b[{cursor_row};{cursor_col}H\x1b[?25h")
+        if self.scroll_back > 0:
+            # While scrolled into history, keep the cursor hidden (its live
+            # position is not meaningful for the displayed lines).
+            parts.append("\x1b[?25l")
+        else:
+            cursor = self.screen.cursor
+            cursor_row = min(cursor.y + 1, max(self.rows - 1, 1))
+            cursor_col = min(cursor.x + 1, self.cols)
+            parts.append(f"\x1b[{cursor_row};{cursor_col}H\x1b[?25h")
         os.write(sys.stdout.fileno(), "".join(parts).encode())
 
     def _append_command_palette(self, parts: list[str]) -> None:
@@ -807,17 +938,20 @@ class ProxyRunner:
 
     def _render_row(self, row: int) -> str:
         assert self.screen is not None
-        cells = self.screen.buffer.get(row, {})
+        return self._render_line(self.screen.buffer.get(row, {}))
+
+    def _render_line(self, cells, sel: tuple[int, int] | None = None) -> str:
         rendered = []
         current = ""  # SGR body currently applied on the host terminal ("" == default)
+        sel_start, sel_end = sel if sel else (-1, -1)
         for col in range(self.cols):
             cell = cells.get(col)
-            if cell is None:
-                style = ""
-                char = " "
+            base = "" if cell is None else self._cell_sgr(cell)
+            char = (cell.data or " ") if cell is not None else " "
+            if sel is not None and sel_start <= col <= sel_end:
+                style = (base + ";7") if base else "7"  # reverse-video the selection
             else:
-                style = self._cell_sgr(cell)
-                char = cell.data or " "
+                style = base
             if style != current:
                 rendered.append("\x1b[" + (style or "0") + "m")
                 current = style
@@ -825,6 +959,123 @@ class ProxyRunner:
         if current:
             rendered.append("\x1b[0m")
         return "".join(rendered)
+
+    def _hold_incomplete_tail(self, data: bytes) -> tuple[bytes, bytes]:
+        # If the read ends mid escape-sequence (e.g. a mouse report split across
+        # reads), hold the trailing partial so it is completed on the next read
+        # rather than leaking to the backend as stray bytes (the "[<35;..." hex).
+        match = _INCOMPLETE_TAIL_RE.search(data)
+        if match:
+            return data[: match.start()], data[match.start() :]
+        return data, b""
+
+    def _intercept_scroll(self, data: bytes) -> bytes:
+        # Backends that drive the mouse (OpenCode) get all input forwarded so they
+        # scroll themselves. For backends that do not (Claude), aGiT handles the
+        # mouse: the wheel scrolls history, drag selects-and-copies, and
+        # PageUp/PageDown also scroll. Consumed events are stripped from input.
+        if self.child_mouse:
+            return data
+        page = max(self.rows - 2, 1)
+        for match in _PAGE_KEY_RE.finditer(data):
+            self._scroll(page if match.group(1) == b"5" else -page)
+        data = _PAGE_KEY_RE.sub(b"", data)
+        if b"\x1b[<" in data:
+            for match in _SGR_MOUSE_EVENT_RE.finditer(data):
+                self._handle_mouse(int(match.group(1)), int(match.group(2)), int(match.group(3)), match.group(4))
+            data = _SGR_MOUSE_RE.sub(b"", data)
+        return data
+
+    def _handle_mouse(self, button: int, col: int, row: int, kind: bytes) -> None:
+        if button & 64:  # wheel
+            self._scroll(-3 if button & 1 else 3)
+            return
+        y = max(0, min(row - 1, max(self.rows - 2, 0)))
+        x = max(0, min(col - 1, self.cols - 1))
+        is_left = (button & 0b11) == 0
+        motion = bool(button & 32)
+        if kind == b"M" and is_left and not motion:  # press
+            self.sel_active = True
+            self.sel_anchor = (y, x)
+            self.sel_point = (y, x)
+        elif kind == b"M" and motion and self.sel_active:  # drag (live, when motion is reported)
+            self.sel_point = (y, x)
+            self._render()
+        elif kind == b"m" and self.sel_active:  # release
+            self.sel_point = (y, x)  # capture the release point even without motion events
+            if self.sel_anchor != self.sel_point:  # a drag, not a plain click
+                self._copy_selection()
+            self.sel_active = False
+            self.sel_anchor = self.sel_point = None
+            self._render()
+
+    def _selection_ranges(self) -> dict[int, tuple[int, int]]:
+        # Map each selected display row to its inclusive (start_col, end_col).
+        if not (self.sel_active and self.sel_anchor and self.sel_point):
+            return {}
+        (r1, c1), (r2, c2) = sorted([self.sel_anchor, self.sel_point])
+        ranges: dict[int, tuple[int, int]] = {}
+        for row in range(r1, r2 + 1):
+            start = c1 if row == r1 else 0
+            end = c2 if row == r2 else self.cols - 1
+            ranges[row] = (start, end)
+        return ranges
+
+    def _copy_selection(self) -> None:
+        lines = self._visible_lines()
+        text_lines = []
+        for row, (start, end) in sorted(self._selection_ranges().items()):
+            cells = lines[row] if row < len(lines) else {}
+            text = "".join((cells.get(x).data if cells.get(x) else " ") for x in range(start, end + 1))
+            text_lines.append(text.rstrip())
+        text = "\n".join(text_lines).strip("\n")
+        if not text.strip():
+            return
+        self._copy_to_clipboard(text)
+        self._set_message(f"Copied {len(text)} char(s) to clipboard.", seconds=2.0)
+
+    def _copy_to_clipboard(self, text: str) -> None:
+        payload = text.encode("utf-8", errors="replace")
+        if shutil.which("pbcopy"):
+            try:
+                subprocess.run(["pbcopy"], input=payload, check=False)
+                return
+            except OSError:
+                pass
+        # OSC 52 clipboard fallback for terminals that support it.
+        encoded = base64.b64encode(payload).decode("ascii")
+        try:
+            os.write(sys.stdout.fileno(), b"\x1b]52;c;" + encoded.encode("ascii") + b"\x07")
+        except OSError:
+            pass
+
+    def _history_len(self) -> int:
+        history = getattr(getattr(self, "screen", None), "history", None)
+        return len(history.top) if history is not None else 0
+
+    def _scroll(self, delta: int) -> None:
+        new_back = max(0, min(self.scroll_back + delta, self._history_len()))
+        if new_back != self.scroll_back:
+            self.scroll_back = new_back
+            # Selection coordinates refer to the displayed view, which just
+            # shifted; drop any in-progress selection.
+            self.sel_active = False
+            self.sel_anchor = self.sel_point = None
+            self._render()
+
+    def _visible_lines(self) -> list:
+        # The (rows-1) lines to draw. When scrolled back, splice in history lines
+        # that scrolled off the top so the user can read earlier messages.
+        assert self.screen is not None
+        rows = max(self.rows - 1, 1)
+        live = [self.screen.buffer.get(row, {}) for row in range(rows)]
+        if self.scroll_back <= 0 or not self._history_len():
+            return live
+        history = list(self.screen.history.top)
+        combined = history + live
+        end = len(combined) - self.scroll_back
+        end = max(rows, min(end, len(combined)))
+        return combined[end - rows:end]
 
     def _cell_sgr(self, cell) -> str:
         # Reproduce exactly what OpenCode rendered into this cell, including the
@@ -901,8 +1152,14 @@ class ProxyRunner:
 
     def _status_line(self) -> str:
         declined = len([path for path in self.state.declined_untracked() if (self.repo.repo / path).exists()])
-        left = f" aGiT Ctrl-G commands | {self.backend.name} passthrough "
-        right = f" unstaged:{declined} " if declined else ""
+        if not getattr(self, "tracking_enabled", True):
+            left = f" aGiT READ-ONLY (another aGiT is managing this repo) | {self.backend.name} passthrough "
+        else:
+            left = f" aGiT Ctrl-G commands | {self.backend.name} passthrough "
+        if getattr(self, "scroll_back", 0) > 0:
+            right = f" SCROLLBACK -{self.scroll_back} (scroll down to resume) "
+        else:
+            right = f" unstaged:{declined} " if declined else ""
         padding = " " * max(self.cols - len(left) - len(right), 0)
         return f"\x1b[7m{left}{padding}{right}\x1b[0m"
 
@@ -913,6 +1170,16 @@ class ProxyRunner:
 
     def _enter_host_screen(self) -> None:
         os.write(sys.stdout.fileno(), b"\x1b[?1049h\x1b[2J\x1b[H")
+        self._enable_host_mouse()
+
+    def _enable_host_mouse(self) -> None:
+        # Enable SGR mouse reporting on the host (1000 = button press/release +
+        # wheel) so aGiT receives wheel events for scrollback and press/release
+        # for its own copy. This is the minimal mode that reliably reports the
+        # wheel; richer motion tracking (1002/1003) changes wheel reporting on
+        # some terminals and is avoided. Backends that manage the mouse
+        # themselves (OpenCode) re-assert their own modes afterwards.
+        os.write(sys.stdout.fileno(), b"\x1b[?1000h\x1b[?1006h")
 
     def _run_command(self, command: str) -> None:
         # aGiT commands in proxy mode are triggered via Ctrl-G and are plain
@@ -920,8 +1187,16 @@ class ProxyRunner:
         # backend like any other input).
         name, _, arg = command.partition(" ")
         if name in {"exit", "quit"}:
+            if not self._confirm_exit():
+                self._render()
+                return
             self.running = False
             self._exit_child()
+            return
+
+        if name in {"stage", "user-commit", "session", "agent-backend"} and not getattr(self, "tracking_enabled", True):
+            self._set_message("Read-only: another aGiT process is managing this repo.")
+            self._render()
             return
 
         if name in {"stage", "user-commit"}:
@@ -1131,6 +1406,13 @@ class ProxyRunner:
         self.message = None
         self.message_until = 0.0
 
+    def _confirm_exit(self) -> bool:
+        # A read-only observer has nothing to lose, so it exits immediately.
+        if not getattr(self, "tracking_enabled", True):
+            return True
+        choice = self._select_popup("Exit aGiT?", ["No, keep working", "Yes, exit"])
+        return choice == "Yes, exit"
+
     def _exit_child(self) -> None:
         self.running = False
         self._disable_host_terminal_modes()
@@ -1168,6 +1450,8 @@ class ProxyRunner:
             return
 
     def _pre_agent_commit_if_needed(self, prompt_text: str = "") -> bool:
+        if not getattr(self, "tracking_enabled", True):
+            return True  # read-only: forward the prompt, never commit
         self._clear_agent_in_flight_if_idle()
         status = self.repo.status_short().strip()
         finished = self._finish_agent_parse_if_ready(quiet=True)
@@ -1353,6 +1637,8 @@ class ProxyRunner:
         return False
 
     def _maybe_agent_commit(self) -> None:
+        if not getattr(self, "tracking_enabled", True):
+            return  # read-only observer: never auto-commit
         now = time.monotonic()
         if self.file_change_event.is_set():
             self.file_change_event.clear()
@@ -1460,6 +1746,7 @@ class ProxyRunner:
             self.rows, self.cols = self._terminal_size()
             if self.screen is not None:
                 self.screen.resize(max(self.rows - 1, 1), self.cols)
+            self.scroll_back = 0  # history geometry changed; return to live view
             winsize = struct.pack("HHHH", max(self.rows - 1, 1), self.cols, 0, 0)
             fcntl.ioctl(self.master_fd, termios.TIOCSWINSZ, winsize)
             self._render()
