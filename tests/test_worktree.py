@@ -3,6 +3,7 @@ import subprocess
 
 import pytest
 
+from agit.actions import AgitActions
 from agit.git import GitRepo
 from agit.state import AgitState
 from agit.worktree import WorktreeManager, _sanitize_name
@@ -716,3 +717,142 @@ def test_sync_idle_worktree_fast_forwards_to_advanced_base(tmp_path):
 
     # The idle worktree fast-forwarded onto the advanced base.
     assert work.rev_parse("HEAD") == main.rev_parse(base)
+
+
+# --- _ensure_worktree_alive ---
+
+
+def _recovery_runner(main, name):
+    from agit.backends.proxy_agents import make_proxy_agent
+    from agit.proxy import ProxyRunner
+    from agit.session_runtime import default_session_fields
+
+    wm = WorktreeManager(main)
+    info = wm.create(name, base=main.current_branch())
+    work = GitRepo.discover(info.path)
+    runner = ProxyRunner.__new__(ProxyRunner)
+    for field, value in default_session_fields().items():
+        setattr(runner, field, value)
+    runner.base_repo = main
+    runner.repo = work
+    runner.worktree = info
+    runner.name = name
+    runner._base_branch = main.current_branch()
+    runner.worktree_manager = wm
+    runner.tracking_enabled = True
+    runner.global_config = type("G", (), {"default_backend": "opencode"})()
+    runner.state = AgitState(info.path, default_backend="opencode")
+    runner.state.backend = "opencode"
+    runner.backend = make_proxy_agent("opencode")
+    runner.actions = AgitActions(work, runner.state)
+    runner.verbose = False
+    runner.child_pid = None
+    runner.master_fd = None
+    runner.file_observer = None
+    runner.passthrough_prompt = bytearray()
+    runner.agent_in_flight = False
+    runner.turn = 0
+    runner.sessions = [None]
+    runner.active_index = 0
+    runner.merge_ctx = None
+    runner.tracking_enabled = True
+    return runner, info, work
+
+
+def test_ensure_worktree_alive_none_returns_early():
+    from agit.proxy import ProxyRunner
+
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.worktree = None
+    runner._ensure_worktree_alive()
+    assert runner.worktree is None
+
+
+def test_ensure_worktree_alive_path_exists_returns_early(tmp_path):
+    from agit.proxy import ProxyRunner
+
+    main = _init_repo(tmp_path)
+    wm = WorktreeManager(main)
+    info = wm.create("s1", base=main.current_branch())
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.base_repo = main
+    runner.worktree = info
+    runner.repo = GitRepo.discover(info.path)
+    repo_before = runner.repo
+
+    runner._ensure_worktree_alive()
+
+    assert runner.repo is repo_before
+    assert info.path.exists()
+
+
+def test_ensure_worktree_alive_recreates_worktree(tmp_path):
+    main = _init_repo(tmp_path)
+    wm = WorktreeManager(main)
+    info = wm.create("session-1", base=main.current_branch())
+    work = GitRepo.discover(info.path)
+    shutil.rmtree(info.path)
+    assert not info.path.exists()
+
+    runner, _, _ = _recovery_runner(main, "session-1")
+    runner.repo = work
+    runner.worktree = info
+    runner.worktree_manager = wm
+
+    messages = []
+    runner._set_message = lambda msg, **kw: messages.append(msg)
+    runner._render = lambda: None
+    runner._debug = lambda *a, **k: None
+    runner._teardown_child = lambda: None
+    runner._stop_file_watcher = lambda: None
+    runner._init_screen = lambda: None
+    runner._spawn = lambda: None
+    runner._start_file_watcher = lambda: None
+    runner._resize_child = lambda: None
+    runner._enable_host_mouse = lambda: None
+
+    runner._ensure_worktree_alive()
+
+    assert info.path.exists()
+    assert runner.worktree is not None
+    assert runner.worktree.path == info.path
+    assert runner.repo.repo == info.path
+    assert any("recreated" in m for m in messages)
+
+
+def test_ensure_worktree_alive_falls_back_on_open_session_failure(tmp_path):
+    main = _init_repo(tmp_path)
+    wm = WorktreeManager(main)
+    info = wm.create("session-1", base=main.current_branch())
+    work = GitRepo.discover(info.path)
+    shutil.rmtree(info.path)
+    assert not info.path.exists()
+
+    runner, _, _ = _recovery_runner(main, "session-1")
+    runner.repo = work
+    runner.worktree = info
+    runner.worktree_manager = wm
+
+    messages = []
+    runner._set_message = lambda msg, **kw: messages.append(msg)
+    runner._render = lambda: None
+    runner._debug = lambda *a, **k: None
+    runner._teardown_child = lambda: None
+    runner._stop_file_watcher = lambda: None
+    runner._init_screen = lambda: None
+    runner._spawn = lambda: None
+    runner._start_file_watcher = lambda: None
+    runner._resize_child = lambda: None
+    runner._enable_host_mouse = lambda: None
+
+    def _failing_open(name):
+        raise RuntimeError("worktree add failed")
+
+    runner._open_session_worktree = _failing_open
+
+    runner._ensure_worktree_alive()
+
+    assert runner.worktree is None
+    assert runner.name == "main"
+    assert runner.repo is runner.base_repo
+    assert any("base repo" in m for m in messages)
