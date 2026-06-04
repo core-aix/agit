@@ -1499,6 +1499,29 @@ def test_service_background_integrates_idle_session_cleanly():
     assert b.last_poll > 0.0  # throttle timestamp advanced
 
 
+def test_service_background_integrates_even_when_not_in_flight():
+    # Regression: a finished background session whose in-flight flag was already
+    # cleared (e.g. it committed but didn't integrate) must still be serviced —
+    # otherwise its commits sit unintegrated until the user switches to it.
+    runner = _mux_runner()
+    runner.merge_ctx = None
+    runner.CHILD_IDLE_SECONDS = 4.0
+    runner.POLL_SECONDS = 2.0
+    b = _bg_session("B")
+    b.agent_in_flight = False  # no longer flagged, but still has work to integrate
+    b.last_child_output = 0.0
+    b.last_poll = 0.0
+    runner.sessions.append(b)
+    serviced = []
+    runner._with_session = lambda session, fn: serviced.append(session.name) or "integrated"
+    runner._switch_active = lambda i: serviced.append(("switch", i))
+    runner._prompt_resolve_conflict = lambda src: serviced.append(("prompt", src))
+
+    runner._service_background_sessions()
+
+    assert serviced == ["B"]
+
+
 def test_service_background_conflict_switches_and_prompts():
     runner = _mux_runner()
     runner.merge_ctx = None
@@ -1734,3 +1757,24 @@ def test_resume_switches_to_already_live_conversation():
 
     assert runner.__dict__.get("_switched") == [0]
     assert "_created" not in runner.__dict__
+
+
+# --- idle worktree base-sync ---
+
+def test_sync_idle_worktrees_aligns_idle_skips_in_flight():
+    import types
+
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.active_index = 0
+    runner.repo = "repoA"
+    runner.agent_in_flight = False  # active session is idle
+    busy = types.SimpleNamespace(repo="repoB", agent_in_flight=True)   # working -> skip
+    idle = types.SimpleNamespace(repo="repoC", agent_in_flight=False)  # idle -> sync
+    runner.sessions = [types.SimpleNamespace(repo="repoA", agent_in_flight=False), busy, idle]
+    aligned = []
+    runner._align_session_to_base = lambda repo: aligned.append(repo)
+
+    runner._sync_idle_worktrees_to_base()
+
+    # Active (idle) + idle background are re-pointed; the in-flight one is left alone.
+    assert aligned == ["repoA", "repoC"]

@@ -354,6 +354,7 @@ class ProxyRunner:
         self.merge_ctx = None  # in-progress agent merge resolution, if any
         self._pending_enter_at: float | None = None  # deferred submit of an injected prompt
         self._pending_enter_fd: int | None = None  # the PTY that injected prompt's Enter must go to
+        self._base_advanced = False  # base moved; sync idle sessions onto it on the next loop pass
         self._warned_backend_session = False  # one-shot "use agit to start sessions" notice
         self.sessions: list = []
         self.active_index = 0
@@ -876,6 +877,24 @@ class ProxyRunner:
         self.repo.switch_detach(self._base_branch)
         if self.repo.current_branch() != source_branch:
             self.base_repo.delete_branch(source_branch, force=True)
+        # The base moved; other idle sessions should fast-forward onto it.
+        self._base_advanced = True
+
+    def _sync_idle_worktrees_to_base(self) -> None:
+        # Keep every idle session's worktree tracking the base: any session with no
+        # in-flight agent, no uncommitted changes, and nothing committed ahead of
+        # the base is re-pointed onto the (possibly just-advanced) base branch, so
+        # it works from the latest integrated state. `_align_session_to_base`
+        # guards the clean/no-pending conditions, so in-progress work is untouched.
+        for index in range(len(self.sessions)):
+            if index == self.active_index:
+                repo, in_flight = getattr(self, "repo", None), getattr(self, "agent_in_flight", False)
+            else:
+                snapshot = self.sessions[index]
+                repo, in_flight = getattr(snapshot, "repo", None), getattr(snapshot, "agent_in_flight", False)
+            if repo is None or in_flight:
+                continue
+            self._align_session_to_base(repo)
 
     def _ensure_turn_branch(self) -> None:
         # A merged-and-detached session sits at base between turns. Before its
@@ -1522,13 +1541,16 @@ class ProxyRunner:
                 # finalize it once the agent has gone idle (git-only, no input).
                 self._with_session(session, self._maybe_complete_agent_merge)
                 continue
-            if not getattr(session, "agent_in_flight", False):
-                continue
             if now - getattr(session, "last_child_output", 0.0) < self.CHILD_IDLE_SECONDS:
-                continue
+                continue  # still producing output — don't commit a turn mid-flight
             if now - getattr(session, "last_poll", 0.0) < self.POLL_SECONDS:
                 continue
             session.last_poll = now
+            # Service every idle background session (not just ones still flagged
+            # in-flight): a finished turn's commit may not be integrated yet, and
+            # the in-flight flag is cleared on idle, so gating on it would strand
+            # the work until the user switched to the session. The body is a cheap
+            # no-op (one `git status`) when there is nothing to commit or integrate.
             if self._with_session(session, self._commit_and_integrate_background) == "conflict":
                 self._switch_active(index)
                 self._prompt_resolve_conflict(self.repo.current_branch())
@@ -1796,6 +1818,9 @@ class ProxyRunner:
                 self._resume_pending_prompt_if_ready()
                 self._maybe_agent_commit()
                 self._service_background_sessions()
+            if self._base_advanced:
+                self._base_advanced = False
+                self._sync_idle_worktrees_to_base()
             if self.child_pid is not None:
                 done, status = os.waitpid(self.child_pid, os.WNOHANG)
                 if done:

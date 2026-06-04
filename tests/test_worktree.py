@@ -677,3 +677,42 @@ def test_remember_session_for_backend_persists_to_root(tmp_path):
     rec = AgitState(main.repo).recall_session("opencode")
     assert rec["id"] == "sess-77"
     assert rec["worktree"] == "session-2"
+
+
+def test_advance_base_to_flags_base_advanced(tmp_path):
+    main = _init_repo(tmp_path)
+    base = main.current_branch()
+    info, work = _make_session(main, "session-1", base)
+    _commit(work, "a.txt", "x\n", "<agent> work")
+
+    runner = _integration_runner(main, work, base, "session-1")
+    runner._base_advanced = False
+    runner._integrate_turn_or_conflict()  # clean fast-forward -> _advance_base_to
+
+    assert runner._base_advanced is True
+
+
+def test_sync_idle_worktree_fast_forwards_to_advanced_base(tmp_path):
+    import types
+
+    main = _init_repo(tmp_path)
+    base = main.current_branch()
+    # An idle session, detached at the base.
+    info = WorktreeManager(main).create("session-2", base=base)
+    work = GitRepo.discover(info.path)
+    assert work.is_detached()
+    base_before = main.rev_parse(base)
+    # The base advances (as if another session integrated work).
+    _commit(main, "new.txt", "x\n", "advance base")
+    assert main.rev_parse(base) != base_before
+
+    runner = _integration_runner(main, work, base, "session-2")
+    runner.repo = work
+    runner.agent_in_flight = False
+    runner.active_index = 0
+    runner.sessions = [types.SimpleNamespace(repo=work, agent_in_flight=False)]
+
+    runner._sync_idle_worktrees_to_base()
+
+    # The idle worktree fast-forwarded onto the advanced base.
+    assert work.rev_parse("HEAD") == main.rev_parse(base)
