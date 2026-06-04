@@ -1971,6 +1971,11 @@ class ProxyRunner:
             self.state.backend_session_id = None
             self.state.last_backend_message_id = None
             return
+        # Stage the conversation's transcript into this worktree so both the
+        # export below and `--resume` in `_spawn` can find it — the backend may
+        # have recorded it under a different directory (the repo root before aGiT,
+        # or a previous worktree).
+        self._stage_backend_resume(self.state.backend_session_id)
         session = self.backend.export_session(self.repo.repo, self.state.backend_session_id)
         if not session or not session.turns:
             # The recorded session has no actual conversation (e.g. it was created
@@ -1984,6 +1989,16 @@ class ProxyRunner:
         complete = [turn for turn in session.turns if turn.assistant_message_id]
         self.state.last_backend_message_id = complete[-1].assistant_message_id if complete else None
         self.state.clear_trace()
+
+    def _stage_backend_resume(self, session_id: str | None) -> None:
+        fn = getattr(self.backend, "ensure_resumable", None)
+        if fn is None or not session_id:
+            return
+        try:
+            if not fn(self.repo.repo, session_id):
+                self._debug(f"resume transcript not found for {session_id}")
+        except Exception as error:
+            self._debug(f"ensure_resumable failed: {error!r}")
 
     def _init_screen(self) -> None:
         self.rows, self.cols = self._terminal_size()

@@ -4,6 +4,27 @@ from agit import claude_session
 from agit.claude_session import export_session, latest_session_id, list_sessions, parse_rows, session_belongs_to_repo
 
 
+def test_prepare_resume_stages_transcript_into_worktree(monkeypatch, tmp_path):
+    config = tmp_path / "config"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+    repo_root = tmp_path / "repo"
+    worktree = repo_root / ".agit" / "worktrees" / "session-1"
+    repo_root.mkdir()
+    worktree.mkdir(parents=True)
+
+    # A conversation recorded under the repo root (e.g. a plain `claude` run).
+    root_proj = config / "projects" / claude_session._encode_repo(repo_root)
+    root_proj.mkdir(parents=True)
+    (root_proj / "abc.jsonl").write_text('{"type":"user"}\n', encoding="utf-8")
+
+    assert claude_session.prepare_resume(worktree, "abc") is True
+    staged = config / "projects" / claude_session._encode_repo(worktree) / "abc.jsonl"
+    assert staged.is_file()
+    # Idempotent and id-specific.
+    assert claude_session.prepare_resume(worktree, "abc") is True
+    assert claude_session.prepare_resume(worktree, "missing") is False
+
+
 def _user(uuid, text, **extra):
     row = {"type": "user", "uuid": uuid, "message": {"role": "user", "content": text}}
     row.update(extra)

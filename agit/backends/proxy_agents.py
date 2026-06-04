@@ -28,6 +28,11 @@ class ProxyAgent(Protocol):
     def session_belongs_to_repo(self, repo: Path, session_id: str) -> bool:
         ...
 
+    def ensure_resumable(self, repo: Path, session_id: str) -> bool:
+        """Make sure spawning the resume command in ``repo`` (as cwd) will find
+        this conversation, staging its transcript there if the backend stores
+        transcripts per directory. Returns True if it can be resumed."""
+
     def latest_session_id(self, repo: Path) -> str | None:
         ...
 
@@ -58,6 +63,10 @@ class OpenCodeProxyAgent:
 
     def session_belongs_to_repo(self, repo: Path, session_id: str) -> bool:
         return opencode_session.session_belongs_to_repo(repo, session_id)
+
+    def ensure_resumable(self, repo: Path, session_id: str) -> bool:
+        # OpenCode resumes by id from its own global store, regardless of cwd.
+        return bool(session_id)
 
     def latest_session_id(self, repo: Path) -> str | None:
         return opencode_session.latest_session_id(repo)
@@ -92,6 +101,9 @@ class ClaudeProxyAgent:
 
     def session_belongs_to_repo(self, repo: Path, session_id: str) -> bool:
         return claude_session.session_belongs_to_repo(repo, session_id)
+
+    def ensure_resumable(self, repo: Path, session_id: str) -> bool:
+        return claude_session.prepare_resume(repo, session_id)
 
     def latest_session_id(self, repo: Path) -> str | None:
         return claude_session.latest_session_id(repo)
