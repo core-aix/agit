@@ -495,6 +495,69 @@ def test_scrolled_view_shows_history_lines():
     assert text(runner._visible_lines())[-2] == "line19"
 
 
+def _paint_runner():
+    import types
+
+    import pyte
+
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.cols, runner.rows = 8, 4  # 3 visible content rows + 1 status row
+    runner.scroll_back = 0
+    runner.sel_active = False
+    runner.sel_anchor = runner.sel_point = None
+    runner.screen = pyte.HistoryScreen(8, 3, history=50, ratio=0.5)
+    runner.stream = pyte.ByteStream(runner.screen)
+    runner._in_sync_update = False
+    runner._sync_since = 0.0
+    runner.message = None
+    runner.message_until = 0.0
+    runner.input = types.SimpleNamespace(capturing=False)
+    runner._status_line = lambda: "STATUS".ljust(8)
+    return runner
+
+
+def test_render_wraps_frame_in_synchronized_update(monkeypatch):
+    runner = _paint_runner()
+    writes = []
+    monkeypatch.setattr(os, "write", lambda fd, data: writes.append(data) or len(data))
+
+    runner.stream.feed(b"\x1b[Hr0\r\nr1\r\nr2")
+    runner._render()
+    assert len(writes) == 1
+    out = writes[0].decode()
+    # The whole repaint is one atomic synchronized update (no tearing/flicker).
+    assert out.startswith("\x1b[?2026h") and out.endswith("\x1b[?2026l")
+    assert out.count("\x1b[?2026h") == 1 and out.count("\x1b[?2026l") == 1
+    # It is a full repaint: every visible row plus the status line is present.
+    assert "r0" in out and "r1" in out and "r2" in out and "STATUS" in out
+
+
+def test_track_sync_update_defers_then_releases_render():
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner._in_sync_update = False
+    runner._sync_since = 0.0
+    runner._render_pending = False
+    runner._last_render = 0.0
+    rendered = []
+    runner._render = lambda: rendered.append(1)
+
+    # Begin-sync with no matching end: aGiT is mid-update and must defer.
+    runner._track_sync_update(b"\x1b[?2026h")
+    assert runner._in_sync_update is True
+    runner._render_output()
+    assert rendered == [] and runner._render_pending is True
+
+    # End-sync releases the hold; the next output paints.
+    runner._track_sync_update(b"\x1b[?2026l")
+    assert runner._in_sync_update is False
+    runner._render_output()
+    assert rendered == [1]
+
+    # A begin+end inside one chunk ends not-in-update.
+    runner._track_sync_update(b"\x1b[?2026hABC\x1b[?2026l")
+    assert runner._in_sync_update is False
+
+
 def test_hold_incomplete_tail_buffers_split_escape_sequence():
     runner = ProxyRunner.__new__(ProxyRunner)
     # A mouse report split across reads must be held back, not leaked as bytes.

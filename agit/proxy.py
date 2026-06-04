@@ -255,6 +255,7 @@ class ProxyRunner:
     POLL_SECONDS = 2.0
     PARSE_COOLDOWN_SECONDS = 10.0
     RENDER_MIN_INTERVAL = 0.033  # coalesce output-driven repaints to ~30fps
+    SYNC_MAX_HOLD = 0.05  # cap how long a backend synchronized-update may defer a paint
 
     def __init__(self, repo: GitRepo, *, verbose: bool = False, backend: str | None = None, new_session: bool = False) -> None:
         self.repo = repo
@@ -296,6 +297,12 @@ class ProxyRunner:
         self.scroll_back = 0
         self._last_render = 0.0
         self._render_pending = False
+        # Synchronized output (DECSET 2026): while the backend is mid-update we
+        # hold the repaint so a half-drawn frame is never shown (tearing), and
+        # each repaint aGiT emits is itself wrapped in a 2026 update so the host
+        # applies the whole frame atomically (the flicker fix).
+        self._in_sync_update = False
+        self._sync_since = 0.0
         # Mouse drag selection -> clipboard (for backends aGiT renders itself).
         self.sel_active = False
         self.sel_anchor: tuple[int, int] | None = None
@@ -1480,6 +1487,7 @@ class ProxyRunner:
                     self.last_child_output_sample = (self.last_child_output_sample + output)[-4096:]
                     self._answer_terminal_queries(output)
                     self._sync_terminal_modes(output)
+                    self._track_sync_update(output)
                     self._feed_child_output(output)
                     self._render_output()
             if sys.stdin.fileno() in readable:
@@ -1622,6 +1630,7 @@ class ProxyRunner:
         self.screen = pyte.HistoryScreen(self.cols, max(self.rows - 1, 1), history=5000, ratio=0.5)
         self.stream = pyte.ByteStream(self.screen)
         self.scroll_back = 0
+        self._in_sync_update = False
 
     def _feed_child_output(self, output: bytes) -> None:
         if self.stream is not None:
@@ -1726,11 +1735,34 @@ class ProxyRunner:
             except OSError:
                 pass
 
+    def _track_sync_update(self, output: bytes) -> None:
+        # Honor the synchronized-update mode (DECSET 2026): backends wrap a
+        # multi-write repaint in BSU (?2026h) / ESU (?2026l) so consumers can
+        # apply it atomically. While inside such an update aGiT defers its own
+        # repaint, so it never paints a half-drawn frame (the cause of tearing).
+        # Only the last marker in the chunk decides the resulting state; a
+        # stuck-open update is bounded by SYNC_MAX_HOLD in the paint deciders.
+        begin = output.rfind(b"\x1b[?2026h")
+        end = output.rfind(b"\x1b[?2026l")
+        if begin == -1 and end == -1:
+            return
+        in_update = begin > end
+        if in_update and not self._in_sync_update:
+            self._sync_since = time.monotonic()
+        self._in_sync_update = in_update
+
+    def _sync_hold(self, now: float) -> bool:
+        # True while a backend synchronized-update should still defer the paint.
+        return self._in_sync_update and now - self._sync_since < self.SYNC_MAX_HOLD
+
     def _render_output(self) -> None:
         # Coalesce repaints driven by a flood of backend output (e.g. fast
         # scrolling) to ~30fps so aGiT does not overwhelm the host terminal's
         # stdout, which would block the loop and back up the backend's PTY.
         now = time.monotonic()
+        if self._sync_hold(now):
+            self._render_pending = True
+            return
         if now - self._last_render >= self.RENDER_MIN_INTERVAL:
             self._last_render = now
             self._render_pending = False
@@ -1742,15 +1774,33 @@ class ProxyRunner:
         if not self._render_pending:
             return
         now = time.monotonic()
+        if self._sync_hold(now):
+            return
         if now - self._last_render >= self.RENDER_MIN_INTERVAL:
             self._last_render = now
             self._render_pending = False
             self._render()
 
+    def _cursor_sequence(self) -> str:
+        # The trailing sequence that positions (and shows) or hides the cursor.
+        assert self.screen is not None
+        if self.scroll_back > 0:
+            # While scrolled into history, keep the cursor hidden (its live
+            # position is not meaningful for the displayed lines).
+            return "\x1b[?25l"
+        cursor = self.screen.cursor
+        cursor_row = min(cursor.y + 1, max(self.rows - 1, 1))
+        cursor_col = min(cursor.x + 1, self.cols)
+        return f"\x1b[{cursor_row};{cursor_col}H\x1b[?25h"
+
     def _render(self) -> None:
         if self.screen is None:
             return
-        parts = ["\x1b[0m\x1b[?25l\x1b[H"]
+        # Paint the whole screen inside one synchronized update (DECSET 2026) so
+        # the host terminal applies the frame atomically and never shows it
+        # half-drawn. Terminals that don't support 2026 ignore the markers and
+        # fall back to the previous (unwrapped) full-repaint behaviour.
+        parts = ["\x1b[?2026h\x1b[0m\x1b[?25l\x1b[H"]
         selection = self._selection_ranges()
         for index, cells in enumerate(self._visible_lines()):
             parts.append("\x1b[0m" + self._render_line(cells, selection.get(index)))
@@ -1760,15 +1810,8 @@ class ProxyRunner:
             self._append_command_palette(parts)
         elif self.message and time.monotonic() < self.message_until:
             self._append_message_popup(parts, self.message)
-        if self.scroll_back > 0:
-            # While scrolled into history, keep the cursor hidden (its live
-            # position is not meaningful for the displayed lines).
-            parts.append("\x1b[?25l")
-        else:
-            cursor = self.screen.cursor
-            cursor_row = min(cursor.y + 1, max(self.rows - 1, 1))
-            cursor_col = min(cursor.x + 1, self.cols)
-            parts.append(f"\x1b[{cursor_row};{cursor_col}H\x1b[?25h")
+        parts.append(self._cursor_sequence())
+        parts.append("\x1b[?2026l")
         os.write(sys.stdout.fileno(), "".join(parts).encode())
 
     def _append_command_palette(self, parts: list[str]) -> None:
