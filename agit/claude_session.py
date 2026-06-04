@@ -178,7 +178,13 @@ def parse_rows(session_id: str, rows: list[dict]) -> ExportedSession:
                 "model": model,
                 "tokens": TokenUsage(),
             }
-        elif row_type == "assistant" and current is not None and not row.get("isSidechain"):
+        elif row_type == "assistant" and current is not None and row.get("isSidechain"):
+            # Sub-agent (sidechain) turns are not part of the main interaction
+            # trace, but their tokens are still consumed — record them under the
+            # turn's sub-agent buckets instead of dropping them.
+            message = row.get("message") if isinstance(row.get("message"), dict) else {}
+            current["tokens"].add(_message_tokens(message.get("usage"), sidechain=True))
+        elif row_type == "assistant" and current is not None:
             message = row.get("message") if isinstance(row.get("message"), dict) else {}
             current["tokens"].add(_message_tokens(message.get("usage")))
             message_model = message.get("model")
@@ -235,13 +241,25 @@ def _assistant_text(message: dict) -> str:
     return "".join(texts).strip()
 
 
-def _message_tokens(usage: object) -> TokenUsage:
+def _message_tokens(usage: object, *, sidechain: bool = False) -> TokenUsage:
     if not isinstance(usage, dict):
         return TokenUsage()
     input_tokens = _int(usage.get("input_tokens"))
     output_tokens = _int(usage.get("output_tokens"))
     cache_read = _int(usage.get("cache_read_input_tokens"))
     cache_write = _int(usage.get("cache_creation_input_tokens"))
+    # Claude folds extended-thinking and tool-call tokens into output_tokens, so
+    # there is no separate reasoning figure to record here.
+    if sidechain:
+        # A sub-agent has its own context window; only its consumption counts,
+        # not its context size, so context is left untouched for the main turn.
+        return TokenUsage(
+            total=output_tokens,
+            subagent_input=input_tokens,
+            subagent_output=output_tokens,
+            subagent_cache_read=cache_read,
+            subagent_cache_write=cache_write,
+        )
     return TokenUsage(
         context=(input_tokens + cache_read + cache_write) or None,
         total=output_tokens,

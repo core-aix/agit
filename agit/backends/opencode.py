@@ -206,14 +206,7 @@ class OpenCodeBackend:
         )
 
     def _add_tokens(self, current: TokenUsage, addition: TokenUsage) -> None:
-        if addition.context is not None:
-            current.context = addition.context
-        current.total += addition.total
-        current.input += addition.input
-        current.output += addition.output
-        current.reasoning += addition.reasoning
-        current.cache_read += addition.cache_read
-        current.cache_write += addition.cache_write
+        current.add(addition)
 
     def _int_value(self, value: object) -> int:
         return value if isinstance(value, int) else 0

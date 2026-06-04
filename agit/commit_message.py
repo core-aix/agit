@@ -47,13 +47,13 @@ def build_agent_commit_message(
     subject_prompt, full_subject = _subject_parts(_mask_secrets(latest_prompt), width=MAX_SUBJECT_WIDTH - len(AGENT_SUBJECT_PREFIX))
     lines = [f"{AGENT_SUBJECT_PREFIX}{subject_prompt}", ""]
     if full_subject:
-        lines.extend(["Full subject:", *_body_lines(full_subject), ""])
-    lines.append("Interaction Trace:")
+        lines.extend(["# Full Subject", "", *_body_lines(full_subject), ""])
+    lines.extend(["# Interaction Trace", ""])
     for item in _limit_trace_turns(trace, trace_turn_limit):
         role = item.get("role", "").strip().lower()
         content = _mask_secrets(item.get("content", ""))
         label = "User" if role == "user" else "Agent"
-        lines.extend([f"{label}:", *_body_lines(content), ""])
+        lines.extend([f"## {label}", "", *_body_lines(content), ""])
 
     lines.extend(
         [
@@ -88,7 +88,7 @@ def build_agent_merge_message(
     subject = f"{AGENT_MERGE_SUBJECT_PREFIX}integrate {session_name or source_branch} into {base_branch}"
     lines = [_subject_text(subject, width=MAX_SUBJECT_WIDTH), ""]
     if conflicting_commits and conflicting_commits.strip():
-        lines.append("Resolved against base commits:")
+        lines.extend(["# Resolved Against Base Commits", ""])
         lines.extend(_body_lines(_mask_secrets(conflicting_commits)))
         lines.append("")
     lines.extend(
@@ -121,7 +121,7 @@ def build_user_commit_message(
         "",
     ]
     if full_subject:
-        lines.extend(["Full subject:", *_body_lines(full_subject), ""])
+        lines.extend(["# Full Subject", "", *_body_lines(full_subject), ""])
     lines.extend(["# aGiT Metadata", "commit_type: user", "backend: agit", f"agit_session_id: {agit_session_id}", f"agit_version: {__version__}"])
     return "\n".join(lines).rstrip() + "\n"
 
@@ -169,17 +169,32 @@ def _token_value(token_usage: dict[str, int | None] | None, key: str) -> int | s
     return value if value is not None else "unknown"
 
 
+def _append_positive(lines: list[str], key: str, value: object) -> None:
+    """Record a token category only when the backend actually reports it."""
+    amount = value if isinstance(value, int) else 0
+    if amount > 0:
+        lines.append(f"{key}: {amount}")
+
+
 def _token_metadata_lines(token_usage: dict[str, int | None] | None) -> list[str]:
     lines = [f"context_tokens: {_token_value(token_usage, 'context')}"]
-    if token_usage:
-        input_tokens = token_usage.get("input")
-        reasoning_tokens = token_usage.get("reasoning") or 0
-        if input_tokens:
-            lines.append(f"tokens_since_last_commit_input: {input_tokens}")
-        # Only record reasoning/thinking tokens when the backend reports them.
-        if reasoning_tokens:
-            lines.append(f"tokens_since_last_commit_reasoning: {reasoning_tokens}")
-    else:
+    if not token_usage:
         lines.append("tokens_since_last_commit_input: unknown")
-    lines.append(f"tokens_since_last_commit_output: {_token_value(token_usage, 'output')}")
+        lines.append("tokens_since_last_commit_output: unknown")
+        return lines
+    # Main-line conversation consumption, broken out by category. Input and
+    # output are always recorded; cache and reasoning only when non-zero so the
+    # metadata stays compact for backends that do not report them.
+    lines.append(f"tokens_since_last_commit_input: {int(token_usage.get('input') or 0)}")
+    _append_positive(lines, "tokens_since_last_commit_cache_read", token_usage.get("cache_read"))
+    _append_positive(lines, "tokens_since_last_commit_cache_write", token_usage.get("cache_write"))
+    lines.append(f"tokens_since_last_commit_output: {int(token_usage.get('output') or 0)}")
+    _append_positive(lines, "tokens_since_last_commit_reasoning", token_usage.get("reasoning"))
+    # Sub-agent / sidechain consumption, recorded separately and only when the
+    # backend exposes it.
+    _append_positive(lines, "tokens_since_last_commit_subagent_input", token_usage.get("subagent_input"))
+    _append_positive(lines, "tokens_since_last_commit_subagent_cache_read", token_usage.get("subagent_cache_read"))
+    _append_positive(lines, "tokens_since_last_commit_subagent_cache_write", token_usage.get("subagent_cache_write"))
+    _append_positive(lines, "tokens_since_last_commit_subagent_output", token_usage.get("subagent_output"))
+    _append_positive(lines, "tokens_since_last_commit_subagent_reasoning", token_usage.get("subagent_reasoning"))
     return lines

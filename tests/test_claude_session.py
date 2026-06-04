@@ -71,6 +71,34 @@ def test_parse_rows_excludes_meta_sidechain_tool_results_and_commands():
     assert session.turns[0].final_response == "response"
 
 
+def test_parse_rows_attributes_sidechain_tokens_to_subagent_buckets():
+    rows = [
+        _user("real", "the real prompt"),
+        _assistant("m1", "response", usage={"input_tokens": 30, "output_tokens": 50}),
+        {
+            "type": "assistant",
+            "isSidechain": True,
+            "message": {
+                "id": "sx",
+                "content": [{"type": "text", "text": "side"}],
+                "usage": {"input_tokens": 40, "output_tokens": 60, "cache_read_input_tokens": 700},
+            },
+        },
+    ]
+
+    turn = parse_rows("sess-3", rows).turns[0]
+
+    # Main-line counters reflect only the non-sidechain assistant message.
+    assert turn.tokens.output == 50
+    assert turn.tokens.input == 30
+    # Sidechain consumption is recorded separately, not folded into the main count.
+    assert turn.tokens.subagent_input == 40
+    assert turn.tokens.subagent_output == 60
+    assert turn.tokens.subagent_cache_read == 700
+    # The sub-agent's context size never overrides the main turn's context.
+    assert turn.tokens.context == 30
+
+
 def test_export_session_reads_jsonl_from_project_dir(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()

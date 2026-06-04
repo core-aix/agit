@@ -23,16 +23,19 @@ def test_agent_commit_message_contains_trace_and_metadata():
     )
 
     assert message.startswith("<agent> fix it")
-    assert "User:\nfix it" in message
-    assert "Agent:\nfixed" in message
+    assert "# Interaction Trace" in message
+    assert "## User\n\nfix it" in message
+    assert "## Agent\n\nfixed" in message
     assert "# aGiT Metadata" in message
     assert "backend: opencode" in message
     assert "backend_session_id: ses-1" in message
     assert "context_tokens: 100" in message
     assert "tokens_since_last_commit_input: 130" in message
     assert "tokens_since_last_commit_output: 10" in message
+    assert "tokens_since_last_commit_cache_read: 20" in message
+    assert "tokens_since_last_commit_cache_write: 5" in message
     assert "tokens_since_last_commit_total" not in message
-    assert "tokens_since_last_commit_cache_read" not in message
+    assert "tokens_since_last_commit_subagent_input" not in message
     assert "token_note" not in message
 
 
@@ -82,7 +85,7 @@ def test_agent_commit_message_preserves_user_trace_order():
         model="provider/model",
     )
 
-    assert message.index("User:\nfix it") < message.index("User:\nalso handle errors")
+    assert message.index("## User\n\nfix it") < message.index("## User\n\nalso handle errors")
 
 
 def test_agent_commit_message_omits_zero_reasoning():
@@ -112,6 +115,38 @@ def test_agent_commit_message_includes_nonzero_reasoning():
     )
 
     assert "tokens_since_last_commit_reasoning: 6" in message
+
+
+def test_agent_commit_message_records_subagent_token_categories():
+    message = build_agent_commit_message(
+        latest_prompt="fix it",
+        trace=[],
+        backend="claude",
+        backend_session_id="ses-1",
+        agit_session_id="agit-1",
+        model="claude-opus-4-8",
+        token_usage={
+            "context": 100,
+            "total": 5,
+            "input": 100,
+            "output": 5,
+            "reasoning": 0,
+            "cache_read": 0,
+            "cache_write": 0,
+            "subagent_input": 40,
+            "subagent_output": 60,
+            "subagent_reasoning": 0,
+            "subagent_cache_read": 700,
+            "subagent_cache_write": 0,
+        },
+    )
+
+    assert "tokens_since_last_commit_subagent_input: 40" in message
+    assert "tokens_since_last_commit_subagent_output: 60" in message
+    assert "tokens_since_last_commit_subagent_cache_read: 700" in message
+    # Zero-valued sub-agent categories stay out of the metadata.
+    assert "tokens_since_last_commit_subagent_reasoning" not in message
+    assert "tokens_since_last_commit_subagent_cache_write" not in message
 
 
 def test_user_commit_message_rejects_blank_message():
@@ -155,7 +190,7 @@ def test_agent_commit_subject_is_capped_for_github():
     assert len(subject) <= 50
     assert subject.startswith("<agent> ")
     assert subject.endswith("...")
-    assert "Full subject:\n" in message
+    assert "# Full Subject\n" in message
     assert "please please please" in message
 
 
@@ -165,7 +200,7 @@ def test_user_commit_subject_is_capped_for_github():
     subject = message.splitlines()[0]
     assert len(subject) <= 50
     assert subject.endswith("...")
-    assert "Full subject:\n" in message
+    assert "# Full Subject\n" in message
 
 
 def test_commit_message_body_lines_are_wrapped_to_72():
@@ -200,10 +235,10 @@ def test_agent_commit_trace_is_limited_by_user_turns():
         trace_turn_limit=5,
     )
 
-    assert "User:\nuser 0" not in message
-    assert "User:\nuser 1" not in message
-    assert "User:\nuser 2" in message
-    assert "Agent:\nagent 6" in message
+    assert "## User\n\nuser 0" not in message
+    assert "## User\n\nuser 1" not in message
+    assert "## User\n\nuser 2" in message
+    assert "## Agent\n\nagent 6" in message
 
 
 def test_subject_strips_terminal_escape_sequences():

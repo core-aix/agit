@@ -47,7 +47,9 @@ def test_state_adds_repo_local_git_exclude(tmp_path):
 def test_state_accumulates_pending_token_usage(tmp_path):
     state = AgitState(tmp_path)
     state.add_token_usage(TokenUsage(context=100, total=25, input=20, output=5, cache_read=3))
-    state.add_token_usage(TokenUsage(context=120, total=12, input=10, output=2, reasoning=1))
+    state.add_token_usage(
+        TokenUsage(context=120, total=12, input=10, output=2, reasoning=1, subagent_input=8, subagent_output=15)
+    )
 
     assert state.pending_token_usage() == {
         "context": 120,
@@ -57,6 +59,11 @@ def test_state_accumulates_pending_token_usage(tmp_path):
         "reasoning": 1,
         "cache_read": 3,
         "cache_write": 0,
+        "subagent_input": 8,
+        "subagent_output": 15,
+        "subagent_reasoning": 0,
+        "subagent_cache_read": 0,
+        "subagent_cache_write": 0,
     }
     state.clear_trace()
     assert state.pending_token_usage()["total"] == 0

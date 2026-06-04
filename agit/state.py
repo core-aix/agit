@@ -44,6 +44,11 @@ class AgitState:
                 "reasoning": 0,
                 "cache_read": 0,
                 "cache_write": 0,
+                "subagent_input": 0,
+                "subagent_output": 0,
+                "subagent_reasoning": 0,
+                "subagent_cache_read": 0,
+                "subagent_cache_write": 0,
             },
         }
 
@@ -214,7 +219,19 @@ class AgitState:
         current = self.pending_token_usage()
         if usage.context is not None:
             current["context"] = usage.context
-        for key in ("total", "input", "output", "reasoning", "cache_read", "cache_write"):
+        for key in (
+            "total",
+            "input",
+            "output",
+            "reasoning",
+            "cache_read",
+            "cache_write",
+            "subagent_input",
+            "subagent_output",
+            "subagent_reasoning",
+            "subagent_cache_read",
+            "subagent_cache_write",
+        ):
             current[key] = int(current.get(key) or 0) + int(getattr(usage, key, 0) or 0)
         self.data["pending_token_usage"] = current
         self.save()

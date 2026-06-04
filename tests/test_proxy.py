@@ -270,8 +270,8 @@ def test_proxy_agent_commit_preserves_incomplete_initial_user_turn(tmp_path):
     assert committed is True
     message = runner.repo.message
     assert message.startswith("<agent> fix it / also handle errors")
-    assert message.index("User:\nfix it") < message.index("User:\nalso handle errors")
-    assert message.index("User:\nalso handle errors") < message.index("Agent:\ndone")
+    assert message.index("## User\n\nfix it") < message.index("## User\n\nalso handle errors")
+    assert message.index("## User\n\nalso handle errors") < message.index("## Agent\n\ndone")
 
 
 def test_proxy_agent_commit_preserves_previous_no_change_trace(tmp_path):
@@ -296,9 +296,9 @@ def test_proxy_agent_commit_preserves_previous_no_change_trace(tmp_path):
 
     assert committed is True
     message = runner.repo.message
-    assert message.index("User:\nexplain only") < message.index("Agent:\nno code changed")
-    assert message.index("Agent:\nno code changed") < message.index("User:\nnow edit")
-    assert message.count("User:\nexplain only") == 1
+    assert message.index("## User\n\nexplain only") < message.index("## Agent\n\nno code changed")
+    assert message.index("## Agent\n\nno code changed") < message.index("## User\n\nnow edit")
+    assert message.count("## User\n\nexplain only") == 1
 
 
 def test_proxy_plain_row_handles_empty_pyte_cell_data():
