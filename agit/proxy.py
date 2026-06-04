@@ -1990,6 +1990,19 @@ class ProxyRunner:
         self.state.last_backend_message_id = complete[-1].assistant_message_id if complete else None
         self.state.clear_trace()
 
+    def _mirror_session_to_base(self, session_id: str | None) -> None:
+        # Link an aGiT-born conversation's transcript into the base repo's project
+        # dir so a plain CLI run in the repo root can see/continue it. Idempotent
+        # (no-op once linked, or when the session already lives at the base, or for
+        # backends without per-directory storage).
+        fn = getattr(self.backend, "mirror_to_base", None)
+        if fn is None or not session_id or getattr(self, "worktree", None) is None:
+            return
+        try:
+            fn(self.base_repo.repo, self.repo.repo, session_id)
+        except Exception as error:
+            self._debug(f"mirror_to_base failed: {error!r}")
+
     def _stage_backend_resume(self, session_id: str | None) -> None:
         fn = getattr(self.backend, "ensure_resumable", None)
         if fn is None or not session_id:
@@ -3059,6 +3072,9 @@ class ProxyRunner:
         new_session_id = session.session_id or session_id
         self._note_backend_session_change(new_session_id)
         self.state.backend_session_id = new_session_id
+        # Surface this worktree conversation in the repo root too, so it can be
+        # continued with a plain `claude` run there (the transcript exists now).
+        self._mirror_session_to_base(new_session_id)
         if session.model:
             self.state.model = session.model
         turns = turns_after(session, last_message_id)

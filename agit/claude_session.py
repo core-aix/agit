@@ -20,6 +20,7 @@ __all__ = [
     "session_belongs_to_repo",
     "export_session",
     "prepare_resume",
+    "link_session",
     "parse_rows",
 ]
 
@@ -138,9 +139,12 @@ def prepare_resume(worktree: Path, session_id: str) -> bool:
 
     Claude looks up a session's transcript in the project dir of its current
     working directory, so a conversation recorded elsewhere (the repo root before
-    aGiT ran, or a different worktree) is invisible from a fresh worktree. Copy the
-    transcript into the worktree's project dir so the resume finds it; Claude then
-    appends new turns there. Returns True if the transcript is in place."""
+    aGiT ran, or a different worktree) is invisible from a fresh worktree. Link the
+    transcript into the worktree's project dir so the resume finds it. We hardlink
+    (one inode, two names) rather than copy, so turns aGiT appends from the worktree
+    stay visible to a plain `claude` run in the original directory, and vice-versa
+    — the conversation does not fork. Falls back to a copy only across filesystems
+    (where hardlinks aren't possible). Returns True if the transcript is in place."""
     if not session_id:
         return False
     worktree = Path(worktree)
@@ -155,7 +159,41 @@ def prepare_resume(worktree: Path, session_id: str) -> bool:
         return True
     try:
         target_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target)
+    except OSError:
+        return False
+    try:
+        os.link(source, target)  # share one inode so new turns flow both ways
+    except FileExistsError:
+        return True
+    except OSError:
+        try:
+            shutil.copy2(source, target)  # different filesystem: copy instead
+        except OSError:
+            return False
+    return True
+
+
+def link_session(session_id: str, src_repo: Path, dst_repo: Path) -> bool:
+    """Hardlink a session's transcript from ``src_repo``'s project dir into
+    ``dst_repo``'s, so the conversation is also visible/continuable from
+    ``dst_repo`` — e.g. surfacing an aGiT worktree session in the repo root so a
+    plain ``claude`` run there can resume it. One inode, two names, so later turns
+    stay shared. No-op if the source isn't recorded yet or a transcript already
+    sits at the destination."""
+    if not session_id:
+        return False
+    src = _session_path(Path(src_repo), session_id)
+    if not src.is_file():
+        return False
+    dst_dir = _project_dir(Path(dst_repo))
+    dst = dst_dir / f"{session_id}.jsonl"
+    if dst.exists():
+        return True
+    try:
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        os.link(src, dst)
+    except FileExistsError:
+        return True
     except OSError:
         return False
     return True
