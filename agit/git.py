@@ -93,6 +93,14 @@ class GitRepo:
             command.append(base)
         self._run(command)
 
+    def switch_detach(self, ref: str) -> None:
+        # Detach HEAD at ``ref`` (keeping any working-tree changes), leaving no
+        # branch checked out — so a now-empty turn branch can be deleted.
+        self._run(["git", "switch", "--detach", ref])
+
+    def is_detached(self) -> bool:
+        return self.current_branch() == "HEAD"
+
     def worktree_add(self, path: str, *, branch: str, base: str) -> None:
         self._run(["git", "worktree", "add", "-b", branch, path, base])
 
@@ -146,6 +154,17 @@ class GitRepo:
     def unmerged_paths(self) -> list[str]:
         output = self._run(["git", "diff", "--name-only", "--diff-filter=U"], check=False).stdout
         return [line for line in output.splitlines() if line]
+
+    def merge_in_progress(self) -> bool:
+        return self._run(["git", "rev-parse", "--verify", "--quiet", "MERGE_HEAD"], check=False).returncode == 0
+
+    def has_conflict_markers(self) -> bool:
+        # `git diff --check` reports leftover conflict markers (and whitespace errors).
+        output = self._run(["git", "diff", "--check"], check=False).stdout
+        return "conflict marker" in output.lower()
+
+    def add_all(self) -> None:
+        self._run(["git", "add", "-A"])
 
     def log_range(self, base: str, head: str, *, paths: list[str] | None = None) -> str:
         command = ["git", "log", "--no-color", "--format=%h %s", f"{base}..{head}"]

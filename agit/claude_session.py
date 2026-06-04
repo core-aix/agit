@@ -15,6 +15,7 @@ __all__ = [
     "turns_after",
     "latest_session_id",
     "list_sessions",
+    "list_worktree_sessions",
     "session_belongs_to_repo",
     "export_session",
     "parse_rows",
@@ -61,8 +62,7 @@ def latest_session_id(repo: Path) -> str | None:
     return max(refs, key=lambda ref: ref.updated).id
 
 
-def list_sessions(repo: Path) -> list[SessionRef]:
-    project_dir = _project_dir(repo)
+def _refs_in_project_dir(project_dir: Path) -> list[SessionRef]:
     if not project_dir.is_dir():
         return []
     refs = []
@@ -75,6 +75,32 @@ def list_sessions(repo: Path) -> list[SessionRef]:
             continue
         refs.append(SessionRef(id=path.stem, updated=updated, label=_session_label(path)))
     return refs
+
+
+def list_sessions(repo: Path) -> list[SessionRef]:
+    return _refs_in_project_dir(_project_dir(repo))
+
+
+def list_worktree_sessions(worktrees_root: Path) -> list[tuple[str, SessionRef]]:
+    """Every Claude conversation recorded under any aGiT worktree of this repo,
+    newest first, paired with the worktree key needed to recreate it. Includes
+    conversations whose worktree has since been deleted (Claude keeps the
+    transcript keyed by the worktree path), so they stay resumable."""
+    root = _projects_root()
+    if not root.is_dir():
+        return []
+    prefix = _encode_repo(worktrees_root) + "-"
+    out: list[tuple[str, SessionRef]] = []
+    for project_dir in root.iterdir():
+        if not project_dir.is_dir() or not project_dir.name.startswith(prefix):
+            continue
+        worktree_key = project_dir.name[len(prefix):]
+        if not worktree_key:
+            continue
+        for ref in _refs_in_project_dir(project_dir):
+            out.append((worktree_key, ref))
+    out.sort(key=lambda item: item[1].updated, reverse=True)
+    return out
 
 
 def _session_label(path: Path, *, line_limit: int = 100) -> str | None:

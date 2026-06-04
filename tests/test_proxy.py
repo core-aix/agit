@@ -84,12 +84,19 @@ class FakeCommitRepo:
 def test_proxy_ctrl_g_enters_command_mode():
     parser = ProxyInput()
 
-    forwarded, local_echo, command, should_exit = parser.feed(b"\x07status\r")
+    forwarded, local_echo, command, should_exit = parser.feed(b"\x07git-status\r")
 
     assert forwarded == []
     assert local_echo == b""
-    assert command == "status"
+    assert command == "git-status"
     assert should_exit is False
+
+
+def test_proxy_s_jumps_to_session():
+    # Only "session" starts with "s", so s+Enter selects it directly.
+    parser = ProxyInput()
+    _f, _e, command, _x = parser.feed(b"\x07s\r")
+    assert command == "session"
 
 
 def test_proxy_forwards_colon_at_line_start():
@@ -159,22 +166,23 @@ def test_proxy_escape_clears_command_buffer():
 def test_proxy_tab_completes_command():
     parser = ProxyInput()
 
-    forwarded, local_echo, command, should_exit = parser.feed(b"\x07sta\t\r")
+    forwarded, local_echo, command, should_exit = parser.feed(b"\x07git-stat\t\r")
 
     assert forwarded == []
     assert local_echo == b""
-    assert command == "status"
+    assert command == "git-status"
     assert should_exit is False
 
 
 def test_proxy_arrow_selection_runs_selected_command():
     parser = ProxyInput()
 
+    # Down-arrow from the first command (session) selects the second.
     forwarded, local_echo, command, should_exit = parser.feed(b"\x07\x1b[B\r")
 
     assert forwarded == []
     assert local_echo == b""
-    assert command == "stage"
+    assert command == "agent-backend"
     assert should_exit is False
 
 
@@ -185,17 +193,17 @@ def test_proxy_tab_completes_selected_command():
 
     assert forwarded == []
     assert local_echo == b""
-    assert command == "stage"
+    assert command == "agent-backend"
 
 
 def test_proxy_enter_runs_selected_partial_match_without_tab():
     parser = ProxyInput()
 
-    forwarded, local_echo, command, should_exit = parser.feed(b"\x07sta\r")
+    forwarded, local_echo, command, should_exit = parser.feed(b"\x07git-stat\r")
 
     assert forwarded == []
     assert local_echo == b""
-    assert command == "status"
+    assert command == "git-status"
     assert should_exit is False
 
 
@@ -213,11 +221,11 @@ def test_proxy_agent_backend_command_name():
 def test_proxy_ignores_sgr_mouse_sequences_in_command_mode():
     parser = ProxyInput()
 
-    forwarded, local_echo, command, should_exit = parser.feed(b"\x07\x1b[<35;88;11Mstatus\r")
+    forwarded, local_echo, command, should_exit = parser.feed(b"\x07\x1b[<35;88;11Mgit-status\r")
 
     assert forwarded == []
     assert local_echo == b""
-    assert command == "status"
+    assert command == "git-status"
     assert should_exit is False
 
 
@@ -591,6 +599,229 @@ def test_read_only_observer_skips_pre_agent_commit():
     runner.tracking_enabled = False
     # Returns True (forward the prompt) without inspecting the repo.
     assert runner._pre_agent_commit_if_needed("do it") is True
+
+
+def _mux_runner():
+    import agit.session_runtime as sr
+    from agit.session_runtime import capture_session
+
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.cols, runner.rows = 20, 5
+    runner.color_mode = "truecolor"
+    runner.host_fg_value = runner.host_bg_value = runner.host_da = None
+    runner.host_palette = {}
+    runner.tracking_enabled = True
+    runner._render = lambda: None
+    runner._resize_child = lambda: None
+    runner._enable_host_mouse = lambda: None
+    runner._set_message = lambda *a, **k: None
+    runner._stop_file_watcher = lambda: None
+    for field, value in sr.default_session_fields().items():
+        setattr(runner, field, value)
+    runner.name, runner.worktree = "A", None
+    runner.repo, runner.state, runner.backend, runner.actions = "repoA", "stateA", "bA", "actA"
+    runner.sessions = [capture_session(runner)]
+    runner.active_index = 0
+    return runner
+
+
+def _bg_session(name):
+    import agit.session_runtime as sr
+
+    return sr.Session(**{**sr.default_session_fields(), "name": name, "repo": f"repo{name}",
+                         "state": f"state{name}", "backend": f"b{name}", "actions": f"act{name}"})
+
+
+def test_switch_active_swaps_session_state():
+    runner = _mux_runner()
+    runner.sessions.append(_bg_session("B"))
+
+    runner._switch_active(1)
+    assert runner.active_index == 1 and runner.repo == "repoB"
+    assert runner.sessions[0].repo == "repoA"  # A's state was preserved
+
+    runner._switch_active(0)
+    assert runner.repo == "repoA"
+    assert runner.sessions[1].repo == "repoB"
+
+
+def test_background_fds_excludes_active_session():
+    runner = _mux_runner()
+    b = _bg_session("B")
+    b.master_fd = 20
+    runner.sessions.append(b)
+    runner.sessions[0].master_fd = 10  # active snapshot fd (handled separately)
+    assert runner._background_fds() == {20: b}
+
+
+def test_pump_background_feeds_screen_without_disturbing_active():
+    import os
+    import pyte
+
+    runner = _mux_runner()
+    b = _bg_session("B")
+    read_fd, write_fd = os.pipe()
+    b.master_fd = read_fd
+    b.screen = pyte.HistoryScreen(20, 4, history=10, ratio=0.5)
+    b.stream = pyte.ByteStream(b.screen)
+    runner.sessions.append(b)
+    try:
+        os.write(write_fd, b"hello-bg")
+        runner._pump_background(b)
+        row0 = "".join((b.screen.buffer[0].get(x).data if b.screen.buffer[0].get(x) else " ") for x in range(8))
+        assert row0 == "hello-bg"
+        assert runner.repo == "repoA"  # active session untouched
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+
+
+def test_baseline_drops_session_with_no_conversation(tmp_path):
+    from types import SimpleNamespace
+
+    from agit.session import ExportedSession
+
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.state = AgitState(tmp_path)
+    runner.state.backend_session_id = "ses-empty"
+    runner.repo = SimpleNamespace(repo=tmp_path)
+    runner._should_continue_session = lambda: True
+    # A session that exists but has no turns must not be resumed.
+    runner.backend = SimpleNamespace(export_session=lambda repo, sid: ExportedSession(sid, None, None, []))
+
+    runner._initialize_session_baseline()
+
+    assert runner.state.backend_session_id is None
+    assert runner.state.last_backend_message_id is None
+
+
+def test_new_session_flag_clears_backend_session_and_mints_agit_id(tmp_path):
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner._force_new_session = True
+    runner.state = AgitState(tmp_path)
+    runner.state.backend_session_id = "old-session"
+    old_agit = runner.state.session_id
+
+    runner._apply_new_session_if_requested()
+
+    assert runner.state.backend_session_id is None
+    assert runner.state.session_id != old_agit
+
+
+def test_status_line_shows_base_branch(tmp_path):
+    import subprocess
+
+    from agit.git import GitRepo
+    from agit.state import AgitState
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.repo = GitRepo(tmp_path)
+    runner.state = AgitState(tmp_path)
+    runner.state.backend_session_id = "abcdef123456"
+    runner.name = "session-1"
+    runner.backend = type("B", (), {"name": "claude"})()
+    runner._base_branch = "main"
+    runner.worktree = object()
+    runner.tracking_enabled = True
+    runner.scroll_back = 0
+    runner.cols = 120
+
+    line = runner._status_line()
+    assert "session-1" in line
+    assert "→ main" in line  # the branch this session's work merges into
+
+
+def test_inject_prompt_defers_enter_until_text_settles():
+    import os
+    import time
+
+    read_fd, write_fd = os.pipe()
+    try:
+        runner = ProxyRunner.__new__(ProxyRunner)
+        runner.master_fd = write_fd
+        runner.merge_ctx = {"prompt_sent_at": None}
+        runner._pending_enter_at = None
+
+        runner._inject_prompt("resolve the\nconflict   now")
+        # The text is typed immediately, collapsed to a single line, with NO
+        # trailing carriage return (that would submit mid-paste).
+        typed = os.read(read_fd, 4096)
+        assert typed == b"resolve the conflict now"
+        assert runner._pending_enter_at is not None
+        assert runner.merge_ctx["prompt_sent_at"] is None  # not submitted yet
+
+        # Too early: the Enter is still pending.
+        runner._flush_pending_enter()
+        assert runner._pending_enter_at is not None
+
+        # Once the settle delay elapses, the Enter is sent as its own keystroke.
+        runner._pending_enter_at = time.monotonic() - 0.01
+        runner._flush_pending_enter()
+        assert os.read(read_fd, 16) == b"\r"
+        assert runner._pending_enter_at is None
+        assert runner.merge_ctx["prompt_sent_at"] is not None
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+
+
+def test_backend_session_change_warns_once(tmp_path):
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.worktree = object()  # a worktree session
+    runner._warned_backend_session = False
+    runner.state = AgitState(tmp_path)
+    runner.state.backend_session_id = "old"
+    messages = []
+    runner._set_message = lambda message, **kw: messages.append(message)
+
+    runner._note_backend_session_change("new")
+    assert messages and "separate branch" in messages[0].lower()
+    assert runner._warned_backend_session is True
+
+    # It only warns once, not on every subsequent change.
+    messages.clear()
+    runner.state.backend_session_id = "new"
+    runner._note_backend_session_change("newer")
+    assert messages == []
+
+
+def test_new_session_not_applied_without_flag(tmp_path):
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner._force_new_session = False
+    runner.state = AgitState(tmp_path)
+    runner.state.backend_session_id = "keep-this"
+    runner._apply_new_session_if_requested()
+    assert runner.state.backend_session_id == "keep-this"
+
+
+def test_finalize_pending_work_commits_non_interactively():
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.tracking_enabled = True
+    runner.agent_parse_thread = None
+    runner.sessions = []
+    runner.active_index = 0
+    runner._set_message = lambda *a, **k: None
+    runner._render = lambda: None
+    runner._debug = lambda *a, **k: None
+    runner._start_agent_parse = lambda: False
+    calls = []
+    runner._finish_agent_parse_if_ready = lambda **k: (calls.append(k), False)[1]
+
+    runner._finalize_pending_work()
+
+    assert calls, "finalize should attempt to commit the latest turn"
+    # Exit must never block on the untracked-files prompt.
+    assert all(call.get("prompt_untracked") is False for call in calls)
+
+
+def test_finalize_pending_work_skipped_for_read_only_observer():
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.tracking_enabled = False
+    called = []
+    runner._finish_agent_parse_if_ready = lambda **k: called.append(k)
+    runner._finalize_pending_work()
+    assert called == []
 
 
 def test_confirm_exit_read_only_exits_without_prompt():

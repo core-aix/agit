@@ -23,6 +23,11 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="agent backend to use; also saved as the global default",
     )
+    parser.add_argument(
+        "--new-session",
+        action="store_true",
+        help="start a fresh backend conversation instead of resuming the last one",
+    )
     args = parser.parse_args(argv)
 
     # First run: ask the user to choose a default backend before launching.
@@ -33,9 +38,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         repo = GitRepo.discover(Path(args.repo).expanduser())
         if args.mode == "json":
-            AgitShell(repo, verbose=args.verbose, backend=args.backend).run()
+            AgitShell(repo, verbose=args.verbose, backend=args.backend, new_session=args.new_session).run()
         else:
-            return ProxyRunner(repo, verbose=args.verbose, backend=args.backend).run()
+            return ProxyRunner(repo, verbose=args.verbose, backend=args.backend, new_session=args.new_session).run()
     except (GitError, RuntimeError) as error:
         print(error)
         return 1

@@ -105,6 +105,34 @@ def test_list_sessions_returns_refs_with_labels(tmp_path, monkeypatch):
     assert latest_session_id(repo) in {"s1", "s2"}
 
 
+def test_list_worktree_sessions_aggregates_by_recency(tmp_path, monkeypatch):
+    import os
+    import time
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+    worktrees_root = tmp_path / "repo" / ".agit" / "worktrees"
+    worktrees_root.mkdir(parents=True)
+
+    # Two worktree paths -> two encoded project dirs under Claude's projects root.
+    alpha_dir = claude_session._project_dir(worktrees_root / "alpha")
+    beta_dir = claude_session._project_dir(worktrees_root / "beta")
+    alpha_dir.mkdir(parents=True)
+    beta_dir.mkdir(parents=True)
+    (alpha_dir / "sess-a.jsonl").write_text(json.dumps(_user("u1", "hello from alpha")) + "\n")
+    (beta_dir / "sess-b.jsonl").write_text(json.dumps(_user("u2", "hello from beta")) + "\n")
+    os.utime(beta_dir / "sess-b.jsonl", (time.time() + 10, time.time() + 10))  # beta is newer
+
+    result = claude_session.list_worktree_sessions(worktrees_root)
+    ids = [ref.id for _, ref in result]
+    assert ids == ["sess-b", "sess-a"]  # newest first
+
+    # The returned worktree key recreates the same project dir, so resuming from
+    # the recreated worktree path finds the transcript again.
+    key_by_id = {ref.id: key for key, ref in result}
+    assert claude_session._project_dir(worktrees_root / key_by_id["sess-b"]) == beta_dir
+    assert key_by_id["sess-b"] == "beta"
+
+
 def test_encode_repo_matches_claude_naming():
     # Claude names the project directory by replacing every non-alphanumeric
     # character of the absolute working directory with a dash.

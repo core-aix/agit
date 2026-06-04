@@ -22,7 +22,7 @@ BACKENDS = {
 
 
 class AgitShell:
-    def __init__(self, repo: GitRepo, *, verbose: bool = False, backend: str | None = None) -> None:
+    def __init__(self, repo: GitRepo, *, verbose: bool = False, backend: str | None = None, new_session: bool = False) -> None:
         self.repo = repo
         self.global_config = GlobalConfig()
         self.state = AgitState(repo.repo, default_backend=self.global_config.default_backend)
@@ -32,6 +32,10 @@ class AgitShell:
             self.global_config.default_backend = backend
             self.state.backend_session_id = self.state.stored_backend_session(backend)
             self.state.last_backend_message_id = None
+        if new_session:
+            self.state.backend_session_id = None
+            self.state.last_backend_message_id = None
+            self.state.new_agit_session_id()
         self.verbose = verbose
         self.prompt = AgitPrompt(self._prompt_state)
         self.actions = AgitActions(repo, self.state, verbose=verbose)

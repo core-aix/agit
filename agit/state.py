@@ -104,6 +104,11 @@ class AgitState:
     def session_id(self) -> str:
         return str(self.data["agit_session_id"])
 
+    def new_agit_session_id(self) -> str:
+        self.data["agit_session_id"] = f"agit-{uuid.uuid4()}"
+        self.save()
+        return self.session_id
+
     @property
     def backend(self) -> str:
         return str(self.data.get("backend") or "opencode")

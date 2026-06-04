@@ -42,6 +42,7 @@ def build_agent_commit_message(
     model: str | None,
     token_usage: dict[str, int | None] | None = None,
     trace_turn_limit: int = 5,
+    session_name: str | None = None,
 ) -> str:
     subject_prompt, full_subject = _subject_parts(_mask_secrets(latest_prompt), width=MAX_SUBJECT_WIDTH - len(AGENT_SUBJECT_PREFIX))
     lines = [f"{AGENT_SUBJECT_PREFIX}{subject_prompt}", ""]
@@ -60,12 +61,49 @@ def build_agent_commit_message(
             "commit_type: agent",
             f"backend: {backend}",
             f"model: {model or 'unknown'}",
+            f"session_name: {session_name or 'unknown'}",
             f"agit_session_id: {agit_session_id}",
             f"backend_session_id: {backend_session_id or 'unknown'}",
         ]
     )
     lines.extend(_token_metadata_lines(token_usage))
     lines.append(f"agit_version: {__version__}")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+AGENT_MERGE_SUBJECT_PREFIX = "<agent-merge> "
+
+
+def build_agent_merge_message(
+    *,
+    session_name: str | None,
+    base_branch: str,
+    source_branch: str,
+    agit_session_id: str,
+    backend: str,
+    backend_session_id: str | None = None,
+    conflicting_commits: str | None = None,
+) -> str:
+    """Commit message for a merge whose conflicts an agent resolved."""
+    subject = f"{AGENT_MERGE_SUBJECT_PREFIX}integrate {session_name or source_branch} into {base_branch}"
+    lines = [_subject_text(subject, width=MAX_SUBJECT_WIDTH), ""]
+    if conflicting_commits and conflicting_commits.strip():
+        lines.append("Resolved against base commits:")
+        lines.extend(_body_lines(_mask_secrets(conflicting_commits)))
+        lines.append("")
+    lines.extend(
+        [
+            "# aGiT Metadata",
+            "commit_type: agent-merge",
+            f"backend: {backend}",
+            f"session_name: {session_name or 'unknown'}",
+            f"source_branch: {source_branch}",
+            f"base_branch: {base_branch}",
+            f"agit_session_id: {agit_session_id}",
+            f"backend_session_id: {backend_session_id or 'unknown'}",
+            f"agit_version: {__version__}",
+        ]
+    )
     return "\n".join(lines).rstrip() + "\n"
 
 
