@@ -1278,8 +1278,63 @@ class ProxyRunner:
         if died:
             self._stop_session(self.sessions.index(session), commit=False)
 
+    def _ensure_worktree_alive(self) -> None:
+        if self.worktree is None:
+            return
+        if self.worktree.path.exists():
+            return
+        self._debug(f"Worktree '{self.name}' directory gone; recovering...")
+        self._teardown_child()
+        self._stop_file_watcher()
+        try:
+            self.base_repo._run(["git", "worktree", "prune"], check=False)
+        except Exception:
+            pass
+        backend_name = self.state.backend
+        try:
+            info, repo = self._open_session_worktree(self.name)
+        except Exception as error:
+            self._debug(f"worktree recovery failed: {error!r}; falling back to base tree")
+            self.worktree = None
+            self.name = "main"
+            self.repo = self.base_repo
+            self.state = AgitState(self.base_repo.repo, default_backend=self.global_config.default_backend)
+            self.state.backend = backend_name
+            self.backend = make_proxy_agent(backend_name)
+            self.actions = AgitActions(self.repo, self.state, verbose=self.verbose)
+            self._reset_agent_tracking()
+            self._sanitize_state_trace()
+            self._initialize_session_baseline()
+            self._init_screen()
+            self._spawn()
+            self._start_file_watcher()
+            self._resize_child()
+            self._enable_host_mouse()
+            self.sessions[self.active_index] = capture_session(self)
+            self._set_message("Worktree was deleted externally; now tracking base repo.", seconds=8.0)
+            self._render()
+            return
+        self.name = info.name
+        self.worktree = info
+        self.repo = repo
+        self.turn = self._turn_from_branch(repo.current_branch())
+        self.state = AgitState(info.path, default_backend=self.global_config.default_backend)
+        self.state.backend = backend_name
+        self.backend = make_proxy_agent(backend_name)
+        self.actions = AgitActions(self.repo, self.state, verbose=self.verbose)
+        self._reset_agent_tracking()
+        self._sanitize_state_trace()
+        self._initialize_session_baseline()
+        self._init_screen()
+        self._spawn()
+        self._start_file_watcher()
+        self.sessions[self.active_index] = capture_session(self)
+        self._resize_child()
+        self._enable_host_mouse()
+        self._set_message(f"Worktree was deleted externally; recreated '{info.name}'.", seconds=8.0)
+        self._render()
+
     def _open_session_worktree(self, name: str) -> tuple[WorktreeInfo, GitRepo]:
-        # Reuse an existing worktree of this name (resuming it) or create a new one.
         worktrees = self._worktrees()
         path = worktrees.worktree_path(name)
         if path.exists():
@@ -1533,6 +1588,7 @@ class ProxyRunner:
                 self._maybe_complete_agent_merge()
             else:
                 self._resume_pending_prompt_if_ready()
+                self._ensure_worktree_alive()
                 self._maybe_agent_commit()
             if self.child_pid is not None:
                 done, status = os.waitpid(self.child_pid, os.WNOHANG)
