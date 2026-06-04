@@ -65,6 +65,9 @@ class OpenCodeProxyAgent:
     def list_sessions(self, repo: Path) -> list[SessionRef]:
         return opencode_session.list_sessions(repo)
 
+    def list_worktree_sessions(self, worktrees_root: Path) -> list[tuple[str, SessionRef]]:
+        return opencode_session.list_worktree_sessions(worktrees_root)
+
     def export_session(self, repo: Path, session_id: str) -> ExportedSession | None:
         return opencode_session.export_session(repo, session_id)
 

@@ -168,3 +168,31 @@ def test_session_belongs_to_repo(monkeypatch, tmp_path):
 
     assert session_belongs_to_repo(tmp_path, "ses-1") is True
     assert session_belongs_to_repo(tmp_path, "other") is False
+
+
+def test_list_worktree_sessions_filters_to_worktrees_newest_first(monkeypatch, tmp_path):
+    from agit.opencode_session import list_worktree_sessions
+
+    worktrees_root = tmp_path / ".agit" / "worktrees"
+    (worktrees_root / "session-1").mkdir(parents=True)
+    (worktrees_root / "session-2").mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+
+    sessions = [
+        {"id": "a", "directory": str(worktrees_root / "session-1"), "updated": 1000, "title": "first"},
+        {"id": "b", "directory": str(worktrees_root / "session-2"), "updated": 3000, "title": "second"},
+        {"id": "c", "directory": str(elsewhere), "updated": 9000, "title": "another repo"},
+        {"id": "d", "directory": str(worktrees_root / "a" / "deep"), "updated": 5000},  # not an immediate child
+    ]
+
+    def fake_run(*args, **kwargs):
+        return subprocess.CompletedProcess(args[0], 0, stdout=json.dumps(sessions), stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = list_worktree_sessions(worktrees_root)
+    # Only the immediate worktree children of this repo, paired with the worktree
+    # name, newest first.
+    assert [(key, ref.id) for key, ref in result] == [("session-2", "b"), ("session-1", "a")]
+    assert result[0][1].label == "second"

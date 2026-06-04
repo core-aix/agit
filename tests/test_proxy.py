@@ -495,6 +495,69 @@ def test_scrolled_view_shows_history_lines():
     assert text(runner._visible_lines())[-2] == "line19"
 
 
+def _paint_runner():
+    import types
+
+    import pyte
+
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.cols, runner.rows = 8, 4  # 3 visible content rows + 1 status row
+    runner.scroll_back = 0
+    runner.sel_active = False
+    runner.sel_anchor = runner.sel_point = None
+    runner.screen = pyte.HistoryScreen(8, 3, history=50, ratio=0.5)
+    runner.stream = pyte.ByteStream(runner.screen)
+    runner._in_sync_update = False
+    runner._sync_since = 0.0
+    runner.message = None
+    runner.message_until = 0.0
+    runner.input = types.SimpleNamespace(capturing=False)
+    runner._status_line = lambda: "STATUS".ljust(8)
+    return runner
+
+
+def test_render_wraps_frame_in_synchronized_update(monkeypatch):
+    runner = _paint_runner()
+    writes = []
+    monkeypatch.setattr(os, "write", lambda fd, data: writes.append(data) or len(data))
+
+    runner.stream.feed(b"\x1b[Hr0\r\nr1\r\nr2")
+    runner._render()
+    assert len(writes) == 1
+    out = writes[0].decode()
+    # The whole repaint is one atomic synchronized update (no tearing/flicker).
+    assert out.startswith("\x1b[?2026h") and out.endswith("\x1b[?2026l")
+    assert out.count("\x1b[?2026h") == 1 and out.count("\x1b[?2026l") == 1
+    # It is a full repaint: every visible row plus the status line is present.
+    assert "r0" in out and "r1" in out and "r2" in out and "STATUS" in out
+
+
+def test_track_sync_update_defers_then_releases_render():
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner._in_sync_update = False
+    runner._sync_since = 0.0
+    runner._render_pending = False
+    runner._last_render = 0.0
+    rendered = []
+    runner._render = lambda: rendered.append(1)
+
+    # Begin-sync with no matching end: aGiT is mid-update and must defer.
+    runner._track_sync_update(b"\x1b[?2026h")
+    assert runner._in_sync_update is True
+    runner._render_output()
+    assert rendered == [] and runner._render_pending is True
+
+    # End-sync releases the hold; the next output paints.
+    runner._track_sync_update(b"\x1b[?2026l")
+    assert runner._in_sync_update is False
+    runner._render_output()
+    assert rendered == [1]
+
+    # A begin+end inside one chunk ends not-in-update.
+    runner._track_sync_update(b"\x1b[?2026hABC\x1b[?2026l")
+    assert runner._in_sync_update is False
+
+
 def test_hold_incomplete_tail_buffers_split_escape_sequence():
     runner = ProxyRunner.__new__(ProxyRunner)
     # A mouse report split across reads must be held back, not leaked as bytes.
@@ -1209,3 +1272,509 @@ def test_proxy_clears_stale_agent_in_flight_when_idle():
     runner._clear_agent_in_flight_if_idle()
 
     assert runner.agent_in_flight is False
+
+
+def _integration_runner(merge_ok):
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.worktree = object()
+    runner._base_branch = "main"
+    runner.merge_ctx = None
+    runner.name = "session-1"
+    runner._exiting = False
+    runner._debug = lambda *a, **k: None
+
+    class FakeRepo:
+        def __init__(self):
+            self.aborted = False
+
+        def current_branch(self):
+            return "agit/session-1/t1"
+
+        def merge(self, ref):
+            return merge_ok
+
+        def merge_abort(self):
+            self.aborted = True
+
+    runner.repo = FakeRepo()
+    return runner
+
+
+def test_integrate_conflict_aborts_and_prompts_resolve_options():
+    runner = _integration_runner(merge_ok=False)
+    calls = []
+    runner._prompt_resolve_conflict = lambda src: calls.append(src)
+    runner._advance_base_to = lambda src: calls.append(("advance", src))
+
+    runner._integrate_session_turn()
+
+    assert runner.repo.aborted is True  # conflicted merge is backed out
+    assert calls == ["agit/session-1/t1"]  # options box is surfaced
+
+
+def test_integrate_clean_merge_advances_base_without_prompt():
+    runner = _integration_runner(merge_ok=True)
+    calls = []
+    runner._prompt_resolve_conflict = lambda src: calls.append(("prompt", src))
+    runner._advance_base_to = lambda src: calls.append(("advance", src))
+
+    runner._integrate_session_turn()
+
+    assert runner.repo.aborted is False
+    assert calls == [("advance", "agit/session-1/t1")]
+
+
+def test_integrate_conflict_on_exit_leaves_for_startup():
+    runner = _integration_runner(merge_ok=False)
+    runner._exiting = True
+    prompted = []
+    runner._prompt_resolve_conflict = lambda src: prompted.append(src)
+    runner._advance_base_to = lambda src: None
+
+    runner._integrate_session_turn()
+
+    assert runner.repo.aborted is True  # merge is aborted
+    assert prompted == []  # but no UI on exit
+
+
+def _resolve_runner(choice_index):
+    import types
+
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.name = "session-1"
+    runner._base_branch = "main"
+    runner.backend = types.SimpleNamespace(name="opencode")
+    runner._render = lambda: None
+    msgs = []
+    runner._set_message = lambda *a, **k: msgs.append(a[0] if a else "")
+    runner._messages = msgs
+    runner._select_popup = lambda title, options: options[choice_index]
+    runner._dispatched = []
+    runner._start_merge_for_active = lambda *, auto: runner._dispatched.append(auto)
+    return runner
+
+
+def test_prompt_resolve_conflict_dispatches_auto():
+    runner = _resolve_runner(choice_index=0)
+    runner._prompt_resolve_conflict("agit/session-1/t1")
+    assert runner._dispatched == [True]
+
+
+def test_prompt_resolve_conflict_dispatches_manual():
+    runner = _resolve_runner(choice_index=1)
+    runner._prompt_resolve_conflict("agit/session-1/t1")
+    assert runner._dispatched == [False]
+
+
+def test_prompt_resolve_conflict_leave_does_not_merge():
+    runner = _resolve_runner(choice_index=2)
+    runner._prompt_resolve_conflict("agit/session-1/t1")
+    assert runner._dispatched == []  # nothing merged
+    assert runner._messages and "unintegrated" in runner._messages[0]
+
+
+# --- cross-backend sessions (Part B) ---
+
+def test_live_session_for_backend_finds_active_and_background():
+    import types
+
+    runner = _mux_runner()
+    runner.backend = types.SimpleNamespace(name="claude")  # active
+    b = _bg_session("B")
+    b.backend = types.SimpleNamespace(name="opencode")
+    runner.sessions.append(b)
+
+    assert runner._live_session_for_backend("claude") == 0
+    assert runner._live_session_for_backend("opencode") == 1
+    assert runner._live_session_for_backend("gemini") is None
+
+
+def _backend_switch_runner(monkeypatch):
+    import types
+
+    runner = _mux_runner()
+    runner.backend = types.SimpleNamespace(name="claude")
+    runner.worktree = object()
+    runner.global_config = types.SimpleNamespace(default_backend="claude")
+    monkeypatch.setattr("agit.proxy.backend_installed", lambda n: True)
+    return runner
+
+
+def test_switch_backend_switches_to_live_session_without_teardown(monkeypatch):
+    import types
+
+    runner = _backend_switch_runner(monkeypatch)
+    b = _bg_session("B")
+    b.backend = types.SimpleNamespace(name="opencode")
+    runner.sessions.append(b)
+    calls = []
+    runner._switch_active = lambda i: calls.append(("switch", i))
+    runner._new_session = lambda *a, **k: calls.append(("new", a, k))
+
+    runner._switch_backend("opencode")
+
+    assert calls == [("switch", 1)]  # resumed the live opencode session, no respawn
+
+
+def test_switch_backend_creates_per_backend_session_when_none_live(monkeypatch):
+    runner = _backend_switch_runner(monkeypatch)
+    runner._next_session_name = lambda: "session-2"
+    prompts = []
+
+    def fake_prompt(title, prompt, *, default=""):
+        prompts.append((title, default))
+        return default  # user accepts the prefilled name
+
+    runner._prompt_popup = fake_prompt
+    calls = []
+    runner._new_session = lambda name, **k: calls.append((name, k))
+    runner._switch_active = lambda i: calls.append(("switch", i))
+
+    runner._switch_backend("opencode")
+
+    # The name popup is prefilled with the next session-N; the backend is pinned.
+    assert prompts == [("New opencode session", "session-2")]
+    assert calls == [("session-2", {"backend": "opencode"})]
+
+
+def test_switch_backend_uses_edited_session_name(monkeypatch):
+    runner = _backend_switch_runner(monkeypatch)
+    runner._next_session_name = lambda: "session-2"
+    runner._prompt_popup = lambda title, prompt, *, default="": "my-feature"  # user renames
+    calls = []
+    runner._new_session = lambda name, **k: calls.append((name, k))
+    runner._switch_active = lambda i: calls.append(("switch", i))
+
+    runner._switch_backend("opencode")
+
+    assert calls == [("my-feature", {"backend": "opencode"})]
+
+
+def test_switch_backend_cancelled_name_does_not_create(monkeypatch):
+    runner = _backend_switch_runner(monkeypatch)
+    runner._next_session_name = lambda: "session-2"
+    runner._prompt_popup = lambda *a, **k: None  # user cancels the name popup
+    runner._set_message = lambda *a, **k: None
+    runner._render = lambda: None
+    created = []
+    runner._new_session = lambda *a, **k: created.append((a, k))
+
+    runner._switch_backend("opencode")
+
+    assert created == []
+
+
+def test_switch_backend_noop_when_same_backend(monkeypatch):
+    runner = _backend_switch_runner(monkeypatch)
+    msgs = []
+    runner._set_message = lambda *a, **k: msgs.append(a[0])
+    runner._render = lambda: None
+    called = []
+    runner._switch_active = lambda i: called.append(i)
+    runner._new_session = lambda *a, **k: called.append("new")
+
+    runner._switch_backend("claude")
+
+    assert called == [] and any("Already using" in m for m in msgs)
+
+
+def test_service_background_integrates_idle_session_cleanly():
+    runner = _mux_runner()
+    runner.merge_ctx = None
+    runner.CHILD_IDLE_SECONDS = 4.0
+    runner.POLL_SECONDS = 2.0
+    b = _bg_session("B")
+    b.agent_in_flight = True
+    b.last_child_output = 0.0  # long idle
+    b.last_poll = 0.0
+    runner.sessions.append(b)
+    calls = []
+    runner._with_session = lambda session, fn: calls.append(session.name) or "integrated"
+    runner._switch_active = lambda i: calls.append(("switch", i))
+    runner._prompt_resolve_conflict = lambda src: calls.append(("prompt", src))
+
+    runner._service_background_sessions()
+
+    assert calls == ["B"]  # serviced once, clean integration, no switch/prompt
+    assert b.last_poll > 0.0  # throttle timestamp advanced
+
+
+def test_service_background_integrates_even_when_not_in_flight():
+    # Regression: a finished background session whose in-flight flag was already
+    # cleared (e.g. it committed but didn't integrate) must still be serviced —
+    # otherwise its commits sit unintegrated until the user switches to it.
+    runner = _mux_runner()
+    runner.merge_ctx = None
+    runner.CHILD_IDLE_SECONDS = 4.0
+    runner.POLL_SECONDS = 2.0
+    b = _bg_session("B")
+    b.agent_in_flight = False  # no longer flagged, but still has work to integrate
+    b.last_child_output = 0.0
+    b.last_poll = 0.0
+    runner.sessions.append(b)
+    serviced = []
+    runner._with_session = lambda session, fn: serviced.append(session.name) or "integrated"
+    runner._switch_active = lambda i: serviced.append(("switch", i))
+    runner._prompt_resolve_conflict = lambda src: serviced.append(("prompt", src))
+
+    runner._service_background_sessions()
+
+    assert serviced == ["B"]
+
+
+def test_service_background_conflict_switches_and_prompts():
+    runner = _mux_runner()
+    runner.merge_ctx = None
+    runner.CHILD_IDLE_SECONDS = 4.0
+    runner.POLL_SECONDS = 2.0
+    b = _bg_session("B")
+    b.agent_in_flight = True
+    b.last_child_output = 0.0
+    b.last_poll = 0.0
+    runner.sessions.append(b)
+    runner._with_session = lambda session, fn: "conflict"
+    switched, prompted = [], []
+
+    class _Repo:
+        def current_branch(self):
+            return "agit/B/t1"
+
+    def _switch(i):
+        switched.append(i)
+        runner.repo = _Repo()
+
+    runner._switch_active = _switch
+    runner._prompt_resolve_conflict = lambda src: prompted.append(src)
+
+    runner._service_background_sessions()
+
+    assert switched == [1] and prompted == ["agit/B/t1"]
+
+
+def test_service_background_finalizes_pending_merge():
+    runner = _mux_runner()
+    runner.merge_ctx = None
+    b = _bg_session("B")
+    b.merge_ctx = {"source_branch": "agit/B/t1"}
+    runner.sessions.append(b)
+    called = []
+    runner._with_session = lambda session, fn: called.append((session.name, fn.__name__))
+
+    runner._service_background_sessions()
+
+    assert called == [("B", "_maybe_complete_agent_merge")]
+
+
+def test_service_background_skips_while_active_merge_in_progress():
+    runner = _mux_runner()
+    runner.merge_ctx = {"busy": 1}
+    b = _bg_session("B")
+    b.agent_in_flight = True
+    runner.sessions.append(b)
+    called = []
+    runner._with_session = lambda *a, **k: called.append(1)
+
+    runner._service_background_sessions()
+
+    assert called == []
+
+
+def test_with_session_swaps_in_and_restores_active():
+    runner = _mux_runner()  # active session name "A"
+    b = _bg_session("B")
+    runner.sessions.append(b)
+    seen = []
+
+    def fn():
+        seen.append(runner.name)  # "B" while swapped in
+        runner.last_status = "touched"  # mutation must persist to the snapshot
+        return "ok"
+
+    result = runner._with_session(b, fn)
+
+    assert result == "ok"
+    assert seen == ["B"]
+    assert runner.name == "A"  # active restored
+    assert b.last_status == "touched"  # background snapshot updated
+
+
+def test_next_session_name_skips_existing_worktrees_and_sessions():
+    import types
+
+    runner = _mux_runner()  # one active session named "A"
+    runner.worktree_manager = types.SimpleNamespace(
+        list=lambda: [types.SimpleNamespace(name="session-1"), types.SimpleNamespace(name="session-2")]
+    )
+    # session-1 and session-2 are taken (plus active "A"), so the next is session-3.
+    assert runner._next_session_name() == "session-3"
+
+
+# --- injected-prompt targeting (cross-backend safety) ---
+
+def test_inject_prompt_records_target_fd(monkeypatch):
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.master_fd = 5
+    writes = []
+    monkeypatch.setattr(os, "write", lambda fd, data: writes.append((fd, data)) or len(data))
+
+    runner._inject_prompt("resolve the conflict")
+
+    assert writes == [(5, b"resolve the conflict")]
+    assert runner._pending_enter_fd == 5
+    assert runner._pending_enter_at is not None
+
+
+def test_flush_pending_enter_targets_injected_fd_not_active(monkeypatch):
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner._pending_enter_at = 0.0  # already due
+    runner._pending_enter_fd = 7  # the backend the prompt was typed into
+    runner.master_fd = 99  # a *different* session became active in the meantime
+    runner.merge_ctx = None
+    writes = []
+    monkeypatch.setattr(os, "write", lambda fd, data: writes.append((fd, data)) or len(data))
+
+    runner._flush_pending_enter()
+
+    # The submit Enter goes to the injected backend (7), never the active one (99).
+    assert writes == [(7, b"\r")]
+    assert runner._pending_enter_fd is None
+
+
+def test_flush_pending_enter_marks_sent_only_when_still_active(monkeypatch):
+    monkeypatch.setattr(os, "write", lambda fd, data: len(data))
+
+    # Same session still active -> prompt_sent_at is recorded.
+    active = ProxyRunner.__new__(ProxyRunner)
+    active._pending_enter_at, active._pending_enter_fd, active.master_fd = 0.0, 7, 7
+    active.merge_ctx = {"prompt_sent_at": None}
+    active._flush_pending_enter()
+    assert active.merge_ctx["prompt_sent_at"] is not None
+
+    # Switched away -> the active session's merge_ctx is NOT marked.
+    switched = ProxyRunner.__new__(ProxyRunner)
+    switched._pending_enter_at, switched._pending_enter_fd, switched.master_fd = 0.0, 7, 99
+    switched.merge_ctx = {"prompt_sent_at": None}
+    switched._flush_pending_enter()
+    assert switched.merge_ctx["prompt_sent_at"] is None
+
+
+# --- session name uniqueness + per-backend resume ---
+
+def test_state_remember_and_recall_session(tmp_path):
+    s = AgitState(tmp_path)
+    assert s.recall_session("opencode") is None
+    s.remember_session("opencode", session_id="abc", worktree="session-2", message_id="m1", model="o4")
+    assert s.recall_session("opencode") == {"id": "abc", "worktree": "session-2", "message_id": "m1", "model": "o4"}
+    # Survives a reload from disk.
+    assert AgitState(tmp_path).recall_session("opencode")["id"] == "abc"
+    # Clearing (no id) forgets it.
+    s.remember_session("opencode", session_id=None, worktree="session-2")
+    assert s.recall_session("opencode") is None
+
+
+def test_session_name_taken_detects_live_and_on_disk():
+    import types
+
+    runner = _mux_runner()  # one live session named "A"
+    runner.worktree_manager = types.SimpleNamespace(list=lambda: [types.SimpleNamespace(name="session-1")])
+    assert runner._session_name_taken("A") is True
+    assert runner._session_name_taken("session-1") is True
+    assert runner._session_name_taken("fresh") is False
+
+
+def test_prompt_session_name_rejects_duplicates_until_unique():
+    import types
+
+    runner = _mux_runner()  # live session "A"
+    runner.worktree_manager = types.SimpleNamespace(list=lambda: [])
+    runner._next_session_name = lambda: "session-9"
+    answers = iter(["A", "my-session"])  # first a duplicate, then a fresh name
+    runner._prompt_popup = lambda title, prompt, *, default="": next(answers)
+    assert runner._prompt_session_name("New Session", default="session-2") == "my-session"
+
+
+def test_prompt_session_name_cancel_returns_none():
+    import types
+
+    runner = _mux_runner()
+    runner.worktree_manager = types.SimpleNamespace(list=lambda: [])
+    runner._prompt_popup = lambda *a, **k: None
+    assert runner._prompt_session_name("New Session", default="session-2") is None
+
+
+def test_switch_backend_resumes_stored_session(monkeypatch):
+    runner = _backend_switch_runner(monkeypatch)
+    runner._recall_backend_session = lambda name: {"id": "sess-9", "worktree": "session-2"}
+    calls = []
+    runner._new_session = lambda name, **k: calls.append((name, k))
+    runner._switch_active = lambda i: calls.append(("switch", i))
+
+    runner._switch_backend("opencode")
+
+    # Resumes the remembered conversation in its original worktree, no name prompt.
+    assert calls == [("session-2", {"backend": "opencode", "resume_session_id": "sess-9"})]
+
+
+# --- resume-past-conversation naming ---
+
+def _resume_runner():
+    import types
+
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.name = "session-1"
+    runner.active_index = 0
+    s0 = types.SimpleNamespace(name="session-1", state=types.SimpleNamespace(backend_session_id="live-1"))
+    runner.sessions = [s0]
+    runner._switch_active = lambda i: runner.__dict__.setdefault("_switched", []).append(i)
+    runner._new_session = lambda name, **k: runner.__dict__.setdefault("_created", []).append((name, k))
+    return runner
+
+
+def test_resume_uses_original_worktree_when_name_is_free():
+    runner = _resume_runner()
+    runner._next_session_name = lambda: "session-9"
+
+    runner._resume_conversation("session-2", "past-xyz")
+
+    # "session-2" is not a live session, so resume in its original worktree.
+    assert runner.__dict__.get("_created") == [("session-2", {"resume_session_id": "past-xyz"})]
+
+
+def test_resume_uses_fresh_name_when_colliding_with_live_session():
+    runner = _resume_runner()
+    runner._next_session_name = lambda: "session-3"
+
+    # A past conversation that ran in "session-1" — but session-1 is live now.
+    runner._resume_conversation("session-1", "past-xyz")
+
+    assert runner.__dict__.get("_created") == [("session-3", {"resume_session_id": "past-xyz"})]
+
+
+def test_resume_switches_to_already_live_conversation():
+    runner = _resume_runner()
+
+    runner._resume_conversation("session-1", "live-1")  # same id as the live session
+
+    assert runner.__dict__.get("_switched") == [0]
+    assert "_created" not in runner.__dict__
+
+
+# --- idle worktree base-sync ---
+
+def test_sync_idle_worktrees_aligns_idle_skips_in_flight():
+    import types
+
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.active_index = 0
+    runner.repo = "repoA"
+    runner.agent_in_flight = False  # active session is idle
+    busy = types.SimpleNamespace(repo="repoB", agent_in_flight=True)   # working -> skip
+    idle = types.SimpleNamespace(repo="repoC", agent_in_flight=False)  # idle -> sync
+    runner.sessions = [types.SimpleNamespace(repo="repoA", agent_in_flight=False), busy, idle]
+    aligned = []
+    runner._align_session_to_base = lambda repo: aligned.append(repo)
+
+    runner._sync_idle_worktrees_to_base()
+
+    # Active (idle) + idle background are re-pointed; the in-flight one is left alone.
+    assert aligned == ["repoA", "repoC"]

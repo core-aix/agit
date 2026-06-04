@@ -35,7 +35,7 @@ from agit.lock import RepoLock
 from agit.session import turns_after
 from agit.session_runtime import SESSION_FIELDS, capture_session, default_session_fields, restore_session
 from agit.state import AgitState
-from agit.worktree import WorktreeInfo, WorktreeManager
+from agit.worktree import WorktreeInfo, WorktreeManager, _sanitize_name
 
 
 # Map every xterm-256 palette colour back to its index so that colours pyte
@@ -255,11 +255,13 @@ class ProxyRunner:
     POLL_SECONDS = 2.0
     PARSE_COOLDOWN_SECONDS = 10.0
     RENDER_MIN_INTERVAL = 0.033  # coalesce output-driven repaints to ~30fps
+    SYNC_MAX_HOLD = 0.05  # cap how long a backend synchronized-update may defer a paint
 
     def __init__(self, repo: GitRepo, *, verbose: bool = False, backend: str | None = None, new_session: bool = False) -> None:
         self.repo = repo
         self._force_new_session = new_session  # start a fresh conversation, do not resume
         self.name = "main"  # session label (multiplexer assigns names to others)
+        self._primary_worktree_name: str | None = None  # session kept across exits for auto-resume
         self.worktree = None  # set when this session runs in a git worktree
         self.global_config = GlobalConfig()
         self.state = AgitState(repo.repo, default_backend=self.global_config.default_backend)
@@ -296,6 +298,12 @@ class ProxyRunner:
         self.scroll_back = 0
         self._last_render = 0.0
         self._render_pending = False
+        # Synchronized output (DECSET 2026): while the backend is mid-update we
+        # hold the repaint so a half-drawn frame is never shown (tearing), and
+        # each repaint aGiT emits is itself wrapped in a 2026 update so the host
+        # applies the whole frame atomically (the flicker fix).
+        self._in_sync_update = False
+        self._sync_since = 0.0
         # Mouse drag selection -> clipboard (for backends aGiT renders itself).
         self.sel_active = False
         self.sel_anchor: tuple[int, int] | None = None
@@ -345,6 +353,8 @@ class ProxyRunner:
         self.turn = 0  # per-session transient-branch counter
         self.merge_ctx = None  # in-progress agent merge resolution, if any
         self._pending_enter_at: float | None = None  # deferred submit of an injected prompt
+        self._pending_enter_fd: int | None = None  # the PTY that injected prompt's Enter must go to
+        self._base_advanced = False  # base moved; sync idle sessions onto it on the next loop pass
         self._warned_backend_session = False  # one-shot "use agit to start sessions" notice
         self.sessions: list = []
         self.active_index = 0
@@ -500,21 +510,121 @@ class ProxyRunner:
         self._set_message(message)
         self._render()
 
+    def _live_session_for_backend(self, name: str) -> int | None:
+        # Index of a live session currently running the given backend (the active
+        # session's live backend is on self; background ones on their snapshot).
+        for index in range(len(self.sessions)):
+            backend = self.backend if index == self.active_index else getattr(self.sessions[index], "backend", None)
+            if getattr(backend, "name", None) == name:
+                return index
+        return None
+
     def _switch_backend(self, name: str) -> None:
         if not backend_installed(name):
             self._set_message(f"'{name}' is not installed.\n{install_hint(name)}", seconds=8.0)
             self._render()
             return
-        # Remember the current backend's session, then bring up the newly
-        # selected backend (restoring its own session for this repo if known).
-        self.state.remember_backend_session()
+        if name == getattr(self.backend, "name", None):
+            self._set_message(f"Already using {name}.")
+            self._render()
+            return
         self.global_config.default_backend = name
-        self.state.backend = name
-        self.backend = make_proxy_agent(name)
-        self.state.backend_session_id = self.state.stored_backend_session(name)
-        self.state.last_backend_message_id = None
-        self.state.clear_trace()
-        self._restart_agent(f"Backend set to {name}")
+        if not self.tracking_enabled or self.worktree is None:
+            # Read-only / non-worktree session has nothing to multiplex; restart
+            # the single backend in place (legacy behaviour).
+            self.state.remember_backend_session()
+            self.state.backend = name
+            self.backend = make_proxy_agent(name)
+            self.state.backend_session_id = self.state.stored_backend_session(name)
+            self.state.last_backend_message_id = None
+            self.state.clear_trace()
+            self._restart_agent(f"Backend set to {name}")
+            return
+        # Keep the current backend's session running in the background and switch
+        # to this backend's own session.
+        index = self._live_session_for_backend(name)
+        if index is not None:
+            self._switch_active(index)
+            return
+        # Resume this backend's last conversation if we remember one (recreating
+        # its worktree at the same path so the backend finds its transcript).
+        record = self._recall_backend_session(name)
+        if record and record.get("id"):
+            self._new_session(record.get("worktree") or self._next_session_name(),
+                              backend=name, resume_session_id=record["id"])
+            return
+        # Otherwise start fresh, confirming the session name first.
+        session_name = self._prompt_session_name(f"New {name} session", default=self._next_session_name())
+        if session_name is None:
+            self._set_message("Cancelled.")
+            self._render()
+            return
+        self._new_session(session_name, backend=name)
+
+    def _taken_session_names(self) -> set[str]:
+        # Sanitized names already in use: live sessions plus on-disk worktrees.
+        used: set[str] = set()
+        try:
+            used.update(info.name for info in self._worktrees().list())
+        except Exception:
+            pass
+        used.update(_sanitize_name(self._session_name(index)) for index in range(len(self.sessions)))
+        return used
+
+    def _next_session_name(self) -> str:
+        # The next free ``session-N`` name, avoiding existing worktrees and live
+        # sessions (session names are independent of which backend they run).
+        used = self._taken_session_names()
+        number = 1
+        while f"session-{number}" in used:
+            number += 1
+        return f"session-{number}"
+
+    def _session_name_taken(self, name: str) -> bool:
+        return _sanitize_name(name) in self._taken_session_names()
+
+    def _prompt_session_name(self, title: str, *, default: str) -> str | None:
+        # Ask for a session name, rejecting duplicates (a session and its worktree
+        # are 1:1, so names must be unique). Returns the chosen name, or None on
+        # cancel / empty input.
+        prompt = "Name for the new session (its own git worktree):"
+        while True:
+            name = self._prompt_popup(title, prompt, default=default)
+            if name is None or not name.strip():
+                return None
+            name = name.strip()
+            if self._session_name_taken(name):
+                prompt = f"'{name}' is already in use. Choose a different name:"
+                default = self._next_session_name()
+                continue
+            return name
+
+    def _recall_backend_session(self, backend: str) -> dict | None:
+        try:
+            root = AgitState(self.base_repo.repo, default_backend=self.global_config.default_backend)
+            return root.recall_session(backend)
+        except Exception as error:
+            self._debug(f"recall backend session failed: {error!r}")
+            return None
+
+    def _remember_session_for_backend(self) -> None:
+        # Persist the current session's conversation under its backend in the
+        # durable repo-root state, so switching back to that backend later resumes
+        # it (its worktree is recreated at the same path).
+        info = getattr(self, "worktree", None)
+        if info is None:
+            return
+        try:
+            root = AgitState(self.base_repo.repo, default_backend=self.global_config.default_backend)
+            root.remember_session(
+                self.state.backend,
+                session_id=self.state.backend_session_id,
+                worktree=info.name,
+                message_id=self.state.last_backend_message_id,
+                model=self.state.model,
+            )
+        except Exception as error:
+            self._debug(f"remember backend session failed: {error!r}")
 
     # --- live-session multiplexer ---
 
@@ -544,19 +654,56 @@ class ProxyRunner:
         if not self.tracking_enabled:
             return
         backend_name = self.state.backend
+        # The repo-root state is the durable "last session" record: a session whose
+        # worktree was removed on exit left its resume pointer here.
+        prior_session_id = self.state.backend_session_id
+        prior_message_id = self.state.last_backend_message_id
+        prior_model = self.state.model
         try:
             info, repo = self._open_session_worktree("session-1")
         except Exception as error:
             self._debug(f"base-merge-only setup failed; running on the base tree: {error!r}")
             return
         self.name = info.name
+        self._primary_worktree_name = info.name  # the session that auto-resumes across exits
         self.worktree = info
         self.repo = repo
+        self._align_session_to_base(repo)
         self.turn = self._turn_from_branch(repo.current_branch())
         self.state = AgitState(info.path, default_backend=self.global_config.default_backend)
         self.state.backend = backend_name
+        # The worktree is recreated fresh each run (its working state is not kept),
+        # so seed its resume pointer from the durable root record to continue the
+        # previous conversation. The worktree path is stable, so the backend still
+        # finds the transcript it stored there.
+        if not self.state.backend_session_id and prior_session_id:
+            if prior_model:
+                self.state.model = prior_model
+            self.state.last_backend_message_id = prior_message_id
+            self.state.backend_session_id = prior_session_id  # setter records this worktree as its repo
         self.backend = make_proxy_agent(backend_name)
         self.actions = AgitActions(self.repo, self.state, verbose=self.verbose)
+
+    def _align_session_to_base(self, repo: GitRepo) -> None:
+        # A reused session worktree may sit on a previous run's base branch. If it
+        # is clean (no uncommitted changes, no merge in progress, and nothing
+        # committed that the current base lacks), re-point it at the branch the
+        # user launched from so aGiT integrates into *that* branch — not whatever
+        # branch happened to be current on an earlier run. A worktree with its own
+        # pending work is left for the reconcile / integration paths to handle.
+        if self._base_branch is None:
+            return
+        try:
+            if repo.merge_in_progress() or repo.has_changes():
+                return
+            branch = repo.current_branch()
+            if branch.startswith("agit/") and self.base_repo.log_range(self._base_branch, branch):
+                return  # has unintegrated commits; leave it for integration
+            if repo.rev_parse("HEAD") != self.base_repo.rev_parse(self._base_branch):
+                repo.switch_detach(self._base_branch)
+                self._debug(f"re-pointed session worktree to current base '{self._base_branch}'")
+        except Exception as error:
+            self._debug(f"align to base failed: {error!r}")
 
     def _worktree_has_pending_work(self, repo: GitRepo, branch: str) -> bool:
         # Pending = uncommitted changes, or commits on its branch not yet in base.
@@ -641,25 +788,60 @@ class ProxyRunner:
         # Integrate the current session's just-committed turn branch into the
         # base branch: merge base into the turn branch (in the session's
         # worktree), then fast-forward the base to it and start the next turn
-        # branch. On conflict, hand it to the session's agent to resolve.
+        # branch. When it cannot fast-forward (the base gained conflicting work
+        # from another session), surface the resolve options box and let the
+        # user choose how to handle it.
+        result = self._integrate_turn_or_conflict()
+        if result == "conflict" and not getattr(self, "_exiting", False):
+            # On exit there is no UI to drive a resolution; the work stays on its
+            # branch for the next startup / session menu to surface.
+            self._prompt_resolve_conflict(self.repo.current_branch())
+
+    def _integrate_turn_or_conflict(self) -> str:
+        # Try to fast-forward the current session's turn branch into the base.
+        # Returns "integrated" (base advanced), "conflict" (the merge was backed
+        # out and needs resolution), or "skip" (nothing to integrate).
         if self.worktree is None or self._base_branch is None or self.merge_ctx:
-            return
+            return "skip"
         turn_branch = self.repo.current_branch()
         if not turn_branch.startswith("agit/"):
-            return
+            return "skip"
         try:
             if not self.repo.merge(self._base_branch):
-                if getattr(self, "_exiting", False):
-                    # On exit there is no live agent to drive a resolution; leave
-                    # the conflict for the next startup to surface.
-                    self.repo.merge_abort()
-                    return
-                self._begin_agent_merge(turn_branch)
-                return
+                # Back out of the conflicted merge so the worktree is clean again;
+                # the chosen resolution path re-starts the merge from here.
+                self.repo.merge_abort()
+                return "conflict"
             self._advance_base_to(turn_branch)
             self._debug(f"integrated '{self.name}' {turn_branch} -> {self._base_branch}")
+            return "integrated"
         except Exception as error:
             self._debug(f"integration failed for '{self.name}': {error!r}")
+            return "skip"
+
+    def _prompt_resolve_conflict(self, source_branch: str) -> None:
+        # A finished turn cannot fast-forward into the base because it conflicts
+        # with work another session already integrated. Surface the same resolve
+        # options the session menu offers for a conflicting session, labelled
+        # with this session and its backend, then dispatch the choice.
+        backend = getattr(getattr(self, "backend", None), "name", "?")
+        choice = self._select_popup(
+            f"Session '{self.name}' ({backend}) finished, but its changes conflict with '{self._base_branch}'.",
+            [
+                "Merge automatically (agent resolves conflicts)",
+                "Merge manually (you resolve here, then Complete merge)",
+                "Leave for later (resolve via Ctrl-G → session)",
+            ],
+        )
+        if not choice or choice.startswith("Leave"):
+            self._set_message(
+                f"'{self.name}' has unintegrated work that conflicts with '{self._base_branch}'. "
+                "Resolve it any time via Ctrl-G → session.",
+                seconds=8.0,
+            )
+            self._render()
+            return
+        self._start_merge_for_active(auto=choice.startswith("Merge automatically"))
 
     def _integrate_session_on_exit(self) -> None:
         # Clean up the current session's branch when aGiT exits: integrate any
@@ -695,6 +877,24 @@ class ProxyRunner:
         self.repo.switch_detach(self._base_branch)
         if self.repo.current_branch() != source_branch:
             self.base_repo.delete_branch(source_branch, force=True)
+        # The base moved; other idle sessions should fast-forward onto it.
+        self._base_advanced = True
+
+    def _sync_idle_worktrees_to_base(self) -> None:
+        # Keep every idle session's worktree tracking the base: any session with no
+        # in-flight agent, no uncommitted changes, and nothing committed ahead of
+        # the base is re-pointed onto the (possibly just-advanced) base branch, so
+        # it works from the latest integrated state. `_align_session_to_base`
+        # guards the clean/no-pending conditions, so in-progress work is untouched.
+        for index in range(len(self.sessions)):
+            if index == self.active_index:
+                repo, in_flight = getattr(self, "repo", None), getattr(self, "agent_in_flight", False)
+            else:
+                snapshot = self.sessions[index]
+                repo, in_flight = getattr(snapshot, "repo", None), getattr(snapshot, "agent_in_flight", False)
+            if repo is None or in_flight:
+                continue
+            self._align_session_to_base(repo)
 
     def _ensure_turn_branch(self) -> None:
         # A merged-and-detached session sits at base between turns. Before its
@@ -703,7 +903,7 @@ class ProxyRunner:
         if getattr(self, "worktree", None) is None or not self.repo.is_detached():
             return
         self.turn = (self.turn or 0) + 1
-        next_branch = self._worktrees().turn_branch(self.name, self.turn)
+        next_branch = self._worktrees().turn_branch(self.name, self.turn, backend=self.backend.name)
         self.repo.switch(next_branch, create=True)
 
     def _merge_resolution_prompt(self, files: list[str], context: str) -> str:
@@ -730,19 +930,24 @@ class ProxyRunner:
         except OSError:
             return
         self._pending_enter_at = time.monotonic() + 0.4
+        self._pending_enter_fd = self.master_fd  # submit to THIS backend, not whatever is active later
 
     def _flush_pending_enter(self) -> None:
-        # Submit a previously-injected prompt once its text has settled.
+        # Submit a previously-injected prompt once its text has settled. The Enter
+        # is sent to the PTY the text was typed into, even if the active session
+        # changed in the meantime, so it never lands in another backend.
         if self._pending_enter_at is None or time.monotonic() < self._pending_enter_at:
             return
         self._pending_enter_at = None
-        if self.master_fd is None:
+        fd = self._pending_enter_fd
+        self._pending_enter_fd = None
+        if fd is None:
             return
         try:
-            os.write(self.master_fd, b"\r")
+            os.write(fd, b"\r")
         except OSError:
             return
-        if self.merge_ctx is not None:
+        if self.merge_ctx is not None and self.master_fd == fd:
             self.merge_ctx["prompt_sent_at"] = time.monotonic()
 
     def _begin_agent_merge(self, source_branch: str) -> None:
@@ -1077,18 +1282,19 @@ class ProxyRunner:
             self._set_message(f"'{self.name}' has nothing to integrate.")
             self._render()
             return
-        choice = self._select_popup(
-            f"Integrate session '{self.name}' into {self._base_branch}?",
-            [
-                "Merge automatically (agent resolves conflicts)",
-                "Merge manually (you resolve here, then Complete merge)",
-            ],
-        )
-        if choice is None:
-            self._set_message("Cancelled.")
+        # Try a clean / fast-forward integration first — if the work merges without
+        # conflicts there is nothing to resolve, so the agent is never involved and
+        # the user is not asked. Only a real conflict surfaces the resolve options.
+        result = self._integrate_turn_or_conflict()
+        if result == "integrated":
+            self._set_message(f"Integrated '{self.name}' into {self._base_branch} (no conflicts).", seconds=6.0)
             self._render()
             return
-        self._start_merge_for_active(auto=choice.startswith("Merge automatically"))
+        if result == "conflict":
+            self._prompt_resolve_conflict(self.repo.current_branch())
+            return
+        self._set_message(f"'{self.name}' has nothing to integrate.")
+        self._render()
 
     def _resolve_dormant_worktree(self, name: str) -> None:
         choice = self._select_popup(
@@ -1195,7 +1401,20 @@ class ProxyRunner:
             if getattr(getattr(session, "state", None), "backend_session_id", None) == session_id:
                 self._switch_active(index)
                 return
-        self._new_session(worktree_key, resume_session_id=session_id)
+        name = worktree_key
+        if self._live_session_name_taken(name):
+            # The conversation's original worktree name is occupied by a different
+            # live session — resume it under a fresh name so the two don't share a
+            # worktree (which would run two backends in one directory).
+            name = self._next_session_name()
+        self._new_session(name, resume_session_id=session_id)
+
+    def _live_session_name_taken(self, name: str) -> bool:
+        sanitized = _sanitize_name(name)
+        return any(
+            _sanitize_name(self._session_name(index)) == sanitized
+            for index in range(len(self.sessions))
+        )
 
     def _format_age(self, updated: float) -> str:
         delta = max(0, int(time.time() - (updated or 0)))
@@ -1226,12 +1445,12 @@ class ProxyRunner:
             self._set_message("Read-only: cannot create sessions.")
             self._render()
             return
-        name = self._prompt_popup("New Session", "Name for the new session (its own git worktree):")
-        if not name or not name.strip():
+        name = self._prompt_session_name("New Session", default=self._next_session_name())
+        if name is None:
             self._set_message("Cancelled.")
             self._render()
             return
-        self._new_session(name.strip())
+        self._new_session(name)
 
     def _stop_session_menu(self) -> None:
         options = [self._session_name(index) for index in range(len(self.sessions))]
@@ -1256,8 +1475,9 @@ class ProxyRunner:
 
     def _pump_background(self, session) -> None:
         # Keep a background session's screen current by draining + feeding its
-        # output. No render and no commit here (commits happen on switch/exit) —
-        # the parse worker is not safe to run while the session is swapped out.
+        # output. No render and no commit here — committing happens separately in
+        # _service_background_sessions (synchronously, via _with_session), since
+        # the async parse worker is not safe to run while a session is swapped out.
         if session not in self.sessions:
             return
         saved = capture_session(self)
@@ -1278,6 +1498,7 @@ class ProxyRunner:
         if died:
             self._stop_session(self.sessions.index(session), commit=False)
 
+<<<<<<< HEAD
     def _ensure_worktree_alive(self) -> None:
         if self.worktree is None:
             return
@@ -1333,6 +1554,65 @@ class ProxyRunner:
         self._enable_host_mouse()
         self._set_message(f"Worktree was deleted externally; recreated '{info.name}'.", seconds=8.0)
         self._render()
+=======
+    def _with_session(self, session, fn):
+        # Run ``fn`` with ``session`` swapped onto self (its repo/state/screen
+        # become the live ones), then copy any mutations back into the snapshot
+        # and restore the previously-active session. Used to service a background
+        # session synchronously (commit/integrate) without disturbing the active
+        # one. The swap is synchronous, so the parse worker (which ``fn`` joins)
+        # never runs against the wrong session.
+        if session not in self.sessions:
+            return None
+        saved = capture_session(self)
+        restore_session(self, session)
+        try:
+            return fn()
+        finally:
+            for field in SESSION_FIELDS:
+                setattr(session, field, getattr(self, field))
+            restore_session(self, saved)
+
+    def _commit_and_integrate_background(self) -> str:
+        # Runs with a background session swapped in: commit its finished turn (if
+        # it left changes) and try to fast-forward it into the base.
+        if self.repo.has_changes():
+            self._commit_latest_turn_sync()
+        self._clear_agent_in_flight_if_idle()
+        return self._integrate_turn_or_conflict()
+
+    def _service_background_sessions(self) -> None:
+        # Integrate background sessions as soon as they go idle, so finished work
+        # lands in the base without waiting to be switched to. A background
+        # session whose finished turn cannot fast-forward is brought to the
+        # foreground and its resolve options box is surfaced (session + backend).
+        if not getattr(self, "tracking_enabled", True) or self.merge_ctx is not None:
+            return
+        now = time.monotonic()
+        for index in range(len(self.sessions)):
+            if index == self.active_index:
+                continue
+            session = self.sessions[index]
+            if getattr(session, "merge_ctx", None) is not None:
+                # An agent merge started before this session was backgrounded;
+                # finalize it once the agent has gone idle (git-only, no input).
+                self._with_session(session, self._maybe_complete_agent_merge)
+                continue
+            if now - getattr(session, "last_child_output", 0.0) < self.CHILD_IDLE_SECONDS:
+                continue  # still producing output — don't commit a turn mid-flight
+            if now - getattr(session, "last_poll", 0.0) < self.POLL_SECONDS:
+                continue
+            session.last_poll = now
+            # Service every idle background session (not just ones still flagged
+            # in-flight): a finished turn's commit may not be integrated yet, and
+            # the in-flight flag is cleared on idle, so gating on it would strand
+            # the work until the user switched to the session. The body is a cheap
+            # no-op (one `git status`) when there is nothing to commit or integrate.
+            if self._with_session(session, self._commit_and_integrate_background) == "conflict":
+                self._switch_active(index)
+                self._prompt_resolve_conflict(self.repo.current_branch())
+                return  # handle one conflict at a time
+>>>>>>> 2522df1fd397d1d309f3ad43c9fdce73b5a035b7
 
     def _open_session_worktree(self, name: str) -> tuple[WorktreeInfo, GitRepo]:
         worktrees = self._worktrees()
@@ -1343,7 +1623,7 @@ class ProxyRunner:
         info = worktrees.create(name, base=self._base_branch or self.base_repo.current_branch())
         return info, GitRepo(info.path)
 
-    def _new_session(self, name: str, *, resume_session_id: str | None = None) -> None:
+    def _new_session(self, name: str, *, resume_session_id: str | None = None, backend: str | None = None) -> None:
         try:
             info, repo = self._open_session_worktree(name)
         except Exception as error:
@@ -1358,6 +1638,10 @@ class ProxyRunner:
         self.repo = repo
         self.turn = self._turn_from_branch(repo.current_branch())
         self.state = AgitState(info.path, default_backend=self.global_config.default_backend)
+        if backend:
+            # Pin this session to a specific backend (e.g. created by switching
+            # backends), independent of the global default.
+            self.state.backend = backend
         if resume_session_id:
             # Resume this exact backend conversation (its transcript lives under
             # the worktree path, which we have just recreated/reused).
@@ -1535,6 +1819,7 @@ class ProxyRunner:
                     self.last_child_output_sample = (self.last_child_output_sample + output)[-4096:]
                     self._answer_terminal_queries(output)
                     self._sync_terminal_modes(output)
+                    self._track_sync_update(output)
                     self._feed_child_output(output)
                     self._render_output()
             if sys.stdin.fileno() in readable:
@@ -1590,6 +1875,10 @@ class ProxyRunner:
                 self._resume_pending_prompt_if_ready()
                 self._ensure_worktree_alive()
                 self._maybe_agent_commit()
+                self._service_background_sessions()
+            if self._base_advanced:
+                self._base_advanced = False
+                self._sync_idle_worktrees_to_base()
             if self.child_pid is not None:
                 done, status = os.waitpid(self.child_pid, os.WNOHANG)
                 if done:
@@ -1678,6 +1967,7 @@ class ProxyRunner:
         self.screen = pyte.HistoryScreen(self.cols, max(self.rows - 1, 1), history=5000, ratio=0.5)
         self.stream = pyte.ByteStream(self.screen)
         self.scroll_back = 0
+        self._in_sync_update = False
 
     def _feed_child_output(self, output: bytes) -> None:
         if self.stream is not None:
@@ -1782,11 +2072,34 @@ class ProxyRunner:
             except OSError:
                 pass
 
+    def _track_sync_update(self, output: bytes) -> None:
+        # Honor the synchronized-update mode (DECSET 2026): backends wrap a
+        # multi-write repaint in BSU (?2026h) / ESU (?2026l) so consumers can
+        # apply it atomically. While inside such an update aGiT defers its own
+        # repaint, so it never paints a half-drawn frame (the cause of tearing).
+        # Only the last marker in the chunk decides the resulting state; a
+        # stuck-open update is bounded by SYNC_MAX_HOLD in the paint deciders.
+        begin = output.rfind(b"\x1b[?2026h")
+        end = output.rfind(b"\x1b[?2026l")
+        if begin == -1 and end == -1:
+            return
+        in_update = begin > end
+        if in_update and not self._in_sync_update:
+            self._sync_since = time.monotonic()
+        self._in_sync_update = in_update
+
+    def _sync_hold(self, now: float) -> bool:
+        # True while a backend synchronized-update should still defer the paint.
+        return self._in_sync_update and now - self._sync_since < self.SYNC_MAX_HOLD
+
     def _render_output(self) -> None:
         # Coalesce repaints driven by a flood of backend output (e.g. fast
         # scrolling) to ~30fps so aGiT does not overwhelm the host terminal's
         # stdout, which would block the loop and back up the backend's PTY.
         now = time.monotonic()
+        if self._sync_hold(now):
+            self._render_pending = True
+            return
         if now - self._last_render >= self.RENDER_MIN_INTERVAL:
             self._last_render = now
             self._render_pending = False
@@ -1798,15 +2111,33 @@ class ProxyRunner:
         if not self._render_pending:
             return
         now = time.monotonic()
+        if self._sync_hold(now):
+            return
         if now - self._last_render >= self.RENDER_MIN_INTERVAL:
             self._last_render = now
             self._render_pending = False
             self._render()
 
+    def _cursor_sequence(self) -> str:
+        # The trailing sequence that positions (and shows) or hides the cursor.
+        assert self.screen is not None
+        if self.scroll_back > 0:
+            # While scrolled into history, keep the cursor hidden (its live
+            # position is not meaningful for the displayed lines).
+            return "\x1b[?25l"
+        cursor = self.screen.cursor
+        cursor_row = min(cursor.y + 1, max(self.rows - 1, 1))
+        cursor_col = min(cursor.x + 1, self.cols)
+        return f"\x1b[{cursor_row};{cursor_col}H\x1b[?25h"
+
     def _render(self) -> None:
         if self.screen is None:
             return
-        parts = ["\x1b[0m\x1b[?25l\x1b[H"]
+        # Paint the whole screen inside one synchronized update (DECSET 2026) so
+        # the host terminal applies the frame atomically and never shows it
+        # half-drawn. Terminals that don't support 2026 ignore the markers and
+        # fall back to the previous (unwrapped) full-repaint behaviour.
+        parts = ["\x1b[?2026h\x1b[0m\x1b[?25l\x1b[H"]
         selection = self._selection_ranges()
         for index, cells in enumerate(self._visible_lines()):
             parts.append("\x1b[0m" + self._render_line(cells, selection.get(index)))
@@ -1816,15 +2147,8 @@ class ProxyRunner:
             self._append_command_palette(parts)
         elif self.message and time.monotonic() < self.message_until:
             self._append_message_popup(parts, self.message)
-        if self.scroll_back > 0:
-            # While scrolled into history, keep the cursor hidden (its live
-            # position is not meaningful for the displayed lines).
-            parts.append("\x1b[?25l")
-        else:
-            cursor = self.screen.cursor
-            cursor_row = min(cursor.y + 1, max(self.rows - 1, 1))
-            cursor_col = min(cursor.x + 1, self.cols)
-            parts.append(f"\x1b[{cursor_row};{cursor_col}H\x1b[?25h")
+        parts.append(self._cursor_sequence())
+        parts.append("\x1b[?2026l")
         os.write(sys.stdout.fileno(), "".join(parts).encode())
 
     def _append_command_palette(self, parts: list[str]) -> None:
@@ -2380,10 +2704,10 @@ class ProxyRunner:
         try:
             if self.agent_parse_thread and self.agent_parse_thread.is_alive():
                 self.agent_parse_thread.join(timeout=20)
-            self._finish_agent_parse_if_ready(quiet=True, prompt_untracked=False)
+            self._finish_agent_parse_if_ready(quiet=True, prompt_untracked=False, integrate=False)
             if self._start_agent_parse() and self.agent_parse_thread:
                 self.agent_parse_thread.join(timeout=20)
-            self._finish_agent_parse_if_ready(quiet=True, prompt_untracked=False)
+            self._finish_agent_parse_if_ready(quiet=True, prompt_untracked=False, integrate=False)
         except Exception as error:  # never block on a commit failure
             self._debug(f"sync commit failed: {error!r}")
 
@@ -2399,6 +2723,7 @@ class ProxyRunner:
         self._render()
         self._commit_latest_turn_sync()  # active session, in place
         self._integrate_session_on_exit()
+        self._remove_worktree_on_exit()
         if len(self.sessions) > 1:
             active_snapshot = capture_session(self)
             for index, session in enumerate(self.sessions):
@@ -2408,11 +2733,80 @@ class ProxyRunner:
                 try:
                     self._commit_latest_turn_sync()
                     self._integrate_session_on_exit()
+                    self._remove_worktree_on_exit()
                 finally:
                     for field in SESSION_FIELDS:
                         setattr(session, field, getattr(self, field))
             restore_session(self, active_snapshot)
         self._delete_orphan_merged_branches()
+
+    def _persist_last_session_record(self) -> None:
+        # Save just the resume pointer for the current (primary) session into the
+        # repo-root state — the durable "last session" record. Only the minimal
+        # fields needed to resume the conversation are kept; the worktree's working
+        # tree and per-turn state (pending trace, etc.) are intentionally dropped.
+        try:
+            root = AgitState(self.base_repo.repo, default_backend=self.global_config.default_backend)
+            root.data["backend"] = self.state.backend
+            root.data["backend_session_id"] = self.state.backend_session_id
+            root.data["backend_session_repo"] = self.state.data.get("backend_session_repo")
+            root.data["last_backend_message_id"] = self.state.last_backend_message_id
+            root.data["model"] = self.state.model
+            root.data["agit_session_id"] = self.state.session_id
+            root.save()
+            self._debug(f"persisted last session record backend_session_id={self.state.backend_session_id}")
+        except Exception as error:
+            self._debug(f"persist last session record failed: {error!r}")
+
+    def _terminate_child(self) -> None:
+        # Stop the current session's backend process and release its PTY, so its
+        # worktree is no longer in use and can be removed.
+        if getattr(self, "child_pid", None):
+            try:
+                os.kill(self.child_pid, signal.SIGINT)
+            except ProcessLookupError:
+                pass
+            self.child_pid = None
+        if getattr(self, "master_fd", None) is not None:
+            try:
+                os.close(self.master_fd)
+            except OSError:
+                pass
+            self.master_fd = None
+
+    def _remove_worktree_on_exit(self) -> None:
+        # On exit, drop a fully-merged session's worktree so directories do not
+        # pile up across runs. A session whose work could not be integrated
+        # (conflict, uncommitted changes, or commits still ahead of the base)
+        # keeps its worktree so the next startup can surface it. The backend
+        # conversation persists (keyed by the worktree path) and is recreated if
+        # the session is resumed, so nothing of value is lost.
+        info = getattr(self, "worktree", None)
+        if info is None or getattr(self, "_base_branch", None) is None:
+            return
+        try:
+            if self.merge_ctx or self.repo.merge_in_progress() or self.repo.has_changes():
+                return
+            branch = self.repo.current_branch()
+            if branch.startswith("agit/") and self.base_repo.log_range(self._base_branch, branch):
+                return  # still has unintegrated commits
+        except Exception:
+            return
+        # Remember this session's conversation under its backend so switching back
+        # to that backend (this run or a later one) resumes it.
+        self._remember_session_for_backend()
+        if info.name == getattr(self, "_primary_worktree_name", None):
+            # Persist the primary session's resume pointer to the durable repo-root
+            # state before discarding its worktree, so the conversation auto-resumes
+            # next run even though the worktree (and its working state) are gone.
+            self._persist_last_session_record()
+        self._terminate_child()
+        try:
+            self._worktrees().remove(info.name)
+            self._debug(f"removed merged worktree '{info.name}' on exit")
+        except Exception as error:
+            self._debug(f"exit worktree removal failed for '{getattr(info, 'name', '?')}': {error!r}")
+        self.worktree = None
 
     def _exit_child(self) -> None:
         self.running = False
@@ -2608,7 +3002,7 @@ class ProxyRunner:
         self.agent_parse_thread.start()
         return True
 
-    def _finish_agent_parse_if_ready(self, *, quiet: bool, prompt_untracked: bool | None = None) -> bool | None:
+    def _finish_agent_parse_if_ready(self, *, quiet: bool, prompt_untracked: bool | None = None, integrate: bool = True) -> bool | None:
         if prompt_untracked is None:
             # Worktree sessions are isolated sandboxes, so agent commits there
             # auto-stage everything; only the main working tree prompts.
@@ -2645,7 +3039,13 @@ class ProxyRunner:
             self.state.last_backend_message_id = complete_turns[-1].assistant_message_id
             self.last_status = ""
             self._debug(f"agent commit created session_id={self.state.backend_session_id} assistant_id={self.state.last_backend_message_id}")
-            self._integrate_session_turn()
+            if integrate:
+                # Interactive integration (may prompt / inject an agent merge) only
+                # for the active session. The sync/background commit path passes
+                # integrate=False and integrates non-interactively itself, so an
+                # agent merge is never injected into a session that is merely
+                # swapped in — which would mis-target another backend's PTY.
+                self._integrate_session_turn()
         return committed
 
     def _commit_available_agent_turns(self, *, quiet: bool) -> bool:
@@ -2738,8 +3138,15 @@ class ProxyRunner:
             termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, self.old_attrs)
 
     def _restore_terminal(self) -> None:
-        self._set_cooked()
+        # Disable mouse reporting *before* handing the terminal back, then drop any
+        # mouse reports the terminal already queued — otherwise those buffered SGR
+        # sequences (e.g. "\x1b[<35;..M") leak to the shell as stray hex after exit.
         self._disable_host_terminal_modes()
+        try:
+            termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+        except (termios.error, OSError, ValueError):
+            pass
+        self._set_cooked()
         os.write(sys.stdout.fileno(), b"\x1b[?1049l\x1b[0m\r\n")
 
     def _disable_host_terminal_modes(self) -> None:

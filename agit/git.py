@@ -101,8 +101,10 @@ class GitRepo:
     def is_detached(self) -> bool:
         return self.current_branch() == "HEAD"
 
-    def worktree_add(self, path: str, *, branch: str, base: str) -> None:
-        self._run(["git", "worktree", "add", "-b", branch, path, base])
+    def worktree_add_detached(self, path: str, *, base: str) -> None:
+        # Create a worktree detached at ``base`` with no branch of its own; a turn
+        # branch is created lazily on the first commit (see _ensure_turn_branch).
+        self._run(["git", "worktree", "add", "--detach", path, base])
 
     def worktree_remove(self, path: str, *, force: bool = False) -> None:
         command = ["git", "worktree", "remove"]
@@ -110,6 +112,10 @@ class GitRepo:
             command.append("--force")
         command.append(path)
         self._run(command)
+
+    def worktree_prune(self) -> None:
+        # Drop administrative entries for worktrees whose directories are gone.
+        self._run(["git", "worktree", "prune"], check=False)
 
     def worktree_list(self) -> list[dict[str, str]]:
         output = self._run(["git", "worktree", "list", "--porcelain"]).stdout

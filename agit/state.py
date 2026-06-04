@@ -33,6 +33,7 @@ class AgitState:
             "backend_session_id": None,
             "backend_session_repo": None,
             "backend_session_ids": {},
+            "backend_sessions": {},
             "last_backend_message_id": None,
             "declined_untracked_files": [],
             "pending_trace": [],
@@ -161,6 +162,23 @@ class AgitState:
     def stored_backend_session(self, backend: str) -> str | None:
         value = (self.data.get("backend_session_ids") or {}).get(backend)
         return str(value) if value else None
+
+    def remember_session(self, backend: str, *, session_id: str | None, worktree: str,
+                         message_id: str | None = None, model: str | None = None) -> None:
+        """Record a backend's most recent conversation (its id and the worktree it
+        ran in) so it can be resumed after its worktree is removed on exit."""
+        sessions = dict(self.data.get("backend_sessions") or {})
+        if session_id:
+            sessions[backend] = {"id": session_id, "worktree": worktree,
+                                 "message_id": message_id, "model": model}
+        else:
+            sessions.pop(backend, None)
+        self.data["backend_sessions"] = sessions
+        self.save()
+
+    def recall_session(self, backend: str) -> dict | None:
+        record = (self.data.get("backend_sessions") or {}).get(backend)
+        return dict(record) if isinstance(record, dict) else None
 
     @property
     def last_backend_message_id(self) -> str | None:

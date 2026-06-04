@@ -1,3 +1,4 @@
+import shutil
 import subprocess
 
 import pytest
@@ -23,15 +24,26 @@ def _commit(repo, name, content, message):
     repo.commit(message)
 
 
+def _make_session(main, name, base, *, backend="test", turn=1):
+    # Create a session worktree (detached at base) and put it on its first turn
+    # branch, exactly as the app does lazily on the first commit via
+    # _ensure_turn_branch. Returns (WorktreeInfo, worktree GitRepo).
+    wm = WorktreeManager(main)
+    info = wm.create(name, base=base)
+    work = GitRepo.discover(info.path)
+    work.switch(wm.turn_branch(name, turn, backend=backend), create=True)
+    return info, work
+
+
 # --- naming (pure) ---
 
 def test_naming_helpers(tmp_path):
     repo = _init_repo(tmp_path)
     wm = WorktreeManager(repo)
     assert wm.worktree_path("feat x").name == "feat-x"
-    assert wm.turn_branch("feat x", 2) == "agit/feat-x/t2"
-    assert wm.branch_prefix("feat x") == "agit/feat-x/"
-    assert wm.is_agit_branch("agit/feat-x/t0") is True
+    # Branches are namespaced by backend then session: agit/<backend>/<name>/tN.
+    assert wm.turn_branch("feat x", 2, backend="open code") == "agit/open-code/feat-x/t2"
+    assert wm.is_agit_branch("agit/claude/feat-x/t0") is True
     assert wm.is_agit_branch("main") is False
     assert _sanitize_name("  ") == "session"
 
@@ -43,14 +55,18 @@ def test_create_list_remove_worktree(tmp_path):
     wm = WorktreeManager(repo)
     info = wm.create("feat", base="HEAD")
     assert info.path.is_dir()
-    assert info.branch == "agit/feat/t0"
+    assert info.branch == ""  # detached at base; no branch until the first commit
     listed = wm.list()
     assert [w.name for w in listed] == ["feat"]
-    assert listed[0].branch == "agit/feat/t0"
+
+    # A turn branch appears only once the session commits.
+    work = GitRepo.discover(info.path)
+    work.switch(wm.turn_branch("feat", 1, backend="claude"), create=True)
+    assert "agit/claude/feat/t1" in repo.list_branches("agit/")
 
     wm.remove("feat")
     assert not info.path.exists()
-    assert "agit/feat/t0" not in repo.list_branches("agit/")
+    assert "agit/claude/feat/t1" not in repo.list_branches("agit/")
 
 
 def test_turn_branches_coexist_without_df_conflict(tmp_path):
@@ -58,9 +74,11 @@ def test_turn_branches_coexist_without_df_conflict(tmp_path):
     wm = WorktreeManager(repo)
     info = wm.create("feat", base="HEAD")
     work = GitRepo.discover(info.path)
-    # A second turn branch must be creatable alongside the first.
-    work.switch("agit/feat/t1", create=True, base="HEAD")
-    assert "agit/feat/t1" in repo.list_branches("agit/")
+    # Successive turn branches must coexist under agit/<backend>/<name>/.
+    work.switch(wm.turn_branch("feat", 1, backend="claude"), create=True, base="HEAD")
+    work.switch(wm.turn_branch("feat", 2, backend="claude"), create=True, base="HEAD")
+    assert "agit/claude/feat/t1" in repo.list_branches("agit/")
+    assert "agit/claude/feat/t2" in repo.list_branches("agit/")
 
 
 # --- merge behaviour against real git ---
@@ -104,17 +122,21 @@ def _integration_runner(main_repo, worktree_repo, base_branch, name):
     runner.master_fd = None
     runner.agent_in_flight = False
     runner.worktree_manager = WorktreeManager(main_repo)
+    runner.backend = type("B", (), {"name": "test"})()
     runner._set_message = lambda *a, **k: None
     runner._render = lambda: None
     runner._debug = lambda *a, **k: None
+    runner._exiting = False
+    # On a non-fast-forward integration aGiT surfaces a resolve options box;
+    # default to "Merge automatically" so these tests exercise the agent path.
+    runner._select_popup = lambda title, options: options[0]
     return runner
 
 
 def test_integrate_clean_merge_advances_base(tmp_path):
     main = _init_repo(tmp_path)
     base = main.current_branch()
-    info = WorktreeManager(main).create("session-1", base=base)
-    work = GitRepo.discover(info.path)
+    info, work = _make_session(main, "session-1", base)
     _commit(work, "agent.txt", "agent work\n", "<agent> work")
 
     runner = _integration_runner(main, work, base, "session-1")
@@ -122,40 +144,58 @@ def test_integrate_clean_merge_advances_base(tmp_path):
 
     # Base fast-forwarded to include the agent's work.
     assert (main.repo / "agent.txt").exists()
-    # The transient t0 branch is gone and the worktree is left detached at base,
+    # The transient turn branch is gone and the worktree is left detached at base,
     # so a fully-merged session leaves no branch behind.
     assert main.list_branches("agit/") == []
     assert work.is_detached()
-    # A fresh turn branch is created only when the agent next commits.
+    # A fresh, backend-namespaced turn branch is created only when it next commits.
     runner._ensure_turn_branch()
-    assert work.current_branch() == "agit/session-1/t1"
+    assert work.current_branch() == "agit/test/session-1/t1"
     assert runner.turn == 1
 
 
-def test_integrate_conflict_starts_agent_merge(tmp_path):
+def test_integrate_conflict_prompts_then_starts_agent_merge(tmp_path):
     main = _init_repo(tmp_path)  # f.txt == "base\n"
     base = main.current_branch()
-    info = WorktreeManager(main).create("s1", base=base)
-    work = GitRepo.discover(info.path)
+    info, work = _make_session(main, "s1", base)
     _commit(work, "f.txt", "worktree change\n", "wt change")
     _commit(main, "f.txt", "base change\n", "base change")  # conflicting base advance
     base_head = main.rev_parse(base)
 
     runner = _integration_runner(main, work, base, "s1")
-    runner._integrate_session_turn()
+    runner._integrate_session_turn()  # conflict -> options box -> "Merge automatically"
 
-    # Base untouched; the merge is left in progress for the agent to resolve.
+    # Base untouched; after choosing auto-resolve the merge is in progress.
     assert main.rev_parse(base) == base_head
     assert work.merge_in_progress() is True
     assert work.unmerged_paths()  # conflict present
-    assert runner.merge_ctx is not None and runner.merge_ctx["source_branch"] == "agit/s1/t0"
+    assert runner.merge_ctx is not None and runner.merge_ctx["source_branch"] == "agit/test/s1/t1"
+
+
+def test_integrate_conflict_leave_for_later_keeps_work_unintegrated(tmp_path):
+    main = _init_repo(tmp_path)
+    base = main.current_branch()
+    info, work = _make_session(main, "s1", base)
+    _commit(work, "f.txt", "worktree change\n", "wt change")
+    _commit(main, "f.txt", "base change\n", "base change")
+    base_head = main.rev_parse(base)
+
+    runner = _integration_runner(main, work, base, "s1")
+    # Pick the last option, "Leave for later".
+    runner._select_popup = lambda title, options: options[-1]
+    runner._integrate_session_turn()
+
+    # Nothing merged: base untouched, no merge in progress, work still on the branch.
+    assert main.rev_parse(base) == base_head
+    assert work.merge_in_progress() is False
+    assert runner.merge_ctx is None
+    assert "agit/test/s1/t1" in main.list_branches("agit/")
 
 
 def test_finalize_agent_merge_commits_and_advances(tmp_path):
     main = _init_repo(tmp_path)
     base = main.current_branch()
-    info = WorktreeManager(main).create("s1", base=base)
-    work = GitRepo.discover(info.path)
+    info, work = _make_session(main, "s1", base, backend="claude")
     _commit(work, "f.txt", "worktree change\n", "wt change")
     _commit(main, "f.txt", "base change\n", "base change")
 
@@ -199,12 +239,11 @@ def test_open_session_worktree_creates_then_reuses(tmp_path):
 
     info1, repo1 = runner._open_session_worktree("s1")
     assert info1.path.is_dir()
-    assert repo1.current_branch() == "agit/s1/t0"
+    assert repo1.is_detached()  # created detached at base, no branch yet
 
     # A second call reuses the same worktree (resume across runs) rather than failing.
     info2, repo2 = runner._open_session_worktree("s1")
     assert info2.path == info1.path
-    assert repo2.current_branch() == "agit/s1/t0"
 
 
 def test_worktree_has_pending_work(tmp_path):
@@ -212,8 +251,7 @@ def test_worktree_has_pending_work(tmp_path):
 
     main = _init_repo(tmp_path)
     base = main.current_branch()
-    info = WorktreeManager(main).create("s", base=base)
-    repo = GitRepo.discover(info.path)
+    info, repo = _make_session(main, "s", base)
     runner = ProxyRunner.__new__(ProxyRunner)
     runner.base_repo = main
     runner._base_branch = base
@@ -230,9 +268,9 @@ def test_reconcile_integrates_and_deletes_stale_worktrees(tmp_path):
     base = main.current_branch()
     wm = WorktreeManager(main)
     active = wm.create("session-1", base=base)
-    wm.create("merged-one", base=base)  # clean, nothing ahead of base
-    pending = wm.create("pending-one", base=base)
-    _commit(GitRepo.discover(pending.path), "p.txt", "pending\n", "pending work")
+    wm.create("merged-one", base=base)  # clean, detached, nothing ahead of base
+    _, pending_work = _make_session(main, "pending-one", base)
+    _commit(pending_work, "p.txt", "pending\n", "pending work")
 
     runner = ProxyRunner.__new__(ProxyRunner)
     runner.base_repo = main
@@ -265,8 +303,9 @@ def test_reconcile_flags_conflicting_stale_worktree(tmp_path):
     base = main.current_branch()
     wm = WorktreeManager(main)
     active = wm.create("session-1", base=base)
-    stale = wm.create("conflict-one", base=base)
-    _commit(GitRepo.discover(stale.path), "f.txt", "stale change\n", "stale edit")
+    stale_info, stale_work = _make_session(main, "conflict-one", base)
+    stale = stale_info
+    _commit(stale_work, "f.txt", "stale change\n", "stale edit")
     _commit(main, "f.txt", "base change\n", "base edit")  # diverges -> conflict
 
     runner = ProxyRunner.__new__(ProxyRunner)
@@ -294,28 +333,25 @@ def test_reconcile_flags_conflicting_stale_worktree(tmp_path):
 def test_ensure_turn_branch_creates_branch_for_detached_session(tmp_path):
     main = _init_repo(tmp_path)
     base = main.current_branch()
+    # A freshly created session is detached at base with no turn branch.
     info = WorktreeManager(main).create("s1", base=base)
     work = GitRepo.discover(info.path)
-    # Simulate a merged/idle session: detached at base with no turn branch.
-    work.switch_detach(base)
-    work.delete_branch("agit/s1/t0", force=True)
     assert work.is_detached()
     assert main.list_branches("agit/") == []
 
     runner = _integration_runner(main, work, base, "s1")
-    runner._ensure_turn_branch()  # a new prompt arrives -> its own branch
-    assert work.current_branch() == "agit/s1/t1"
+    runner._ensure_turn_branch()  # a new prompt arrives -> its own backend-namespaced branch
+    assert work.current_branch() == "agit/test/s1/t1"
 
     # Already on a turn branch: no extra branch is created.
     runner._ensure_turn_branch()
-    assert work.current_branch() == "agit/s1/t1"
+    assert work.current_branch() == "agit/test/s1/t1"
 
 
 def test_integrate_session_on_exit_merges_and_deletes_branch(tmp_path):
     main = _init_repo(tmp_path)
     base = main.current_branch()
-    info = WorktreeManager(main).create("s1", base=base)
-    work = GitRepo.discover(info.path)
+    info, work = _make_session(main, "s1", base)
     _commit(work, "a.txt", "x\n", "<agent> work")  # committed but not integrated
 
     runner = _integration_runner(main, work, base, "s1")
@@ -345,8 +381,7 @@ def test_integrate_session_on_exit_drops_empty_branch(tmp_path):
 def test_active_has_pending_reflects_unintegrated_commits(tmp_path):
     main = _init_repo(tmp_path)
     base = main.current_branch()
-    info = WorktreeManager(main).create("s1", base=base)
-    work = GitRepo.discover(info.path)
+    info, work = _make_session(main, "s1", base)
 
     runner = _integration_runner(main, work, base, "s1")
     assert runner._active_has_pending() is False
@@ -357,8 +392,7 @@ def test_active_has_pending_reflects_unintegrated_commits(tmp_path):
 def test_integrate_active_session_clean_merge(tmp_path):
     main = _init_repo(tmp_path)
     base = main.current_branch()
-    info = WorktreeManager(main).create("s1", base=base)
-    work = GitRepo.discover(info.path)
+    info, work = _make_session(main, "s1", base)
     _commit(work, "a.txt", "x\n", "<agent> work")  # an unintegrated commit
 
     runner = _integration_runner(main, work, base, "s1")
@@ -376,8 +410,7 @@ def test_integrate_active_session_clean_merge(tmp_path):
 def test_session_unintegrated_detects_pending_commits(tmp_path):
     main = _init_repo(tmp_path)
     base = main.current_branch()
-    info = WorktreeManager(main).create("s1", base=base)
-    work = GitRepo.discover(info.path)
+    info, work = _make_session(main, "s1", base)
 
     runner = _integration_runner(main, work, base, "s1")
     assert runner._session_unintegrated(work) is False
@@ -449,3 +482,237 @@ def test_log_range_lists_commits(tmp_path):
     _commit(repo, "a.txt", "a\n", "add a")
     out = repo.log_range(base_sha, "HEAD", paths=["a.txt"])
     assert "add a" in out
+
+
+def test_align_session_to_base_repoints_clean_worktree(tmp_path):
+    main = _init_repo(tmp_path)
+    main.create_branch("feature", main.current_branch())
+    main.switch("feature")
+    _commit(main, "feat.txt", "feature\n", "feature commit")
+    base = main.current_branch()  # "feature"
+    # A reused worktree sitting at an older base (the initial commit, not feature).
+    info = WorktreeManager(main).create("session-1", base="HEAD~1")
+    work = GitRepo.discover(info.path)
+    assert work.rev_parse("HEAD") != main.rev_parse(base)
+
+    runner = _integration_runner(main, work, base, "session-1")
+    runner._align_session_to_base(work)
+
+    # Re-pointed to the branch the user launched from.
+    assert work.rev_parse("HEAD") == main.rev_parse(base)
+
+
+def test_align_session_to_base_keeps_worktree_with_pending_work(tmp_path):
+    main = _init_repo(tmp_path)
+    base = main.current_branch()
+    info, work = _make_session(main, "session-1", base)
+    _commit(work, "w.txt", "work\n", "work")  # committed, ahead of base
+    head_before = work.rev_parse("HEAD")
+
+    runner = _integration_runner(main, work, base, "session-1")
+    runner._align_session_to_base(work)
+
+    # Has unintegrated commits, so it is left untouched for integration.
+    assert work.rev_parse("HEAD") == head_before
+    assert work.current_branch() == "agit/test/session-1/t1"
+
+
+def test_remove_prunes_orphaned_directory_and_deletes_branches(tmp_path):
+    main = _init_repo(tmp_path)
+    base = main.current_branch()
+    info, work = _make_session(main, "s1", base)
+    _commit(work, "a.txt", "x\n", "work")
+    branch = work.current_branch()
+    assert branch in main.list_branches("agit/")
+
+    # Simulate a half-broken state: the directory vanished out-of-band.
+    shutil.rmtree(info.path)
+    WorktreeManager(main).remove("s1")
+
+    # The stale worktree entry is pruned and the branch cleaned up (kept in sync).
+    assert not info.path.exists()
+    assert branch not in main.list_branches("agit/")
+    assert info.path.name not in [w.name for w in WorktreeManager(main).list()]
+
+
+def test_create_recovers_from_prunable_stale_entry(tmp_path):
+    main = _init_repo(tmp_path)
+    base = main.current_branch()
+    wm = WorktreeManager(main)
+    info = wm.create("session-1", base=base)
+    # The directory vanishes out-of-band, leaving git with a stale "prunable"
+    # registration for the path (reproduces a worktree dir deleted by hand/crash).
+    shutil.rmtree(info.path)
+    porcelain = main._run(["git", "worktree", "list", "--porcelain"]).stdout
+    assert "prunable" in porcelain  # the stale entry is present
+
+    # Re-creating the session must succeed (prune the stale entry, then add fresh)
+    # rather than failing with "already registered" and falling back to no worktree.
+    info2 = wm.create("session-1", base=base)
+    assert info2.path.is_dir()
+    assert GitRepo.discover(info2.path).rev_parse("HEAD") == main.rev_parse(base)
+
+
+def test_remove_worktree_on_exit_drops_merged_extra_session(tmp_path):
+    main = _init_repo(tmp_path)
+    base = main.current_branch()
+    info, work = _make_session(main, "session-2", base)
+    _commit(work, "a.txt", "x\n", "<agent> work")
+
+    runner = _integration_runner(main, work, base, "session-2")
+    runner.worktree = info  # real WorktreeInfo so removal can find the path
+    runner._primary_worktree_name = "session-1"  # this is an extra session
+    runner.child_pid = None
+    runner.master_fd = None
+    runner._integrate_session_on_exit()   # integrate -> detached at base, merged
+    runner._remove_worktree_on_exit()
+
+    # A fully-merged *extra* session's worktree directory is gone on exit.
+    assert not info.path.exists()
+    assert info.name not in [w.name for w in WorktreeManager(main).list()]
+    assert runner.worktree is None
+
+
+def test_remove_worktree_on_exit_persists_primary_record_then_removes(tmp_path):
+    main = _init_repo(tmp_path)
+    base = main.current_branch()
+    info, work = _make_session(main, "session-1", base)
+    _commit(work, "a.txt", "x\n", "<agent> work")
+
+    runner = _integration_runner(main, work, base, "session-1")
+    runner.worktree = info
+    runner._primary_worktree_name = "session-1"  # the auto-resume session
+    runner.child_pid = None
+    runner.master_fd = None
+    runner.global_config = type("G", (), {"default_backend": "opencode"})()
+    runner.state = AgitState(info.path)
+    runner.state.backend = "opencode"
+    runner.state.backend_session_id = "sess-xyz"
+
+    runner._integrate_session_on_exit()
+    runner._remove_worktree_on_exit()
+
+    # The worktree (and its working state) are removed...
+    assert not info.path.exists()
+    assert runner.worktree is None
+    # ...but the resume pointer was saved to the durable repo-root state, so the
+    # conversation auto-resumes on the next start.
+    root = AgitState(main.repo)
+    assert root.backend_session_id == "sess-xyz"
+    assert root.backend == "opencode"
+
+
+def test_remove_worktree_on_exit_keeps_unintegrated_session(tmp_path):
+    main = _init_repo(tmp_path)
+    base = main.current_branch()
+    info, work = _make_session(main, "session-1", base)
+    _commit(work, "f.txt", "wt change\n", "wt")
+    _commit(main, "f.txt", "base change\n", "base")  # conflicts with base
+
+    runner = _integration_runner(main, work, base, "session-1")
+    runner.worktree = info
+    runner.child_pid = None
+    runner.master_fd = None
+    runner._exiting = True
+    runner._integrate_session_on_exit()   # conflict -> aborts, leaves the work
+    runner._remove_worktree_on_exit()
+
+    # A session that could not be integrated keeps its worktree for next startup.
+    assert info.path.exists()
+
+
+def test_integrate_active_session_fast_forward_does_not_prompt(tmp_path):
+    main = _init_repo(tmp_path)
+    base = main.current_branch()
+    info, work = _make_session(main, "session-1", base)
+    _commit(work, "a.txt", "x\n", "<agent> work")  # base unchanged -> fast-forwardable
+
+    runner = _integration_runner(main, work, base, "session-1")
+    runner.worktree = info
+    runner._select_popup = lambda *a, **k: pytest.fail("must not prompt for a clean fast-forward")
+    runner._prompt_resolve_conflict = lambda *a, **k: pytest.fail("agent must not be involved in a FF")
+
+    runner._integrate_active_session()
+
+    # Integrated directly with no agent / no prompt.
+    assert (main.repo / "a.txt").exists()
+    assert work.is_detached()
+    assert main.list_branches("agit/") == []
+
+
+def test_integrate_active_session_conflict_prompts(tmp_path):
+    main = _init_repo(tmp_path)
+    base = main.current_branch()
+    info, work = _make_session(main, "session-1", base)
+    _commit(work, "f.txt", "wt change\n", "wt")
+    _commit(main, "f.txt", "base change\n", "base")  # diverges -> conflict
+
+    runner = _integration_runner(main, work, base, "session-1")
+    runner.worktree = info
+    prompted = []
+    runner._prompt_resolve_conflict = lambda src: prompted.append(src)
+
+    runner._integrate_active_session()
+
+    # Only a real conflict surfaces the resolve options.
+    assert prompted == ["agit/test/session-1/t1"]
+
+
+def test_remember_session_for_backend_persists_to_root(tmp_path):
+    main = _init_repo(tmp_path)
+    base = main.current_branch()
+    info, work = _make_session(main, "session-2", base)
+
+    runner = _integration_runner(main, work, base, "session-2")
+    runner.worktree = info
+    runner.global_config = type("G", (), {"default_backend": "claude"})()
+    runner.state = AgitState(info.path)
+    runner.state.backend = "opencode"
+    runner.state.backend_session_id = "sess-77"
+
+    runner._remember_session_for_backend()
+
+    # The opencode conversation is remembered in the durable repo-root state, keyed
+    # by backend, with the worktree it ran in — so switching back resumes it.
+    rec = AgitState(main.repo).recall_session("opencode")
+    assert rec["id"] == "sess-77"
+    assert rec["worktree"] == "session-2"
+
+
+def test_advance_base_to_flags_base_advanced(tmp_path):
+    main = _init_repo(tmp_path)
+    base = main.current_branch()
+    info, work = _make_session(main, "session-1", base)
+    _commit(work, "a.txt", "x\n", "<agent> work")
+
+    runner = _integration_runner(main, work, base, "session-1")
+    runner._base_advanced = False
+    runner._integrate_turn_or_conflict()  # clean fast-forward -> _advance_base_to
+
+    assert runner._base_advanced is True
+
+
+def test_sync_idle_worktree_fast_forwards_to_advanced_base(tmp_path):
+    import types
+
+    main = _init_repo(tmp_path)
+    base = main.current_branch()
+    # An idle session, detached at the base.
+    info = WorktreeManager(main).create("session-2", base=base)
+    work = GitRepo.discover(info.path)
+    assert work.is_detached()
+    base_before = main.rev_parse(base)
+    # The base advances (as if another session integrated work).
+    _commit(main, "new.txt", "x\n", "advance base")
+    assert main.rev_parse(base) != base_before
+
+    runner = _integration_runner(main, work, base, "session-2")
+    runner.repo = work
+    runner.agent_in_flight = False
+    runner.active_index = 0
+    runner.sessions = [types.SimpleNamespace(repo=work, agent_in_flight=False)]
+
+    runner._sync_idle_worktrees_to_base()
+
+    # The idle worktree fast-forwarded onto the advanced base.
+    assert work.rev_parse("HEAD") == main.rev_parse(base)

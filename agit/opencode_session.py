@@ -17,6 +17,7 @@ __all__ = [
     "turns_after",
     "latest_session_id",
     "list_sessions",
+    "list_worktree_sessions",
     "session_belongs_to_repo",
     "export_session",
     "parse_exported_session",
@@ -69,6 +70,47 @@ def latest_session_id(repo: Path) -> str | None:
     if not refs:
         return None
     return max(refs, key=lambda ref: ref.updated).id
+
+
+def list_worktree_sessions(worktrees_root: Path) -> list[tuple[str, SessionRef]]:
+    """Every OpenCode conversation recorded under any aGiT worktree of this repo,
+    newest first, paired with the worktree key needed to recreate it. OpenCode
+    records each session's ``directory``, so conversations whose worktree has
+    since been removed are still listed (and stay resumable)."""
+    root = worktrees_root.resolve()
+    cwd = next((p for p in [root, *root.parents] if p.is_dir()), Path.home())
+    process = subprocess.run(
+        ["opencode", "session", "list", "--format", "json", "--max-count", "200"],
+        cwd=cwd,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if process.returncode != 0:
+        return []
+    try:
+        sessions = json.loads(process.stdout)
+    except json.JSONDecodeError:
+        return []
+    out: list[tuple[str, SessionRef]] = []
+    for session in sessions:
+        sid = session.get("id")
+        directory = session.get("directory")
+        if not sid or not isinstance(directory, str):
+            continue
+        try:
+            dpath = Path(directory).resolve()
+        except OSError:
+            continue
+        if dpath.parent != root:  # only sessions that ran in a worktree of this repo
+            continue
+        updated = session.get("updated") or session.get("created") or 0
+        title = session.get("title")
+        ref = SessionRef(id=str(sid), updated=_to_seconds(updated), label=title if isinstance(title, str) else None)
+        out.append((dpath.name, ref))
+    out.sort(key=lambda item: item[1].updated, reverse=True)
+    return out
 
 
 def session_belongs_to_repo(repo: Path, session_id: str) -> bool:
