@@ -1801,6 +1801,54 @@ def test_advance_base_refuses_when_base_switched_out_of_band():
     assert merged == []  # never fast-forwarded the wrong branch
 
 
+def _exit_removal_runner(*, log_range_result="", rev_parse_raises=False):
+    import types
+
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner._base_branch = "dev"
+    runner.merge_ctx = None
+    runner._primary_worktree_name = None
+    runner.worktree = types.SimpleNamespace(name="session-1")
+    runner.repo = types.SimpleNamespace(
+        current_branch=lambda: "agit/claude/session-1/t1",
+        merge_in_progress=lambda: False,
+        has_changes=lambda: False,
+    )
+
+    def _rev_parse(ref):
+        if rev_parse_raises:
+            raise RuntimeError("unknown revision")
+        return "abc123"
+
+    runner.base_repo = types.SimpleNamespace(rev_parse=_rev_parse,
+                                             log_range=lambda base, head: log_range_result)
+    runner.removed = []
+    runner._worktrees = lambda: types.SimpleNamespace(remove=lambda name: runner.removed.append(name))
+    runner._remember_session_for_backend = lambda: None
+    runner._persist_last_session_record = lambda: None
+    runner._terminate_child = lambda: None
+    runner._debug = lambda *a, **k: None
+    return runner
+
+
+def test_exit_keeps_worktree_with_unintegrated_commits():
+    runner = _exit_removal_runner(log_range_result="deadbeef a commit")
+    runner._remove_worktree_on_exit()
+    assert runner.removed == []  # branch ahead of base (e.g. merging was paused) → preserved
+
+
+def test_exit_keeps_worktree_when_base_ref_unresolvable():
+    runner = _exit_removal_runner(rev_parse_raises=True)
+    runner._remove_worktree_on_exit()
+    assert runner.removed == []  # base branch deleted/renamed → can't confirm merged → preserved
+
+
+def test_exit_removes_fully_merged_worktree():
+    runner = _exit_removal_runner(log_range_result="")  # nothing ahead of base
+    runner._remove_worktree_on_exit()
+    assert runner.removed == ["session-1"]  # normal cleanup of a merged session still happens
+
+
 def test_sync_idle_worktrees_skipped_while_paused():
     runner = ProxyRunner.__new__(ProxyRunner)
     runner._integration_paused = True

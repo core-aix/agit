@@ -3191,8 +3191,15 @@ class ProxyRunner:
             if self.merge_ctx or self.repo.merge_in_progress() or self.repo.has_changes():
                 return
             branch = self.repo.current_branch()
-            if branch.startswith("agit/") and self.base_repo.log_range(self._base_branch, branch):
-                return  # still has unintegrated commits
+            if branch.startswith("agit/"):
+                # Only drop the worktree if we can CONFIRM its branch is fully
+                # contained in the base. If the base ref can't be resolved — e.g.
+                # the user deleted/renamed the branch aGiT integrates into while it
+                # was running — rev_parse raises and we keep the worktree (and its
+                # branch) rather than risk discarding unmerged work.
+                self.base_repo.rev_parse(self._base_branch)
+                if self.base_repo.log_range(self._base_branch, branch):
+                    return  # commits still ahead of base → unintegrated; keep it
         except Exception:
             return
         # Remember this session's conversation under its backend so switching back
