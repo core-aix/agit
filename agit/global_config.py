@@ -55,3 +55,14 @@ class GlobalConfig:
     def default_backend(self, value: str) -> None:
         self.data["default_backend"] = value
         self.save()
+
+    @property
+    def sandbox(self) -> bool:
+        # Confine the agent's writes to its session worktree (on by default).
+        value = self.data.get("sandbox")
+        return True if value is None else bool(value)
+
+    @sandbox.setter
+    def sandbox(self, value: bool) -> None:
+        self.data["sandbox"] = bool(value)
+        self.save()

@@ -32,6 +32,7 @@ from agit.commit_message import build_agent_commit_message, build_agent_merge_me
 from agit.git import GitRepo
 from agit.global_config import GlobalConfig
 from agit.lock import RepoLock
+from agit import sandbox
 from agit.session import turns_after
 from agit.session_runtime import SESSION_FIELDS, capture_session, default_session_fields, restore_session
 from agit.state import AgitState
@@ -407,6 +408,7 @@ class ProxyRunner:
                     seconds=6.0,
                 )
                 self._render()
+            self._setup_worktree_confinement_notice()
             return self._loop()
         finally:
             if self.original_sigwinch is not None:
@@ -450,12 +452,76 @@ class ProxyRunner:
                 # the one it creates can be identified on the first parse.
                 self._pre_spawn_session_ids = {ref.id for ref in self.backend.list_sessions(self.repo.repo)}
         command = self.backend.spawn_command(self.repo.repo, session_id=session_id, resume=resume)
+        command = self._confine_to_worktree(command)
         pid, fd = pty.fork()
         if pid == 0:
             os.chdir(self.repo.repo)
             os.execvp(command[0], command)
         self.child_pid = pid
         self.master_fd = fd
+
+    def _setup_worktree_confinement_notice(self) -> None:
+        # When confinement is requested but the platform can't enforce it (no
+        # sandbox), watch the base repo and warn if the agent writes into it, so
+        # edits outside the worktree don't silently go untracked.
+        self._monitor_base_edits = False
+        if not getattr(self, "tracking_enabled", True) or getattr(self, "worktree", None) is None:
+            return
+        if not (self.global_config.sandbox and sandbox.is_enabled()):
+            return  # user disabled confinement
+        if sandbox.is_available():
+            return  # the sandbox enforces it; no warning needed
+        self._monitor_base_edits = True
+        self._base_check_at = 0.0
+        try:
+            self._base_status_baseline = set(self.base_repo.status_short().splitlines())
+        except Exception:
+            self._base_status_baseline = set()
+        self._set_message(
+            "Agent sandbox unavailable on this platform — edits outside the session\n"
+            "worktree can't be prevented; aGiT will warn if the base repo is modified.",
+            seconds=8.0,
+        )
+        self._render()
+
+    def _warn_if_base_edited(self) -> None:
+        # Fallback for un-sandboxed platforms: detect the agent editing the base
+        # repo (its working tree gaining uncommitted changes beyond the startup
+        # baseline) and warn, since those edits bypass aGiT's worktree tracking.
+        if not getattr(self, "_monitor_base_edits", False):
+            return
+        now = time.monotonic()
+        if now - getattr(self, "_base_check_at", 0.0) < 3.0:
+            return
+        self._base_check_at = now
+        try:
+            current = set(self.base_repo.status_short().splitlines())
+        except Exception:
+            return
+        new = current - self._base_status_baseline
+        if new:
+            files = ", ".join(sorted(line[3:] for line in list(new) if len(line) > 3)[:5])
+            self._set_message(
+                f"Agent edited the base repo, outside its worktree ({files}). These "
+                "changes are not tracked by aGiT — move them into the worktree.",
+                seconds=12.0,
+            )
+            self._base_status_baseline = current  # don't repeat for the same files
+            self._render()
+
+    def _confine_to_worktree(self, command: list[str]) -> list[str]:
+        # Wrap the backend so it can only write inside its session worktree (plus
+        # the repo's .git), not the base repo it lives in. A no-op for read-only
+        # sessions, when there is no worktree, or when confinement is disabled /
+        # unavailable (the loop then warns if the base working tree is touched).
+        if not getattr(self, "tracking_enabled", True) or getattr(self, "worktree", None) is None:
+            return command
+        if not self.global_config.sandbox:
+            return command
+        base = getattr(self, "base_repo", None)
+        if base is None:
+            return command
+        return sandbox.wrap_command(command, base=str(base.repo), worktree=str(self.repo.repo))
 
     def _should_continue_session(self) -> bool:
         session_id = self.state.backend_session_id
@@ -1751,6 +1817,18 @@ class ProxyRunner:
         self._render()
         return True
 
+    def _finalize_on_backend_exit(self) -> None:
+        # The only session's backend process is gone — the user quit it, or a
+        # native in-backend session switch exited it. Commit/integrate its last
+        # turn and persist the resume pointer before aGiT leaves, instead of just
+        # dropping out of the loop (which would lose the last commit and leave
+        # resume pointing at a stale session).
+        self.child_pid = None  # already gone; don't signal a dead process
+        try:
+            self._finalize_pending_work()
+        except Exception as error:
+            self._debug(f"finalize on backend exit failed: {error!r}")
+
     def _start_new_session(self) -> None:
         self.state.backend_session_id = None
         self.state.last_backend_message_id = None
@@ -1839,6 +1917,7 @@ class ProxyRunner:
                     self._debug(f"master_fd closed (backend gone); last_output={sample!r}")
                     if self._handle_active_session_exit():
                         continue
+                    self._finalize_on_backend_exit()
                     break
                 if output:
                     self.last_child_output = time.monotonic()
@@ -1901,6 +1980,7 @@ class ProxyRunner:
                 self._resume_pending_prompt_if_ready()
                 self._maybe_agent_commit()
                 self._service_background_sessions()
+                self._warn_if_base_edited()
             if self._base_advanced:
                 self._base_advanced = False
                 self._sync_idle_worktrees_to_base()
@@ -1910,6 +1990,8 @@ class ProxyRunner:
                     exit_code = os.waitstatus_to_exitcode(status) if hasattr(os, "waitstatus_to_exitcode") else 0
                     sample = self.last_child_output_sample[-512:].decode(errors="replace").replace("\x1b", "\\x1b")
                     self._debug(f"child exited pid={self.child_pid} status={status} exit_code={exit_code} last_output={sample!r}")
+                    if len(self.sessions) <= 1:
+                        self._finalize_on_backend_exit()
                     return exit_code
         return 0
 
@@ -2771,6 +2853,9 @@ class ProxyRunner:
         # made. (Background sessions are committed via the context swap.)
         if not getattr(self, "tracking_enabled", True):
             return
+        if getattr(self, "_finalized_on_exit", False):
+            return  # already finalized (e.g. the backend exited and we ran this)
+        self._finalized_on_exit = True
         self._exiting = True
         self._set_message("Finalizing commits before exit...", seconds=30)
         self._render()
@@ -2793,11 +2878,28 @@ class ProxyRunner:
             restore_session(self, active_snapshot)
         self._delete_orphan_merged_branches()
 
+    def _adopt_latest_backend_session(self) -> None:
+        # The user may have switched conversations inside the backend itself (e.g.
+        # Claude's native session picker), which leaves aGiT's tracked id stale.
+        # Point the resume record at the worktree's most recent conversation so the
+        # next launch restores what they were actually using, not the id aGiT
+        # originally spawned.
+        try:
+            latest = self.backend.latest_session_id(self.repo.repo)
+        except Exception as error:
+            self._debug(f"adopt latest backend session failed: {error!r}")
+            return
+        if latest and latest != self.state.backend_session_id:
+            self._debug(f"adopting backend session {latest} (was {self.state.backend_session_id})")
+            self.state.backend_session_id = latest
+            self.state.last_backend_message_id = None  # recomputed from the transcript on resume
+
     def _persist_last_session_record(self) -> None:
         # Save just the resume pointer for the current (primary) session into the
         # repo-root state — the durable "last session" record. Only the minimal
         # fields needed to resume the conversation are kept; the worktree's working
         # tree and per-turn state (pending trace, etc.) are intentionally dropped.
+        self._adopt_latest_backend_session()
         try:
             root = AgitState(self.base_repo.repo, default_backend=self.global_config.default_backend)
             root.data["backend"] = self.state.backend

@@ -1759,6 +1759,99 @@ def test_resume_switches_to_already_live_conversation():
     assert "_created" not in runner.__dict__
 
 
+# --- worktree confinement ---
+
+def test_confine_to_worktree_wraps_when_enabled(monkeypatch):
+    import types
+    from agit import sandbox
+
+    monkeypatch.setattr(sandbox, "is_available", lambda: True)
+    monkeypatch.delenv("AGIT_SANDBOX", raising=False)
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.tracking_enabled = True
+    runner.worktree = types.SimpleNamespace(name="session-1")
+    runner.global_config = types.SimpleNamespace(sandbox=True)
+    runner.base_repo = types.SimpleNamespace(repo="/repo")
+    runner.repo = types.SimpleNamespace(repo="/repo/.agit/worktrees/session-1")
+
+    wrapped = runner._confine_to_worktree(["claude"])
+
+    assert wrapped[0] == "sandbox-exec" and wrapped[-1] == "claude"
+
+
+def test_confine_to_worktree_noop_without_worktree_or_when_disabled(monkeypatch):
+    import types
+    from agit import sandbox
+
+    monkeypatch.setattr(sandbox, "is_available", lambda: True)
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.tracking_enabled = True
+    runner.worktree = None  # read-only / legacy: nothing to confine
+    runner.global_config = types.SimpleNamespace(sandbox=True)
+    assert runner._confine_to_worktree(["claude"]) == ["claude"]
+
+    runner.worktree = types.SimpleNamespace(name="session-1")
+    runner.global_config = types.SimpleNamespace(sandbox=False)  # user opted out
+    runner.base_repo = types.SimpleNamespace(repo="/repo")
+    runner.repo = types.SimpleNamespace(repo="/repo/.agit/worktrees/session-1")
+    assert runner._confine_to_worktree(["claude"]) == ["claude"]
+
+
+# --- backend-exit / native session switch ---
+
+def test_adopt_latest_backend_session_repoints_after_native_switch():
+    import types
+
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.repo = types.SimpleNamespace(repo="/wt")
+    runner.backend = types.SimpleNamespace(latest_session_id=lambda repo: "switched-id")
+    runner.state = types.SimpleNamespace(backend_session_id="pinned-id", last_backend_message_id="m9")
+    runner._debug = lambda *a, **k: None
+
+    runner._adopt_latest_backend_session()
+
+    # The worktree's newest conversation (what the user switched to) wins.
+    assert runner.state.backend_session_id == "switched-id"
+    assert runner.state.last_backend_message_id is None
+
+
+def test_adopt_latest_backend_session_keeps_id_when_unchanged():
+    import types
+
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.repo = types.SimpleNamespace(repo="/wt")
+    runner.backend = types.SimpleNamespace(latest_session_id=lambda repo: "same")
+    runner.state = types.SimpleNamespace(backend_session_id="same", last_backend_message_id="m1")
+    runner._debug = lambda *a, **k: None
+
+    runner._adopt_latest_backend_session()
+
+    assert runner.state.backend_session_id == "same"
+    assert runner.state.last_backend_message_id == "m1"  # untouched
+
+
+def test_finalize_on_backend_exit_finalizes_once_and_clears_pid():
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.child_pid = 4321
+    runner.tracking_enabled = True
+    calls = []
+
+    def fake_finalize():  # mirror the real guard inside _finalize_pending_work
+        if runner.__dict__.get("_finalized_on_exit"):
+            return
+        runner.__dict__["_finalized_on_exit"] = True
+        calls.append("finalized")
+
+    runner._finalize_pending_work = fake_finalize
+    runner._debug = lambda *a, **k: None
+
+    runner._finalize_on_backend_exit()
+    runner._finalize_on_backend_exit()  # idempotent (guarded inside _finalize_pending_work)
+
+    assert runner.child_pid is None
+    assert calls == ["finalized"]
+
+
 # --- startup resume + naming ---
 
 def test_resumable_sessions_come_from_backend_repo_record():
