@@ -21,6 +21,7 @@ __all__ = [
     "export_session",
     "prepare_resume",
     "link_session",
+    "session_cwd",
     "parse_rows",
 ]
 
@@ -197,6 +198,34 @@ def link_session(session_id: str, src_repo: Path, dst_repo: Path) -> bool:
     except OSError:
         return False
     return True
+
+
+def session_cwd(session_id: str) -> str | None:
+    """The working directory Claude most recently recorded for a session. Claude
+    writes its `cwd` into (almost) every transcript line, so this reads the last
+    one that has it from the newest transcript file. Used to detect a resume that
+    restored the session's old cwd instead of the worktree it was launched in."""
+    if not session_id:
+        return None
+    path = _find_session_file(session_id)
+    if path is None:
+        return None
+    found: str | None = None
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line or '"cwd"' not in line:
+                    continue
+                try:
+                    cwd = json.loads(line).get("cwd")
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(cwd, str) and cwd:
+                    found = cwd  # keep the last one
+    except OSError:
+        return None
+    return found
 
 
 def _find_session_file(session_id: str) -> Path | None:

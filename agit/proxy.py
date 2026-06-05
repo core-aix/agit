@@ -517,6 +517,48 @@ class ProxyRunner:
             self._base_status_baseline = current  # don't repeat for the same files
             self._render()
 
+    def _warn_if_cwd_drifted(self) -> None:
+        # `claude --resume` can restore a session's *saved* working directory and
+        # ignore the worktree aGiT launched it in (Claude Code issue #58591). When
+        # that happens the agent works in the wrong directory: its turns aren't
+        # tracked here and writes outside the worktree are sandbox-blocked. Detect
+        # it from the cwd the backend records, and warn once with how to recover.
+        if getattr(self, "_cwd_drift_checked", False):
+            return
+        if getattr(self, "worktree", None) is None or not getattr(self, "tracking_enabled", True):
+            return
+        now = time.monotonic()
+        if now - getattr(self, "_cwd_check_at", 0.0) < 3.0:
+            return
+        self._cwd_check_at = now
+        fn = getattr(self.backend, "recorded_working_dir", None)
+        if fn is None:
+            self._cwd_drift_checked = True  # backend doesn't record a cwd
+            return
+        try:
+            recorded = fn(self.state.backend_session_id)
+        except Exception as error:
+            self._debug(f"cwd drift check failed: {error!r}")
+            return
+        if not recorded:
+            return  # nothing recorded yet — check again next tick
+        self._cwd_drift_checked = True
+        if os.path.realpath(recorded) == os.path.realpath(str(self.repo.repo)):
+            return  # on the worktree, as intended
+        self._debug(f"cwd drift: backend recorded {recorded}, worktree is {self.repo.repo}")
+        self._set_message(
+            f"⚠ The agent is working in:\n    {recorded}\n"
+            f"not this session's worktree:\n    {self.repo.repo}\n"
+            "This is Claude's resume-cwd bug (#58591): turns made there are NOT committed "
+            "by aGiT, and edits outside the worktree are blocked by the sandbox.\n"
+            "To recover: Ctrl-G → session → start a NEW session (it launches fresh in the "
+            "worktree) and re-send your request there; resuming this conversation will keep "
+            "landing in the wrong directory. Any work already done in the other directory "
+            "stays there — move it into the worktree by hand if you need it tracked.",
+            seconds=30.0,
+        )
+        self._render()
+
     def _confine_to_worktree(self, command: list[str]) -> list[str]:
         # Wrap the backend so it can only write inside its session worktree (plus
         # the repo's .git), not the base repo it lives in. A no-op for read-only
@@ -2039,6 +2081,7 @@ class ProxyRunner:
                 self._maybe_agent_commit()
                 self._service_background_sessions()
                 self._warn_if_base_edited()
+                self._warn_if_cwd_drifted()
             if self._base_advanced:
                 self._base_advanced = False
                 self._sync_idle_worktrees_to_base()

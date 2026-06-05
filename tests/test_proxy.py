@@ -1810,6 +1810,50 @@ def test_diag_path_uses_base_repo(tmp_path):
     assert path == tmp_path / "base" / ".agit" / "proxy-raw-20260101-000000.log"
 
 
+# --- resume cwd drift guard ---
+
+def _drift_runner(recorded_cwd, worktree_path):
+    import types
+
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.tracking_enabled = True
+    runner.worktree = types.SimpleNamespace(name="session-1")
+    runner.repo = types.SimpleNamespace(repo=worktree_path)
+    runner.state = types.SimpleNamespace(backend_session_id="sess-1")
+    runner.backend = types.SimpleNamespace(recorded_working_dir=lambda sid: recorded_cwd)
+    runner._debug = lambda *a, **k: None
+    runner._cwd_check_at = 0.0
+    runner.messages = []
+    runner._set_message = lambda msg, **k: runner.messages.append(msg)
+    runner._render = lambda: None
+    return runner
+
+
+def test_cwd_drift_warns_when_backend_left_the_worktree():
+    runner = _drift_runner("/somewhere/else", "/repo/.agit/worktrees/session-1")
+    runner._warn_if_cwd_drifted()
+    assert runner.messages and "#58591" in runner.messages[0]
+    assert runner._cwd_drift_checked is True
+    # Warns once, then stops.
+    runner.messages.clear()
+    runner._warn_if_cwd_drifted()
+    assert runner.messages == []
+
+
+def test_cwd_drift_silent_when_on_the_worktree():
+    runner = _drift_runner("/repo/.agit/worktrees/session-1", "/repo/.agit/worktrees/session-1")
+    runner._warn_if_cwd_drifted()
+    assert runner.messages == []
+    assert runner._cwd_drift_checked is True
+
+
+def test_cwd_drift_waits_when_no_cwd_recorded_yet():
+    runner = _drift_runner(None, "/repo/.agit/worktrees/session-1")
+    runner._warn_if_cwd_drifted()
+    assert runner.messages == []
+    assert getattr(runner, "_cwd_drift_checked", False) is False  # will re-check next tick
+
+
 # --- worktree confinement ---
 
 def test_confine_to_worktree_wraps_when_enabled(monkeypatch):

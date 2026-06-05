@@ -4,6 +4,21 @@ from agit import claude_session
 from agit.claude_session import export_session, latest_session_id, list_sessions, parse_rows, session_belongs_to_repo
 
 
+def test_session_cwd_reads_last_recorded_cwd(monkeypatch, tmp_path):
+    config = tmp_path / "config"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+    proj = config / "projects" / claude_session._encode_repo(tmp_path / "wt")
+    proj.mkdir(parents=True)
+    (proj / "s.jsonl").write_text(
+        '{"type":"user","cwd":"/old/dir"}\n'
+        '{"type":"assistant"}\n'                       # a line without cwd is skipped
+        '{"type":"user","cwd":"/new/dir"}\n',
+        encoding="utf-8",
+    )
+    assert claude_session.session_cwd("s") == "/new/dir"   # last cwd wins
+    assert claude_session.session_cwd("missing") is None
+
+
 def test_prepare_resume_stages_transcript_into_worktree(monkeypatch, tmp_path):
     config = tmp_path / "config"
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
