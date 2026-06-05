@@ -330,7 +330,10 @@ def _finalize_turn(turn: dict) -> SessionTurn:
 
 
 def _user_prompt(row: dict) -> str | None:
-    if row.get("isMeta") or row.get("isSidechain"):
+    # `isCompactSummary` marks the summary Claude injects as a user message when
+    # it compacts a conversation (it also sets `isVisibleInTranscriptOnly`). It
+    # is not a real prompt, so keep it out of the interaction trace and subject.
+    if row.get("isMeta") or row.get("isSidechain") or row.get("isCompactSummary"):
         return None
     message = row.get("message") if isinstance(row.get("message"), dict) else {}
     content = message.get("content")

@@ -141,6 +141,24 @@ def test_parse_rows_excludes_meta_sidechain_tool_results_and_commands():
     assert session.turns[0].final_response == "response"
 
 
+def test_parse_rows_excludes_compaction_summary():
+    rows = [
+        _user(
+            "summary",
+            "This session is being continued from a previous conversation...",
+            isCompactSummary=True,
+            isVisibleInTranscriptOnly=True,
+        ),
+        _user("real", "the real prompt"),
+        _assistant("m1", "response"),
+    ]
+
+    session = parse_rows("sess-compact", rows)
+
+    assert len(session.turns) == 1
+    assert session.turns[0].user_prompt == "the real prompt"
+
+
 def test_parse_rows_attributes_sidechain_tokens_to_subagent_buckets():
     rows = [
         _user("real", "the real prompt"),
