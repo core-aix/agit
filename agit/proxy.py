@@ -860,12 +860,17 @@ class ProxyRunner:
             return name
 
     def _align_session_to_base(self, repo: GitRepo) -> None:
-        # A reused session worktree may sit on a previous run's base branch. If it
-        # is clean (no uncommitted changes, no merge in progress, and nothing
-        # committed that the current base lacks), re-point it at the branch the
-        # user launched from so aGiT integrates into *that* branch — not whatever
-        # branch happened to be current on an earlier run. A worktree with its own
-        # pending work is left for the reconcile / integration paths to handle.
+        # Bring a clean, idle session worktree up to date with the base after the
+        # base branch gained commits (another session integrated, or a previous
+        # run). Two cases, by whether the worktree has its own committed work:
+        #   * No unintegrated commits → re-point (detach) it onto the current
+        #     base, so it works from, and later integrates into, the branch the
+        #     user launched from — not whatever branch an earlier run left current.
+        #   * Has its own work → merge the new base commits into its turn branch so
+        #     it stays current, but only when that merges cleanly; a conflicting
+        #     base is backed out and left for the session's own integration to
+        #     surface. (Direction base → worktree; the reverse is integration.)
+        # A worktree mid-merge or with uncommitted changes is left untouched.
         if self._base_branch is None:
             return
         try:
@@ -873,7 +878,17 @@ class ProxyRunner:
                 return
             branch = repo.current_branch()
             if branch.startswith("agit/") and self.base_repo.log_range(self._base_branch, branch):
-                return  # has unintegrated commits; leave it for integration
+                # Has its own unintegrated commits: don't re-point (that would
+                # orphan the work). Merge any new base commits in instead, keeping
+                # it current — but only if the merge is clean.
+                if not self.base_repo.log_range(branch, self._base_branch):
+                    return  # already contains the base; nothing to merge
+                if repo.merge(self._base_branch):
+                    self._debug(f"merged base '{self._base_branch}' into session branch {branch}")
+                else:
+                    repo.merge_abort()  # conflicts; leave for integration to resolve
+                    self._debug(f"base '{self._base_branch}' conflicts with {branch}; left for integration")
+                return
             if repo.rev_parse("HEAD") != self.base_repo.rev_parse(self._base_branch):
                 repo.switch_detach(self._base_branch)
                 self._debug(f"re-pointed session worktree to current base '{self._base_branch}'")
@@ -1102,11 +1117,11 @@ class ProxyRunner:
         self._base_advanced = True
 
     def _sync_idle_worktrees_to_base(self) -> None:
-        # Keep every idle session's worktree tracking the base: any session with no
-        # in-flight agent, no uncommitted changes, and nothing committed ahead of
-        # the base is re-pointed onto the (possibly just-advanced) base branch, so
-        # it works from the latest integrated state. `_align_session_to_base`
-        # guards the clean/no-pending conditions, so in-progress work is untouched.
+        # Keep every idle session's worktree current with the (just-advanced) base:
+        # a session with nothing of its own is re-pointed onto the base, and one
+        # that has its own committed work has the new base commits merged into its
+        # turn branch (cleanly, or skipped on conflict) — see `_align_session_to_base`.
+        # Only idle, clean worktrees are touched, so in-flight work is left alone.
         for index in range(len(self.sessions)):
             if index == self.active_index:
                 repo, in_flight = getattr(self, "repo", None), getattr(self, "agent_in_flight", False)

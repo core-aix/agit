@@ -515,6 +515,44 @@ def test_align_session_to_base_keeps_worktree_with_pending_work(tmp_path):
     assert work.current_branch() == "agit/test/session-1/t1"
 
 
+def test_align_session_to_base_merges_new_base_commits_into_worktree(tmp_path):
+    main = _init_repo(tmp_path)  # f.txt == "base\n"
+    base = main.current_branch()
+    info, work = _make_session(main, "session-1", base)
+    _commit(work, "w.txt", "work\n", "session work")  # own work, ahead of base
+    # The base gains a new, non-conflicting commit (another session integrated)
+    # after this worktree branched off it.
+    _commit(main, "newbase.txt", "from base\n", "base advanced")
+
+    runner = _integration_runner(main, work, base, "session-1")
+    runner._align_session_to_base(work)
+
+    # The new base commit is pulled into the worktree, its own work is kept, and
+    # it stays on its turn branch with no merge left in progress.
+    assert (work.repo / "newbase.txt").exists()
+    assert (work.repo / "w.txt").exists()
+    assert work.current_branch() == "agit/test/session-1/t1"
+    assert work.merge_in_progress() is False
+
+
+def test_align_session_to_base_skips_conflicting_base(tmp_path):
+    main = _init_repo(tmp_path)  # f.txt == "base\n"
+    base = main.current_branch()
+    info, work = _make_session(main, "session-1", base)
+    _commit(work, "f.txt", "session change\n", "session edit")  # edits f.txt
+    head_before = work.rev_parse("HEAD")
+    _commit(main, "f.txt", "base change\n", "base edit")  # conflicting edit on base
+
+    runner = _integration_runner(main, work, base, "session-1")
+    runner._align_session_to_base(work)
+
+    # A conflicting base is backed out, leaving the worktree branch untouched for
+    # the session's own integration to resolve — never a half-merged tree.
+    assert work.merge_in_progress() is False
+    assert work.rev_parse("HEAD") == head_before
+    assert (work.repo / "f.txt").read_text() == "session change\n"
+
+
 def test_remove_prunes_orphaned_directory_and_deletes_branches(tmp_path):
     main = _init_repo(tmp_path)
     base = main.current_branch()
