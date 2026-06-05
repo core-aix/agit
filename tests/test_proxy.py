@@ -652,6 +652,21 @@ def test_wheel_forwarded_when_backend_manages_mouse():
     assert runner.scroll_back == 0
 
 
+def test_apply_timings_overrides_constants():
+    from agit.global_config import DEFAULT_TIMINGS
+
+    runner = ProxyRunner.__new__(ProxyRunner)
+    # Defaults are the class constants until config is applied.
+    assert runner.BASE_POLL_SECONDS == DEFAULT_TIMINGS["base_poll_seconds"]
+
+    custom = dict(DEFAULT_TIMINGS, base_poll_seconds=30.0, child_idle_seconds=1.5)
+    runner._apply_timings(custom)
+
+    assert runner.BASE_POLL_SECONDS == 30.0
+    assert runner.CHILD_IDLE_SECONDS == 1.5
+    assert runner.POLL_SECONDS == DEFAULT_TIMINGS["background_poll_seconds"]
+
+
 def test_proxy_refuses_second_instance(monkeypatch, capsys):
     import sys
 

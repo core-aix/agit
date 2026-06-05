@@ -251,10 +251,16 @@ class ProxyInput:
 
 
 class ProxyRunner:
+    # Defaults for the tunable timings; overridden per-instance from the global
+    # config in __init__ (see GlobalConfig.timings). Kept as class constants so
+    # `self.X` still resolves for runners built via __new__ (tests).
     FILE_STABLE_SECONDS = 8.0
     CHILD_IDLE_SECONDS = 4.0
     POLL_SECONDS = 2.0
     PARSE_COOLDOWN_SECONDS = 10.0
+    BASE_POLL_SECONDS = 3.0
+    BASE_EDIT_CHECK_SECONDS = 3.0
+    CWD_CHECK_SECONDS = 3.0
     RENDER_MIN_INTERVAL = 0.033  # coalesce output-driven repaints to ~30fps
     SYNC_MAX_HOLD = 0.05  # cap how long a backend synchronized-update may defer a paint
 
@@ -265,6 +271,7 @@ class ProxyRunner:
         self._primary_worktree_name: str | None = None  # session kept across exits for auto-resume
         self.worktree = None  # set when this session runs in a git worktree
         self.global_config = GlobalConfig()
+        self._apply_timings(self.global_config.timings)
         self.state = AgitState(repo.repo, default_backend=self.global_config.default_backend)
         if backend and backend != self.state.backend:
             self.state.remember_backend_session()
@@ -372,6 +379,17 @@ class ProxyRunner:
         # One diagnostic-log file per run, in the base repo's .agit/ (survives the
         # per-run worktree teardown).
         self._diag_run = time.strftime("%Y%m%d-%H%M%S")
+
+    def _apply_timings(self, timings: dict[str, float]) -> None:
+        # Override the class-constant timing defaults with the user's configured
+        # values (GlobalConfig.timings already validated + filled in the defaults).
+        self.FILE_STABLE_SECONDS = timings["file_stable_seconds"]
+        self.CHILD_IDLE_SECONDS = timings["child_idle_seconds"]
+        self.POLL_SECONDS = timings["background_poll_seconds"]
+        self.PARSE_COOLDOWN_SECONDS = timings["parse_cooldown_seconds"]
+        self.BASE_POLL_SECONDS = timings["base_poll_seconds"]
+        self.BASE_EDIT_CHECK_SECONDS = timings["base_edit_check_seconds"]
+        self.CWD_CHECK_SECONDS = timings["cwd_check_seconds"]
 
     def run(self) -> int:
         if not sys.stdin.isatty() or not sys.stdout.isatty():
@@ -539,7 +557,7 @@ class ProxyRunner:
         if not getattr(self, "_monitor_base_edits", False):
             return
         now = time.monotonic()
-        if now - getattr(self, "_base_check_at", 0.0) < 3.0:
+        if now - getattr(self, "_base_check_at", 0.0) < self.BASE_EDIT_CHECK_SECONDS:
             return
         self._base_check_at = now
         try:
@@ -567,7 +585,7 @@ class ProxyRunner:
         if getattr(self, "worktree", None) is None or self._base_branch is None:
             return
         now = time.monotonic()
-        if now - self._base_poll_at < 3.0:
+        if now - self._base_poll_at < self.BASE_POLL_SECONDS:
             return
         self._base_poll_at = now
         try:
@@ -590,7 +608,7 @@ class ProxyRunner:
         if getattr(self, "worktree", None) is None:
             return
         now = time.monotonic()
-        if now - getattr(self, "_cwd_check_at", 0.0) < 3.0:
+        if now - getattr(self, "_cwd_check_at", 0.0) < self.CWD_CHECK_SECONDS:
             return
         self._cwd_check_at = now
         fn = getattr(self.backend, "recorded_working_dir", None)

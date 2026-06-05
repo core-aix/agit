@@ -162,8 +162,23 @@ User-wide settings live in `~/.agit/config.json` (override the directory with `A
 
 ```json
 {
-  "default_backend": "opencode"
+  "default_backend": "opencode",
+  "timings": {
+    "base_poll_seconds": 3.0
+  }
 }
 ```
 
 `default_backend` (`opencode` or `claude`) is used for repositories that have no backend recorded yet. It is updated whenever you pass `--backend` or switch backends with `agent-backend`.
+
+`timings` tunes aGiT's polling and debounce intervals (all in seconds). Specify only the keys you want to change; anything omitted — or set to a non-positive / non-numeric value — keeps its default:
+
+| Key | Default | What it controls |
+| --- | --- | --- |
+| `base_poll_seconds` | `3.0` | How often the base branch is re-checked for commits made outside aGiT (so worktrees pick them up). |
+| `background_poll_seconds` | `2.0` | How often an idle background session is serviced (committed / integrated). |
+| `file_stable_seconds` | `8.0` | Quiet period after a file change before an auto-commit. |
+| `child_idle_seconds` | `4.0` | No backend output for this long counts as idle. |
+| `parse_cooldown_seconds` | `10.0` | Minimum gap between agent-turn parses. |
+| `base_edit_check_seconds` | `3.0` | How often aGiT warns about edits to the base repo when the sandbox is unavailable. |
+| `cwd_check_seconds` | `3.0` | How often aGiT checks for the Claude resume-cwd drift bug. |
