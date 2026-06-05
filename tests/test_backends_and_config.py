@@ -41,6 +41,37 @@ def test_global_config_default_backend_persists(tmp_path):
     assert json.loads(path.read_text())["default_backend"] == "claude"
 
 
+def test_timings_default_when_unset(tmp_path):
+    from agit.global_config import DEFAULT_TIMINGS
+
+    config = GlobalConfig(tmp_path / "config.json")
+    assert config.timings == DEFAULT_TIMINGS
+    # A fresh copy, not the module-level dict (so callers can't mutate the defaults).
+    assert config.timings is not DEFAULT_TIMINGS
+
+
+def test_timings_override_subset_from_config(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"timings": {"base_poll_seconds": 30}}))
+    timings = GlobalConfig(path).timings
+    assert timings["base_poll_seconds"] == 30.0  # overridden, coerced to float
+    assert timings["background_poll_seconds"] == 2.0  # untouched key keeps its default
+
+
+def test_timings_ignore_invalid_values(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps({"timings": {"base_poll_seconds": -5, "child_idle_seconds": "soon",
+                                "file_stable_seconds": True, "parse_cooldown_seconds": 0}})
+    )
+    timings = GlobalConfig(path).timings
+    # Non-positive, wrong-type, and bool values all fall back to the defaults.
+    assert timings["base_poll_seconds"] == 3.0
+    assert timings["child_idle_seconds"] == 4.0
+    assert timings["file_stable_seconds"] == 8.0
+    assert timings["parse_cooldown_seconds"] == 10.0
+
+
 def test_state_uses_default_backend_and_remembers_sessions(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()

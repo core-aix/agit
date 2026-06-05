@@ -34,6 +34,7 @@ class AgitState:
             "backend_session_repo": None,
             "backend_session_ids": {},
             "backend_sessions": {},
+            "session_names": {},
             "last_backend_message_id": None,
             "declined_untracked_files": [],
             "pending_trace": [],
@@ -179,6 +180,25 @@ class AgitState:
     def recall_session(self, backend: str) -> dict | None:
         record = (self.data.get("backend_sessions") or {}).get(backend)
         return dict(record) if isinstance(record, dict) else None
+
+    def session_name_for(self, session_id: str | None) -> str | None:
+        """The user-given name for a backend conversation, if one was set."""
+        if not session_id:
+            return None
+        value = (self.data.get("session_names") or {}).get(str(session_id))
+        return str(value) if value else None
+
+    def name_session(self, session_id: str | None, name: str | None) -> None:
+        """Record (or clear) the user-given name for a backend conversation."""
+        if not session_id:
+            return
+        names = dict(self.data.get("session_names") or {})
+        if name:
+            names[str(session_id)] = name
+        else:
+            names.pop(str(session_id), None)
+        self.data["session_names"] = names
+        self.save()
 
     @property
     def last_backend_message_id(self) -> str | None:

@@ -2,6 +2,8 @@ import os
 import threading
 import time
 
+import pytest
+
 from agit.backends.base import TokenUsage
 from agit.opencode_session import SessionTurn
 from agit.backends.proxy_agents import make_proxy_agent
@@ -650,18 +652,34 @@ def test_wheel_forwarded_when_backend_manages_mouse():
     assert runner.scroll_back == 0
 
 
-def test_read_only_observer_skips_auto_commit():
+def test_apply_timings_overrides_constants():
+    from agit.global_config import DEFAULT_TIMINGS
+
     runner = ProxyRunner.__new__(ProxyRunner)
-    runner.tracking_enabled = False
-    # Should return immediately without touching repo/state/watcher attributes.
-    assert runner._maybe_agent_commit() is None
+    # Defaults are the class constants until config is applied.
+    assert runner.BASE_POLL_SECONDS == DEFAULT_TIMINGS["base_poll_seconds"]
+
+    custom = dict(DEFAULT_TIMINGS, base_poll_seconds=30.0, child_idle_seconds=1.5)
+    runner._apply_timings(custom)
+
+    assert runner.BASE_POLL_SECONDS == 30.0
+    assert runner.CHILD_IDLE_SECONDS == 1.5
+    assert runner.POLL_SECONDS == DEFAULT_TIMINGS["background_poll_seconds"]
 
 
-def test_read_only_observer_skips_pre_agent_commit():
+def test_proxy_refuses_second_instance(monkeypatch, capsys):
+    import sys
+
     runner = ProxyRunner.__new__(ProxyRunner)
-    runner.tracking_enabled = False
-    # Returns True (forward the prompt) without inspecting the repo.
-    assert runner._pre_agent_commit_if_needed("do it") is True
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True, raising=False)
+    runner._ensure_backend_available = lambda: True
+    # A live aGiT (PID 4321) already holds the lock: acquire fails.
+    runner.management_lock = type("L", (), {"acquire": lambda self: False, "owner_pid": lambda self: 4321})()
+
+    assert runner.run() == 1
+    out = capsys.readouterr().out
+    assert "already running" in out and "4321" in out  # names the holding process
 
 
 def _mux_runner():
@@ -673,7 +691,6 @@ def _mux_runner():
     runner.color_mode = "truecolor"
     runner.host_fg_value = runner.host_bg_value = runner.host_da = None
     runner.host_palette = {}
-    runner.tracking_enabled = True
     runner._render = lambda: None
     runner._resize_child = lambda: None
     runner._enable_host_mouse = lambda: None
@@ -786,7 +803,6 @@ def test_status_line_shows_base_branch(tmp_path):
     runner.backend = type("B", (), {"name": "claude"})()
     runner._base_branch = "main"
     runner.worktree = object()
-    runner.tracking_enabled = True
     runner.scroll_back = 0
     runner.cols = 120
 
@@ -860,7 +876,6 @@ def test_new_session_not_applied_without_flag(tmp_path):
 
 def test_finalize_pending_work_commits_non_interactively():
     runner = ProxyRunner.__new__(ProxyRunner)
-    runner.tracking_enabled = True
     runner.agent_parse_thread = None
     runner.sessions = []
     runner.active_index = 0
@@ -878,24 +893,8 @@ def test_finalize_pending_work_commits_non_interactively():
     assert all(call.get("prompt_untracked") is False for call in calls)
 
 
-def test_finalize_pending_work_skipped_for_read_only_observer():
-    runner = ProxyRunner.__new__(ProxyRunner)
-    runner.tracking_enabled = False
-    called = []
-    runner._finish_agent_parse_if_ready = lambda **k: called.append(k)
-    runner._finalize_pending_work()
-    assert called == []
-
-
-def test_confirm_exit_read_only_exits_without_prompt():
-    runner = ProxyRunner.__new__(ProxyRunner)
-    runner.tracking_enabled = False
-    assert runner._confirm_exit() is True
-
-
 def test_confirm_exit_prompts_when_managing(monkeypatch):
     runner = ProxyRunner.__new__(ProxyRunner)
-    runner.tracking_enabled = True
     monkeypatch.setattr(runner, "_select_popup", lambda *a, **k: "Yes, exit")
     assert runner._confirm_exit() is True
     monkeypatch.setattr(runner, "_select_popup", lambda *a, **k: "No, keep working")
@@ -1757,6 +1756,440 @@ def test_resume_switches_to_already_live_conversation():
 
     assert runner.__dict__.get("_switched") == [0]
     assert "_created" not in runner.__dict__
+
+
+# --- base branch switched out-of-band ---
+
+def _base_drift_runner(current_branch):
+    import types
+
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner._base_branch = "dev"
+    runner.tracking_enabled = True
+    runner._integration_paused = False
+    runner._base_drift_check_at = 0.0
+    runner.base_repo = types.SimpleNamespace(current_branch=lambda: current_branch)
+    runner._debug = lambda *a, **k: None
+    runner.messages = []
+    runner._set_message = lambda m, **k: runner.messages.append(m)
+    runner._render = lambda: None
+    return runner
+
+
+def test_base_branch_drift_pauses_then_resumes():
+    runner = _base_drift_runner("feature-x")
+    runner._check_base_branch_drift()
+    assert runner._integration_paused is True
+    assert any("PAUSED" in m and "feature-x" in m for m in runner.messages)
+
+    runner.base_repo.current_branch = lambda: "dev"  # user switches back
+    runner._base_drift_check_at = 0.0                 # bypass the 2s throttle
+    runner.messages.clear()
+    runner._check_base_branch_drift()
+    assert runner._integration_paused is False
+    assert any("resumed" in m for m in runner.messages)
+
+
+def test_integrate_turn_skips_while_paused():
+    import types
+
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.worktree = types.SimpleNamespace()
+    runner._base_branch = "dev"
+    runner.merge_ctx = None
+    runner._integration_paused = True
+    assert runner._integrate_turn_or_conflict() == "skip"
+
+
+def test_advance_base_refuses_when_base_switched_out_of_band():
+    import types
+
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner._base_branch = "dev"
+    merged = []
+    runner.base_repo = types.SimpleNamespace(
+        current_branch=lambda: "feature-x",            # drifted off the base branch
+        merge_ff_only=lambda ref: merged.append(ref),
+    )
+    with pytest.raises(RuntimeError):
+        runner._advance_base_to("agit/claude/session-1/t1")
+    assert merged == []  # never fast-forwarded the wrong branch
+
+
+def _exit_removal_runner(*, log_range_result="", rev_parse_raises=False):
+    import types
+
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner._base_branch = "dev"
+    runner.merge_ctx = None
+    runner._primary_worktree_name = None
+    runner.worktree = types.SimpleNamespace(name="session-1")
+    runner.repo = types.SimpleNamespace(
+        current_branch=lambda: "agit/claude/session-1/t1",
+        merge_in_progress=lambda: False,
+        has_changes=lambda: False,
+    )
+
+    def _rev_parse(ref):
+        if rev_parse_raises:
+            raise RuntimeError("unknown revision")
+        return "abc123"
+
+    runner.base_repo = types.SimpleNamespace(rev_parse=_rev_parse,
+                                             log_range=lambda base, head: log_range_result)
+    runner.removed = []
+    runner._worktrees = lambda: types.SimpleNamespace(remove=lambda name: runner.removed.append(name))
+    runner._remember_session_for_backend = lambda: None
+    runner._persist_last_session_record = lambda: None
+    runner._terminate_child = lambda: None
+    runner._debug = lambda *a, **k: None
+    return runner
+
+
+def test_exit_keeps_worktree_with_unintegrated_commits():
+    runner = _exit_removal_runner(log_range_result="deadbeef a commit")
+    runner._remove_worktree_on_exit()
+    assert runner.removed == []  # branch ahead of base (e.g. merging was paused) → preserved
+
+
+def test_exit_keeps_worktree_when_base_ref_unresolvable():
+    runner = _exit_removal_runner(rev_parse_raises=True)
+    runner._remove_worktree_on_exit()
+    assert runner.removed == []  # base branch deleted/renamed → can't confirm merged → preserved
+
+
+def test_exit_removes_fully_merged_worktree():
+    runner = _exit_removal_runner(log_range_result="")  # nothing ahead of base
+    runner._remove_worktree_on_exit()
+    assert runner.removed == ["session-1"]  # normal cleanup of a merged session still happens
+
+
+def test_sync_idle_worktrees_skipped_while_paused():
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner._integration_paused = True
+    runner.sessions = ["would-explode-if-iterated"]  # not a real session; must not be touched
+    runner.active_index = 0
+    runner._sync_idle_worktrees_to_base()  # returns early; no AttributeError
+
+
+# --- corrupted-worktree reuse / diagnostics ---
+
+def test_cleanup_stale_state_removes_orphaned_worktree_dirs(tmp_path):
+    import types
+
+    root = tmp_path / ".agit" / "worktrees"
+    registered = root / "session-1"
+    registered.mkdir(parents=True)
+    orphan = root / "session-2"
+    (orphan / ".agit").mkdir(parents=True)         # only .agit/ → not a valid worktree
+    (root / "stray-file").write_text("x")           # a file, not a dir → ignored
+
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.tracking_enabled = True
+    runner._debug = lambda *a, **k: None
+    prunes = []
+    runner.base_repo = types.SimpleNamespace(worktree_prune=lambda: prunes.append(1))
+    runner.worktree_manager = types.SimpleNamespace(
+        root=root,
+        list=lambda: [types.SimpleNamespace(path=registered)],  # session-1 is registered
+    )
+    runner._worktrees = lambda: runner.worktree_manager
+
+    runner._cleanup_stale_state_on_startup()
+
+    assert registered.exists()         # a real registered worktree is kept
+    assert not orphan.exists()         # the orphaned .agit/-only dir is swept
+    assert (root / "stray-file").exists()
+    assert prunes                      # pruned stale git registrations
+
+
+def test_cleanup_stale_state_noop_when_read_only():
+    import types
+
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.tracking_enabled = False
+    pruned = []
+    runner.base_repo = types.SimpleNamespace(worktree_prune=lambda: pruned.append(1))
+    runner._cleanup_stale_state_on_startup()
+    assert pruned == []  # a read-only observer touches nothing
+
+
+def test_is_valid_worktree_rejects_leftover_without_git(tmp_path):
+    runner = ProxyRunner.__new__(ProxyRunner)
+    leftover = tmp_path / "session-1"
+    (leftover / ".agit").mkdir(parents=True)  # only .agit/, no .git → invalid
+    assert runner._is_valid_worktree(leftover) is False
+
+
+def test_open_session_worktree_recreates_corrupted_leftover(tmp_path):
+    import types
+
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner._debug = lambda *a, **k: None
+    runner._base_branch = "dev"
+    leftover = tmp_path / "session-1"
+    (leftover / ".agit").mkdir(parents=True)  # corrupted leftover
+    created = {}
+
+    def _create(name, *, base):
+        created["called"] = (name, base)
+        (tmp_path / name / ".git").parent.mkdir(parents=True, exist_ok=True)
+        return types.SimpleNamespace(name=name, path=tmp_path / name, branch="")
+
+    runner.worktree_manager = types.SimpleNamespace(
+        worktree_path=lambda name: tmp_path / name, create=_create)
+    runner._worktrees = lambda: runner.worktree_manager
+    import agit.proxy as proxymod
+    orig = proxymod.GitRepo
+    proxymod.GitRepo = lambda path: types.SimpleNamespace(current_branch=lambda: "")
+    try:
+        runner._open_session_worktree("session-1")
+    finally:
+        proxymod.GitRepo = orig
+
+    assert created["called"] == ("session-1", "dev")  # recreated, not reused
+    assert not (leftover / ".agit").exists()           # corrupted leftover was cleared first
+
+
+def test_diag_path_uses_base_repo(tmp_path):
+    import types
+
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.base_repo = types.SimpleNamespace(repo=tmp_path / "base")
+    runner.repo = types.SimpleNamespace(repo=tmp_path / "base" / ".agit" / "worktrees" / "session-1")
+    runner._diag_run = "20260101-000000"
+    path = runner._diag_path("proxy-raw")
+    # Lands in the *base* .agit/, not the ephemeral worktree's.
+    assert path == tmp_path / "base" / ".agit" / "proxy-raw-20260101-000000.log"
+
+
+# --- resume cwd drift guard ---
+
+def _drift_runner(recorded_cwd, worktree_path):
+    import types
+
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.worktree = types.SimpleNamespace(name="session-1")
+    runner.repo = types.SimpleNamespace(repo=worktree_path)
+    runner.state = types.SimpleNamespace(backend_session_id="sess-1")
+    runner.backend = types.SimpleNamespace(recorded_working_dir=lambda sid: recorded_cwd)
+    runner._debug = lambda *a, **k: None
+    runner._cwd_check_at = 0.0
+    runner.messages = []
+    runner._set_message = lambda msg, **k: runner.messages.append(msg)
+    runner._render = lambda: None
+    return runner
+
+
+def test_cwd_drift_warns_when_backend_left_the_worktree():
+    runner = _drift_runner("/somewhere/else", "/repo/.agit/worktrees/session-1")
+    runner._warn_if_cwd_drifted()
+    assert runner.messages and "#58591" in runner.messages[0]
+    assert runner._cwd_drift_checked is True
+    # Warns once, then stops.
+    runner.messages.clear()
+    runner._warn_if_cwd_drifted()
+    assert runner.messages == []
+
+
+def test_cwd_drift_silent_when_on_the_worktree():
+    runner = _drift_runner("/repo/.agit/worktrees/session-1", "/repo/.agit/worktrees/session-1")
+    runner._warn_if_cwd_drifted()
+    assert runner.messages == []
+    assert runner._cwd_drift_checked is True
+
+
+def test_cwd_drift_waits_when_no_cwd_recorded_yet():
+    runner = _drift_runner(None, "/repo/.agit/worktrees/session-1")
+    runner._warn_if_cwd_drifted()
+    assert runner.messages == []
+    assert getattr(runner, "_cwd_drift_checked", False) is False  # will re-check next tick
+
+
+# --- worktree confinement ---
+
+def test_confine_to_worktree_wraps_when_enabled(monkeypatch):
+    import types
+    from agit import sandbox
+
+    monkeypatch.setattr(sandbox, "is_available", lambda: True)
+    monkeypatch.delenv("AGIT_SANDBOX", raising=False)
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.worktree = types.SimpleNamespace(name="session-1")
+    runner.global_config = types.SimpleNamespace(sandbox=True)
+    runner.base_repo = types.SimpleNamespace(repo="/repo")
+    runner.repo = types.SimpleNamespace(repo="/repo/.agit/worktrees/session-1")
+
+    wrapped = runner._confine_to_worktree(["claude"])
+
+    assert wrapped[0] == "sandbox-exec" and wrapped[-1] == "claude"
+
+
+def test_confine_to_worktree_noop_without_worktree_or_when_disabled(monkeypatch):
+    import types
+    from agit import sandbox
+
+    monkeypatch.setattr(sandbox, "is_available", lambda: True)
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.worktree = None  # no worktree (legacy): nothing to confine
+    runner.global_config = types.SimpleNamespace(sandbox=True)
+    assert runner._confine_to_worktree(["claude"]) == ["claude"]
+
+    runner.worktree = types.SimpleNamespace(name="session-1")
+    runner.global_config = types.SimpleNamespace(sandbox=False)  # user opted out
+    runner.base_repo = types.SimpleNamespace(repo="/repo")
+    runner.repo = types.SimpleNamespace(repo="/repo/.agit/worktrees/session-1")
+    assert runner._confine_to_worktree(["claude"]) == ["claude"]
+
+
+# --- backend-exit / native session switch ---
+
+def test_adopt_latest_backend_session_repoints_after_native_switch():
+    import types
+
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.repo = types.SimpleNamespace(repo="/wt")
+    runner.backend = types.SimpleNamespace(latest_session_id=lambda repo: "switched-id")
+    runner.state = types.SimpleNamespace(backend_session_id="pinned-id", last_backend_message_id="m9")
+    runner._debug = lambda *a, **k: None
+
+    runner._adopt_latest_backend_session()
+
+    # The worktree's newest conversation (what the user switched to) wins.
+    assert runner.state.backend_session_id == "switched-id"
+    assert runner.state.last_backend_message_id is None
+
+
+def test_adopt_latest_backend_session_keeps_id_when_unchanged():
+    import types
+
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.repo = types.SimpleNamespace(repo="/wt")
+    runner.backend = types.SimpleNamespace(latest_session_id=lambda repo: "same")
+    runner.state = types.SimpleNamespace(backend_session_id="same", last_backend_message_id="m1")
+    runner._debug = lambda *a, **k: None
+
+    runner._adopt_latest_backend_session()
+
+    assert runner.state.backend_session_id == "same"
+    assert runner.state.last_backend_message_id == "m1"  # untouched
+
+
+def test_relaunch_backend_resumes_then_gives_up_on_crash_loop(monkeypatch):
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner._debug = lambda *a, **k: None
+    calls = []
+    runner._restart_agent = lambda msg: calls.append("relaunch")
+    runner._finalize_on_backend_exit = lambda: calls.append("finalize")
+
+    t = [1000.0]
+    monkeypatch.setattr("agit.proxy.time.monotonic", lambda: t[0])
+
+    # Backend keeps dying quickly: first 3 relaunch, the 4th gives up and exits.
+    assert runner._relaunch_backend_or_exit() is True
+    assert runner._relaunch_backend_or_exit() is True
+    assert runner._relaunch_backend_or_exit() is True
+    assert runner._relaunch_backend_or_exit() is False
+
+    assert calls == ["relaunch", "relaunch", "relaunch", "finalize"]
+
+
+def test_relaunch_backend_resets_loop_guard_after_quiet_period(monkeypatch):
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner._debug = lambda *a, **k: None
+    relaunches = []
+    runner._restart_agent = lambda msg: relaunches.append(1)
+    runner._finalize_on_backend_exit = lambda: relaunches.append("finalize")
+
+    t = [1000.0]
+    monkeypatch.setattr("agit.proxy.time.monotonic", lambda: t[0])
+    for _ in range(3):
+        runner._relaunch_backend_or_exit()
+    t[0] += 60.0  # a minute later the old exits no longer count
+    assert runner._relaunch_backend_or_exit() is True
+    assert relaunches.count("finalize") == 0  # never gave up
+
+
+def test_finalize_on_backend_exit_finalizes_once_and_clears_pid():
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.child_pid = 4321
+    calls = []
+
+    def fake_finalize():  # mirror the real guard inside _finalize_pending_work
+        if runner.__dict__.get("_finalized_on_exit"):
+            return
+        runner.__dict__["_finalized_on_exit"] = True
+        calls.append("finalized")
+
+    runner._finalize_pending_work = fake_finalize
+    runner._debug = lambda *a, **k: None
+
+    runner._finalize_on_backend_exit()
+    runner._finalize_on_backend_exit()  # idempotent (guarded inside _finalize_pending_work)
+
+    assert runner.child_pid is None
+    assert calls == ["finalized"]
+
+
+# --- startup resume + naming ---
+
+def test_resumable_sessions_come_from_backend_repo_record():
+    import types
+
+    refs = [SessionRef(id="a", updated=1.0, label="old"),
+            SessionRef(id="b", updated=3.0, label="new"),
+            SessionRef(id="c", updated=2.0, label="mid")]
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.base_repo = types.SimpleNamespace(repo="/repo-root")
+    asked = {}
+
+    def _list(repo):
+        asked["repo"] = repo
+        return list(refs)
+
+    runner.backend = types.SimpleNamespace(list_sessions=_list)
+
+    result = runner._resumable_sessions()
+
+    # Sourced from the repo aGiT launched in (not worktrees), newest first.
+    assert asked["repo"] == "/repo-root"
+    assert [ref.id for ref in result] == ["b", "c", "a"]
+
+
+def _startup_runner():
+    import types
+
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner._prompt_startup_name = lambda continuing: "prompted-name"
+    runner.root = types.SimpleNamespace(
+        _names={},
+        session_name_for=lambda sid: runner.root._names.get(sid),
+        name_session=lambda sid, name: runner.root._names.__setitem__(sid, name),
+    )
+    return runner
+
+
+def test_startup_name_keeps_stored_name_without_prompting():
+    runner = _startup_runner()
+    runner.root._names["sess-1"] = "alpha"
+
+    assert runner._resolve_startup_session_name(runner.root, "sess-1", None) == "alpha"
+
+
+def test_startup_name_uses_user_given_prior_worktree():
+    runner = _startup_runner()
+
+    # A non-auto prior worktree name counts as a name; an auto one does not.
+    assert runner._resolve_startup_session_name(runner.root, "sess-1", "my-feature") == "my-feature"
+
+
+def test_startup_name_prompts_when_unnamed_and_records_it():
+    runner = _startup_runner()
+
+    name = runner._resolve_startup_session_name(runner.root, "sess-1", "session-3")
+
+    assert name == "prompted-name"
+    assert runner.root._names["sess-1"] == "prompted-name"  # remembered for next time
 
 
 # --- idle worktree base-sync ---

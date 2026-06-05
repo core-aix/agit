@@ -28,6 +28,21 @@ class ProxyAgent(Protocol):
     def session_belongs_to_repo(self, repo: Path, session_id: str) -> bool:
         ...
 
+    def ensure_resumable(self, repo: Path, session_id: str) -> bool:
+        """Make sure spawning the resume command in ``repo`` (as cwd) will find
+        this conversation, staging its transcript there if the backend stores
+        transcripts per directory. Returns True if it can be resumed."""
+
+    def mirror_to_base(self, base_repo: Path, worktree: Path, session_id: str) -> bool:
+        """Make a conversation running in ``worktree`` also visible/continuable
+        from ``base_repo`` (e.g. a plain CLI run in the repo root). Returns True
+        if mirrored. No-op for backends without per-directory transcript files."""
+
+    def recorded_working_dir(self, session_id: str) -> str | None:
+        """The working directory the backend most recently recorded for a session,
+        or None if it doesn't record one. Used to detect a resume that drifted the
+        cwd away from the worktree it was launched in."""
+
     def latest_session_id(self, repo: Path) -> str | None:
         ...
 
@@ -58,6 +73,18 @@ class OpenCodeProxyAgent:
 
     def session_belongs_to_repo(self, repo: Path, session_id: str) -> bool:
         return opencode_session.session_belongs_to_repo(repo, session_id)
+
+    def ensure_resumable(self, repo: Path, session_id: str) -> bool:
+        # OpenCode resumes by id from its own global store, regardless of cwd.
+        return bool(session_id)
+
+    def mirror_to_base(self, base_repo: Path, worktree: Path, session_id: str) -> bool:
+        # OpenCode keeps sessions in a global store keyed by id (resumable from
+        # anywhere); there's no per-directory transcript file to link.
+        return False
+
+    def recorded_working_dir(self, session_id: str) -> str | None:
+        return None  # not tracked for OpenCode
 
     def latest_session_id(self, repo: Path) -> str | None:
         return opencode_session.latest_session_id(repo)
@@ -92,6 +119,15 @@ class ClaudeProxyAgent:
 
     def session_belongs_to_repo(self, repo: Path, session_id: str) -> bool:
         return claude_session.session_belongs_to_repo(repo, session_id)
+
+    def ensure_resumable(self, repo: Path, session_id: str) -> bool:
+        return claude_session.prepare_resume(repo, session_id)
+
+    def mirror_to_base(self, base_repo: Path, worktree: Path, session_id: str) -> bool:
+        return claude_session.link_session(session_id, worktree, base_repo)
+
+    def recorded_working_dir(self, session_id: str) -> str | None:
+        return claude_session.session_cwd(session_id)
 
     def latest_session_id(self, repo: Path) -> str | None:
         return claude_session.latest_session_id(repo)

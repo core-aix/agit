@@ -8,7 +8,7 @@ from agit.backends.claude import ClaudeBackend
 from agit.backends.opencode import OpenCodeBackend
 from agit.git import GitRepo
 from agit.global_config import GlobalConfig
-from agit.lock import RepoLock
+from agit.lock import RepoLock, already_running_message
 from agit.state import AgitState
 from agit.ui import AgitPrompt, PromptState
 
@@ -40,7 +40,6 @@ class AgitShell:
         self.prompt = AgitPrompt(self._prompt_state)
         self.actions = AgitActions(repo, self.state, verbose=verbose)
         self.management_lock = RepoLock(repo.repo / ".agit" / "lock")
-        self.tracking_enabled = True
 
     def run(self) -> None:
         try:
@@ -50,9 +49,9 @@ class AgitShell:
             return
         if resolved != self.state.backend:
             self.state.backend = resolved
-        self.tracking_enabled = self.management_lock.acquire()
-        if not self.tracking_enabled:
-            print("Another aGiT process is already running on this repo — this instance is read-only (no auto-commits).")
+        if not self.management_lock.acquire():
+            print(already_running_message(self.management_lock.owner_pid()))
+            return
         self.state.save()
         if self.verbose:
             print(f"aGiT session {self.state.session_id}")
@@ -115,7 +114,7 @@ class AgitShell:
         return False
 
     def _handle_agent_prompt(self, prompt: str) -> None:
-        if self.tracking_enabled and self.actions.has_pre_agent_user_changes():
+        if self.actions.has_pre_agent_user_changes():
             print("User changes detected before agent runs.")
             self.actions.create_user_commit()
 
@@ -135,8 +134,6 @@ class AgitShell:
 
         self.state.append_trace("agent", result.final_response)
         self.state.add_token_usage(result.tokens)
-        if not self.tracking_enabled:
-            return  # read-only: another aGiT process owns commits for this repo
         self.repo.add_tracked()
         self.actions.review_untracked(include_declined=False)
         if self.repo.has_staged_changes():

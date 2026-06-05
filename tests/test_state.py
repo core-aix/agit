@@ -20,6 +20,18 @@ def test_state_prunes_declined_untracked_files(tmp_path):
     assert state.declined_untracked() == ["keep.py"]
 
 
+def test_session_name_roundtrip(tmp_path):
+    state = AgitState(tmp_path)
+    assert state.session_name_for("sess-1") is None
+    state.name_session("sess-1", "my-feature")
+
+    assert AgitState(tmp_path).session_name_for("sess-1") == "my-feature"
+    # A None/empty id is a no-op, and clearing removes the name.
+    state.name_session(None, "ignored")
+    state.name_session("sess-1", None)
+    assert AgitState(tmp_path).session_name_for("sess-1") is None
+
+
 def test_trace_roundtrip(tmp_path):
     state = AgitState(tmp_path)
     state.append_trace("user", "hello")

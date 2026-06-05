@@ -1,7 +1,14 @@
 import json
 import os
 
-from agit.lock import RepoLock
+from agit.lock import RepoLock, already_running_message
+
+
+def test_already_running_message_names_the_pid():
+    assert "PID 1234" in already_running_message(1234)
+    # Falls back gracefully when the holder's pid is unknown.
+    assert "PID" not in already_running_message(None)
+    assert "already running on this repo" in already_running_message(None)
 
 
 def test_acquire_and_release(tmp_path):
@@ -26,6 +33,18 @@ def test_second_holder_is_blocked_by_live_owner(tmp_path):
     first.release()
     # Once released, the second can take it.
     assert second.acquire() is True
+
+
+def test_different_repos_get_independent_locks(tmp_path):
+    # The lock is per-repo (its path lives under the repo's .agit/), so aGiT on
+    # one repo never blocks aGiT on another — only a second instance on the SAME
+    # repo is refused.
+    repo_a = RepoLock(tmp_path / "a" / ".agit" / "lock")
+    repo_b = RepoLock(tmp_path / "b" / ".agit" / "lock")
+    assert repo_a.acquire() is True
+    assert repo_b.acquire() is True  # a different repo is unaffected
+    repo_a.release()
+    repo_b.release()
 
 
 def test_stale_lock_from_dead_pid_is_reclaimed(tmp_path):

@@ -27,6 +27,29 @@ class GitRepo:
             raise GitError(f"Not a Git repository: {path}")
         return cls(Path(process.stdout.strip()))
 
+    @classmethod
+    def init(cls, path: Path) -> "GitRepo":
+        """Initialize a new Git repository at ``path`` and seed an empty initial
+        commit. aGiT runs every session in a worktree, which requires a valid HEAD;
+        a fresh `git init` leaves an unborn branch, so the seed commit makes the
+        repo usable immediately. Any existing files are committed afterwards by
+        aGiT's normal pre-agent user-commit flow."""
+        path = path.expanduser()
+        path.mkdir(parents=True, exist_ok=True)
+        process = subprocess.run(
+            ["git", "init"],
+            cwd=path,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if process.returncode != 0:
+            raise GitError(f"git init failed in {path}:\n{process.stderr.strip()}")
+        repo = cls.discover(path)
+        repo._run(["git", "commit", "--allow-empty", "-m", "Initial commit"])
+        return repo
+
     def status_short(self) -> str:
         return self._run(["git", "status", "--short"]).stdout
 
