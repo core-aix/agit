@@ -1,7 +1,14 @@
 import json
 import os
 
-from agit.lock import RepoLock
+from agit.lock import RepoLock, already_running_message
+
+
+def test_already_running_message_names_the_pid():
+    assert "PID 1234" in already_running_message(1234)
+    # Falls back gracefully when the holder's pid is unknown.
+    assert "PID" not in already_running_message(None)
+    assert "already running on this repo" in already_running_message(None)
 
 
 def test_acquire_and_release(tmp_path):

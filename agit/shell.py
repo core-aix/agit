@@ -8,7 +8,7 @@ from agit.backends.claude import ClaudeBackend
 from agit.backends.opencode import OpenCodeBackend
 from agit.git import GitRepo
 from agit.global_config import GlobalConfig
-from agit.lock import ALREADY_RUNNING_MESSAGE, RepoLock
+from agit.lock import RepoLock, already_running_message
 from agit.state import AgitState
 from agit.ui import AgitPrompt, PromptState
 
@@ -50,7 +50,7 @@ class AgitShell:
         if resolved != self.state.backend:
             self.state.backend = resolved
         if not self.management_lock.acquire():
-            print(ALREADY_RUNNING_MESSAGE)
+            print(already_running_message(self.management_lock.owner_pid()))
             return
         self.state.save()
         if self.verbose:

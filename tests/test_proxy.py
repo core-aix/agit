@@ -657,11 +657,12 @@ def test_proxy_refuses_second_instance(monkeypatch, capsys):
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True, raising=False)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True, raising=False)
     runner._ensure_backend_available = lambda: True
-    # A live aGiT already holds the lock: acquire fails.
-    runner.management_lock = type("L", (), {"acquire": lambda self: False})()
+    # A live aGiT (PID 4321) already holds the lock: acquire fails.
+    runner.management_lock = type("L", (), {"acquire": lambda self: False, "owner_pid": lambda self: 4321})()
 
     assert runner.run() == 1
-    assert "already running" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "already running" in out and "4321" in out  # names the holding process
 
 
 def _mux_runner():

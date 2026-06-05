@@ -5,17 +5,20 @@ import os
 import time
 from pathlib import Path
 
-# Shown when a second aGiT is started on a repo that already has one running.
-# aGiT auto-commits and merges as the agent works, so two instances on the same
-# repo would race over commits and branches; we allow only one at a time.
-ALREADY_RUNNING_MESSAGE = (
-    "Another aGiT instance is already running on this repo.\n"
-    "Stop it before starting a new one.\n"
-    "\n"
-    "aGiT manages your git commits as the agent works. Running two instances on "
-    "the same repo would let them fight over commits and branches, so only one is "
-    "allowed at a time."
-)
+def already_running_message(pid: int | None) -> str:
+    """Refusal shown when a second aGiT is started on a repo that already has one
+    running. aGiT auto-commits and merges as the agent works, so two instances on
+    the same repo would race over commits and branches; we allow only one. Names
+    the holding process so the user can find (and stop) it."""
+    owner = f"already running on this repo (PID {pid})" if pid else "already running on this repo"
+    return (
+        f"Another aGiT instance is {owner}.\n"
+        "Stop it before starting a new one.\n"
+        "\n"
+        "aGiT manages your git commits as the agent works. Running two instances on "
+        "the same repo would let them fight over commits and branches, so only one is "
+        "allowed at a time."
+    )
 
 
 class RepoLock:

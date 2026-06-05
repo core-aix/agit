@@ -1,3 +1,4 @@
+import os
 import subprocess
 
 import agit.shell as shell_mod
@@ -43,4 +44,5 @@ def test_second_instance_is_refused(tmp_path, monkeypatch, capsys):
 
     out = capsys.readouterr().out
     assert "already running" in out
+    assert str(os.getpid()) in out  # names the holding process's PID
     holder.release()

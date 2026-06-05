@@ -31,7 +31,7 @@ from agit.backends.proxy_agents import available_backends, make_proxy_agent
 from agit.commit_message import build_agent_commit_message, build_agent_merge_message, build_user_commit_message
 from agit.git import GitRepo
 from agit.global_config import GlobalConfig
-from agit.lock import ALREADY_RUNNING_MESSAGE, RepoLock
+from agit.lock import RepoLock, already_running_message
 from agit import sandbox
 from agit.session import turns_after
 from agit.session_runtime import SESSION_FIELDS, capture_session, default_session_fields, restore_session
@@ -375,7 +375,7 @@ class ProxyRunner:
         if not self._ensure_backend_available():
             return 1
         if not self.management_lock.acquire():
-            print(ALREADY_RUNNING_MESSAGE)
+            print(already_running_message(self.management_lock.owner_pid()))
             return 1
         self.state.save()
         if self.actions.has_pre_agent_user_changes():
