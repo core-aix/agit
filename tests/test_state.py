@@ -11,6 +11,26 @@ def test_state_is_repository_local(tmp_path):
     assert loaded.declined_untracked() == ["new.py"]
 
 
+def test_backend_defaults_to_configured_default_not_opencode(tmp_path):
+    # A fresh repo with no recorded backend must honour the configured default
+    # rather than silently falling back to a hardcoded backend.
+    state = AgitState(tmp_path, default_backend="claude")
+    assert state.backend == "claude"
+
+    # An explicitly null/empty stored backend also falls back to the default.
+    state.data["backend"] = None
+    assert state.backend == "claude"
+
+    # A stale/unknown stored backend is coerced to the default rather than passed
+    # through (which would later raise in make_proxy_agent).
+    state.data["backend"] = "retired-agent"
+    assert state.backend == "claude"
+
+    # A known stored backend is honoured as-is.
+    state.data["backend"] = "opencode"
+    assert state.backend == "opencode"
+
+
 def test_state_prunes_declined_untracked_files(tmp_path):
     state = AgitState(tmp_path)
     state.add_declined(["ignored.log", "keep.py", "removed.py"])
@@ -18,6 +38,18 @@ def test_state_prunes_declined_untracked_files(tmp_path):
     state.keep_declined(["keep.py"])
 
     assert state.declined_untracked() == ["keep.py"]
+
+
+def test_session_name_roundtrip(tmp_path):
+    state = AgitState(tmp_path)
+    assert state.session_name_for("sess-1") is None
+    state.name_session("sess-1", "my-feature")
+
+    assert AgitState(tmp_path).session_name_for("sess-1") == "my-feature"
+    # A None/empty id is a no-op, and clearing removes the name.
+    state.name_session(None, "ignored")
+    state.name_session("sess-1", None)
+    assert AgitState(tmp_path).session_name_for("sess-1") is None
 
 
 def test_trace_roundtrip(tmp_path):

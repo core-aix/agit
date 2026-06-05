@@ -17,10 +17,10 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "coverage", specifier = ">=7.14.1" },
-    { name = "prompt-toolkit", specifier = ">=3.0" },
-    { name = "pyte", specifier = ">=0.8" },
+    { name = "prompt-toolkit", specifier = ">=3.0.52" },
+    { name = "pyte", specifier = ">=0.8.2" },
     { name = "pytest", specifier = ">=9.0.3" },
-    { name = "watchdog", specifier = ">=4.0" },
+    { name = "watchdog", specifier = ">=6.0" },
 ]
 
 [[package]]

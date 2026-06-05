@@ -4,6 +4,76 @@ from agit import claude_session
 from agit.claude_session import export_session, latest_session_id, list_sessions, parse_rows, session_belongs_to_repo
 
 
+def test_session_cwd_reads_last_recorded_cwd(monkeypatch, tmp_path):
+    config = tmp_path / "config"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+    proj = config / "projects" / claude_session._encode_repo(tmp_path / "wt")
+    proj.mkdir(parents=True)
+    (proj / "s.jsonl").write_text(
+        '{"type":"user","cwd":"/old/dir"}\n'
+        '{"type":"assistant"}\n'                       # a line without cwd is skipped
+        '{"type":"user","cwd":"/new/dir"}\n',
+        encoding="utf-8",
+    )
+    assert claude_session.session_cwd("s") == "/new/dir"   # last cwd wins
+    assert claude_session.session_cwd("missing") is None
+
+
+def test_prepare_resume_stages_transcript_into_worktree(monkeypatch, tmp_path):
+    config = tmp_path / "config"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+    repo_root = tmp_path / "repo"
+    worktree = repo_root / ".agit" / "worktrees" / "session-1"
+    repo_root.mkdir()
+    worktree.mkdir(parents=True)
+
+    # A conversation recorded under the repo root (e.g. a plain `claude` run).
+    root_proj = config / "projects" / claude_session._encode_repo(repo_root)
+    root_proj.mkdir(parents=True)
+    (root_proj / "abc.jsonl").write_text('{"type":"user"}\n', encoding="utf-8")
+
+    assert claude_session.prepare_resume(worktree, "abc") is True
+    staged = config / "projects" / claude_session._encode_repo(worktree) / "abc.jsonl"
+    assert staged.is_file()
+
+    # Hardlinked (one inode), so a turn appended from the worktree is visible in
+    # the original directory's transcript too — the conversation does not fork.
+    with staged.open("a", encoding="utf-8") as handle:
+        handle.write('{"type":"assistant"}\n')
+    assert (root_proj / "abc.jsonl").read_text(encoding="utf-8").count("\n") == 2
+
+    # Idempotent and id-specific.
+    assert claude_session.prepare_resume(worktree, "abc") is True
+    assert claude_session.prepare_resume(worktree, "missing") is False
+
+
+def test_link_session_surfaces_worktree_conversation_in_base(monkeypatch, tmp_path):
+    config = tmp_path / "config"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+    repo_root = tmp_path / "repo"
+    worktree = repo_root / ".agit" / "worktrees" / "session-1"
+    repo_root.mkdir()
+    worktree.mkdir(parents=True)
+
+    # A conversation born inside aGiT (recorded under the worktree project dir).
+    wt_proj = config / "projects" / claude_session._encode_repo(worktree)
+    wt_proj.mkdir(parents=True)
+    (wt_proj / "born.jsonl").write_text('{"type":"user"}\n', encoding="utf-8")
+
+    assert claude_session.link_session("born", worktree, repo_root) is True
+    base = config / "projects" / claude_session._encode_repo(repo_root) / "born.jsonl"
+    assert base.is_file()
+
+    # Hardlinked: a later turn from the worktree is visible from the repo root too.
+    with (wt_proj / "born.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write('{"type":"assistant"}\n')
+    assert base.read_text(encoding="utf-8").count("\n") == 2
+
+    # Idempotent, and a no-op when the source isn't recorded.
+    assert claude_session.link_session("born", worktree, repo_root) is True
+    assert claude_session.link_session("missing", worktree, repo_root) is False
+
+
 def _user(uuid, text, **extra):
     row = {"type": "user", "uuid": uuid, "message": {"role": "user", "content": text}}
     row.update(extra)

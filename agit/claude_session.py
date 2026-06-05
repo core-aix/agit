@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 from pathlib import Path
 
 from agit.backends.base import TokenUsage
@@ -18,6 +19,9 @@ __all__ = [
     "list_worktree_sessions",
     "session_belongs_to_repo",
     "export_session",
+    "prepare_resume",
+    "link_session",
+    "session_cwd",
     "parse_rows",
 ]
 
@@ -129,6 +133,121 @@ def _session_label(path: Path, *, line_limit: int = 100) -> str | None:
 
 def session_belongs_to_repo(repo: Path, session_id: str) -> bool:
     return _session_path(repo, session_id).is_file()
+
+
+def prepare_resume(worktree: Path, session_id: str) -> bool:
+    """Ensure ``claude --resume <session_id>`` works when run in ``worktree``.
+
+    Claude looks up a session's transcript in the project dir of its current
+    working directory, so a conversation recorded elsewhere (the repo root before
+    aGiT ran, or a different worktree) is invisible from a fresh worktree. Link the
+    transcript into the worktree's project dir so the resume finds it. We hardlink
+    (one inode, two names) rather than copy, so turns aGiT appends from the worktree
+    stay visible to a plain `claude` run in the original directory, and vice-versa
+    — the conversation does not fork. Falls back to a copy only across filesystems
+    (where hardlinks aren't possible). Returns True if the transcript is in place."""
+    if not session_id:
+        return False
+    worktree = Path(worktree)
+    target_dir = _project_dir(worktree)
+    target = target_dir / f"{session_id}.jsonl"
+    if target.is_file():
+        return True
+    source = _find_session_file(session_id)
+    if source is None:
+        return False
+    if source.resolve() == target.resolve():
+        return True
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return False
+    try:
+        os.link(source, target)  # share one inode so new turns flow both ways
+    except FileExistsError:
+        return True
+    except OSError:
+        try:
+            shutil.copy2(source, target)  # different filesystem: copy instead
+        except OSError:
+            return False
+    return True
+
+
+def link_session(session_id: str, src_repo: Path, dst_repo: Path) -> bool:
+    """Hardlink a session's transcript from ``src_repo``'s project dir into
+    ``dst_repo``'s, so the conversation is also visible/continuable from
+    ``dst_repo`` — e.g. surfacing an aGiT worktree session in the repo root so a
+    plain ``claude`` run there can resume it. One inode, two names, so later turns
+    stay shared. No-op if the source isn't recorded yet or a transcript already
+    sits at the destination."""
+    if not session_id:
+        return False
+    src = _session_path(Path(src_repo), session_id)
+    if not src.is_file():
+        return False
+    dst_dir = _project_dir(Path(dst_repo))
+    dst = dst_dir / f"{session_id}.jsonl"
+    if dst.exists():
+        return True
+    try:
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        os.link(src, dst)
+    except FileExistsError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def session_cwd(session_id: str) -> str | None:
+    """The working directory Claude most recently recorded for a session. Claude
+    writes its `cwd` into (almost) every transcript line, so this reads the last
+    one that has it from the newest transcript file. Used to detect a resume that
+    restored the session's old cwd instead of the worktree it was launched in."""
+    if not session_id:
+        return None
+    path = _find_session_file(session_id)
+    if path is None:
+        return None
+    found: str | None = None
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line or '"cwd"' not in line:
+                    continue
+                try:
+                    cwd = json.loads(line).get("cwd")
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(cwd, str) and cwd:
+                    found = cwd  # keep the last one
+    except OSError:
+        return None
+    return found
+
+
+def _find_session_file(session_id: str) -> Path | None:
+    # The transcript for a session id may live under any project dir (the repo
+    # root, a worktree). Return the most recent match.
+    root = _projects_root()
+    if not root.is_dir():
+        return None
+    newest: tuple[float, Path] | None = None
+    for project_dir in root.iterdir():
+        if not project_dir.is_dir():
+            continue
+        candidate = project_dir / f"{session_id}.jsonl"
+        if not candidate.is_file():
+            continue
+        try:
+            mtime = candidate.stat().st_mtime
+        except OSError:
+            continue
+        if newest is None or mtime > newest[0]:
+            newest = (mtime, candidate)
+    return newest[1] if newest else None
 
 
 def export_session(repo: Path, session_id: str) -> ExportedSession | None:
