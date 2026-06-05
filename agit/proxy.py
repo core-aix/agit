@@ -357,6 +357,8 @@ class ProxyRunner:
         self._pending_enter_at: float | None = None  # deferred submit of an injected prompt
         self._pending_enter_fd: int | None = None  # the PTY that injected prompt's Enter must go to
         self._base_advanced = False  # base moved; sync idle sessions onto it on the next loop pass
+        self._last_base_head: str | None = None  # last-polled base HEAD, to catch out-of-band commits
+        self._base_poll_at = 0.0  # throttle for the base-HEAD poll
         self._warned_backend_session = False  # one-shot "use agit to start sessions" notice
         self.sessions: list = []
         self.active_index = 0
@@ -554,6 +556,28 @@ class ProxyRunner:
             )
             self._base_status_baseline = current  # don't repeat for the same files
             self._render()
+
+    def _poll_base_advanced(self) -> None:
+        # aGiT advances the base itself (integration sets `_base_advanced`), but the
+        # base branch can also gain commits out of band — the user commits directly
+        # to it, pulls, rebases, etc. Poll its HEAD on a throttle and, when it moves
+        # for any reason, flag a sync so idle worktrees pick the new commits up
+        # (`_sync_idle_worktrees_to_base`). The first observation only records the
+        # baseline; it never triggers on startup.
+        if getattr(self, "worktree", None) is None or self._base_branch is None:
+            return
+        now = time.monotonic()
+        if now - self._base_poll_at < 3.0:
+            return
+        self._base_poll_at = now
+        try:
+            head = self.base_repo.rev_parse(self._base_branch)
+        except Exception as error:
+            self._debug(f"base-head poll failed: {error!r}")
+            return
+        if self._last_base_head is not None and head != self._last_base_head:
+            self._base_advanced = True
+        self._last_base_head = head
 
     def _warn_if_cwd_drifted(self) -> None:
         # `claude --resume` can restore a session's *saved* working directory and
@@ -2187,6 +2211,7 @@ class ProxyRunner:
                 self._resume_pending_prompt_if_ready()
                 self._maybe_agent_commit()
                 self._service_background_sessions()
+                self._poll_base_advanced()
                 self._warn_if_base_edited()
                 self._warn_if_cwd_drifted()
             if self._base_advanced:

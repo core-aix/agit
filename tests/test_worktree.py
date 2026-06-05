@@ -535,6 +535,51 @@ def test_align_session_to_base_merges_new_base_commits_into_worktree(tmp_path):
     assert work.merge_in_progress() is False
 
 
+def test_poll_base_advanced_detects_out_of_band_commits(tmp_path):
+    from agit.proxy import ProxyRunner
+
+    main = _init_repo(tmp_path)
+    base = main.current_branch()
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.base_repo = main
+    runner._base_branch = base
+    runner.worktree = object()
+    runner._base_advanced = False
+    runner._last_base_head = None
+    runner._base_poll_at = 0.0
+    runner._debug = lambda *a, **k: None
+
+    # First poll only records the baseline — it never triggers a sync on startup.
+    runner._poll_base_advanced()
+    assert runner._base_advanced is False
+    assert runner._last_base_head == main.rev_parse(base)
+
+    # The user commits straight to the base branch, outside aGiT.
+    _commit(main, "user.txt", "by hand\n", "user commit")
+    runner._base_poll_at = 0.0  # bypass the 3s throttle for the test
+    runner._poll_base_advanced()
+
+    # The moved base flags a sync so idle worktrees pick the new commit up.
+    assert runner._base_advanced is True
+    assert runner._last_base_head == main.rev_parse(base)
+
+
+def test_poll_base_advanced_noop_without_worktree(tmp_path):
+    from agit.proxy import ProxyRunner
+
+    main = _init_repo(tmp_path)
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.base_repo = main
+    runner._base_branch = main.current_branch()
+    runner.worktree = None  # legacy / non-worktree session: nothing to sync
+    runner._base_advanced = False
+    runner._last_base_head = None
+    runner._base_poll_at = 0.0
+
+    runner._poll_base_advanced()
+    assert runner._base_advanced is False
+
+
 def test_align_session_to_base_skips_conflicting_base(tmp_path):
     main = _init_repo(tmp_path)  # f.txt == "base\n"
     base = main.current_branch()
