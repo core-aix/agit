@@ -36,7 +36,9 @@ def main(argv: list[str] | None = None) -> int:
         select_default_backend(config)
 
     try:
-        repo = GitRepo.discover(Path(args.repo).expanduser())
+        repo = _discover_or_init(Path(args.repo).expanduser())
+        if repo is None:
+            return 1
         if args.mode == "json":
             AgitShell(repo, verbose=args.verbose, backend=args.backend, new_session=args.new_session).run()
         else:
@@ -45,6 +47,33 @@ def main(argv: list[str] | None = None) -> int:
         print(error)
         return 1
     return 0
+
+
+def _discover_or_init(path: Path) -> GitRepo | None:
+    """Find the Git repository for ``path``, or offer to create one. aGiT cannot
+    run outside a Git repository, so if the user declines (or we can't prompt),
+    return None and let the caller stop."""
+    try:
+        return GitRepo.discover(path)
+    except GitError:
+        pass
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        print(f"Not a Git repository: {path}\naGiT requires a Git repository to run.")
+        return None
+    try:
+        answer = input(f"{path} is not a Git repository. Initialize one here with `git init`? [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        answer = ""
+    if answer not in {"y", "yes"}:
+        print("aGiT cannot run outside a Git repository. Exiting.")
+        return None
+    try:
+        repo = GitRepo.init(path)
+    except GitError as error:
+        print(error)
+        return None
+    print(f"Initialized empty Git repository in {repo.repo}")
+    return repo
 
 
 if __name__ == "__main__":
