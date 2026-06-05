@@ -73,6 +73,31 @@ def test_parse_exported_session_groups_multiple_assistants_until_next_user():
     assert session.turns[0].tokens.input == 5
 
 
+def test_parse_exported_session_excludes_compaction_summary():
+    session = parse_exported_session(
+        {
+            "info": {"id": "ses-1"},
+            "messages": [
+                {"info": {"role": "user", "id": "u1"}, "parts": [{"type": "text", "text": "do the work"}]},
+                {
+                    "info": {"role": "assistant", "id": "a1", "parentID": "u1", "finish": "stop", "tokens": {"total": 4, "output": 4}},
+                    "parts": [{"type": "text", "text": "real response"}],
+                },
+                {
+                    # The compaction summary must not overwrite the turn's response.
+                    "info": {"role": "assistant", "id": "sum", "parentID": "u1", "mode": "compaction", "agent": "compaction", "summary": True, "finish": "stop", "tokens": {"total": 0}},
+                    "parts": [{"type": "text", "text": "This is a summary of the conversation so far..."}],
+                },
+            ],
+        }
+    )
+
+    assert len(session.turns) == 1
+    assert session.turns[0].final_response == "real response"
+    assert session.turns[0].assistant_message_id == "a1"
+    assert session.turns[0].tokens.total == 4
+
+
 def test_parse_exported_session_counts_reasoning_part_tokens():
     session = parse_exported_session(
         {

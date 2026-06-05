@@ -216,6 +216,13 @@ def parse_exported_session(data: dict) -> ExportedSession:
             current_user = message
             assistant_group = []
         elif role == "assistant" and current_user is not None:
+            # OpenCode injects its conversation summary as an assistant message
+            # marked `summary: true` (mode/agent "compaction"). It is bookkeeping,
+            # not a real response, so keep it out of the turn's final response and
+            # the interaction trace. (User messages carry an unrelated `summary`
+            # struct of file diffs, which is why this guard is assistant-only.)
+            if msg_info.get("summary") is True or msg_info.get("mode") == "compaction":
+                continue
             assistant_group.append(message)
     flush()
     return ExportedSession(session_id=session_id, model=model, updated=updated, turns=turns)
