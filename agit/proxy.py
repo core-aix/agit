@@ -357,6 +357,8 @@ class ProxyRunner:
         # unchanged. `base_repo` is the main working tree (worktrees branch off it).
         self.base_repo = repo
         self._base_branch: str | None = None  # integration target branch (set at startup)
+        self._integration_paused = False  # set when the base repo is switched off _base_branch out-of-band
+        self._base_drift_check_at = 0.0
         self.turn = 0  # per-session transient-branch counter
         self.merge_ctx = None  # in-progress agent merge resolution, if any
         self._pending_enter_at: float | None = None  # deferred submit of an injected prompt
@@ -506,6 +508,47 @@ class ProxyRunner:
             seconds=8.0,
         )
         self._render()
+
+    def _check_base_branch_drift(self) -> None:
+        # The user can `git checkout` another branch in the base repo while aGiT is
+        # running. aGiT integrates session work into the branch it launched on
+        # (`self._base_branch`) by fast-forwarding the base repo's checkout, so a
+        # switch would target the wrong branch. Detect it, PAUSE worktree merging,
+        # and tell the user; resume automatically when they switch back. (Sessions
+        # keep running and committing to their own branches throughout.)
+        if self._base_branch is None or not getattr(self, "tracking_enabled", True):
+            return
+        now = time.monotonic()
+        if now - getattr(self, "_base_drift_check_at", 0.0) < 2.0:
+            return
+        self._base_drift_check_at = now
+        try:
+            current = self.base_repo.current_branch()
+        except Exception:
+            return
+        drifted = current != self._base_branch
+        if drifted and not self._integration_paused:
+            self._integration_paused = True
+            self._debug(f"base branch drift: repo on '{current}', integration target '{self._base_branch}'")
+            self._set_message(
+                f"⚠ Base branch changed outside aGiT — the repo is now on '{current}', but\n"
+                f"aGiT integrates into '{self._base_branch}'. Worktree merging is PAUSED so\n"
+                f"your work isn't merged into the wrong branch (sessions keep running and\n"
+                f"committing to their own branches).\n"
+                f"To resume: run  git checkout {self._base_branch}  in the repo — merging\n"
+                f"continues automatically. To instead make '{current}' the base, quit and\n"
+                f"relaunch aGiT from there.",
+                seconds=30.0,
+            )
+            self._render()
+        elif not drifted and self._integration_paused:
+            self._integration_paused = False
+            self._debug(f"base branch restored to '{self._base_branch}'; integration resumed")
+            self._set_message(
+                f"Base branch back on '{self._base_branch}' — worktree merging resumed.",
+                seconds=8.0,
+            )
+            self._render()
 
     def _warn_if_base_edited(self) -> None:
         # Fallback for un-sandboxed platforms: detect the agent editing the base
@@ -1081,6 +1124,8 @@ class ProxyRunner:
         # out and needs resolution), or "skip" (nothing to integrate).
         if self.worktree is None or self._base_branch is None or self.merge_ctx:
             return "skip"
+        if getattr(self, "_integration_paused", False):
+            return "skip"  # base switched out-of-band; merging is paused
         turn_branch = self.repo.current_branch()
         if not turn_branch.startswith("agit/"):
             return "skip"
@@ -1151,6 +1196,15 @@ class ProxyRunner:
         # turn branch. A fresh turn branch is created lazily on the next commit,
         # so a fully-merged session leaves no branch behind — only its worktree,
         # whose conversation context can still be resumed.
+        # Hard safety: never fast-forward if the base repo was checked out onto a
+        # different branch out-of-band — `git merge --ff-only` advances whatever is
+        # currently checked out, so this would move the WRONG branch. Callers wrap
+        # this in try/except and treat the failure as "not integrated".
+        current = self.base_repo.current_branch()
+        if current != self._base_branch:
+            raise RuntimeError(
+                f"base repo is on '{current}', not the integration branch '{self._base_branch}'"
+            )
         self.base_repo.merge_ff_only(source_branch)
         self.repo.switch_detach(self._base_branch)
         if self.repo.current_branch() != source_branch:
@@ -1164,6 +1218,8 @@ class ProxyRunner:
         # that has its own committed work has the new base commits merged into its
         # turn branch (cleanly, or skipped on conflict) — see `_align_session_to_base`.
         # Only idle, clean worktrees are touched, so in-flight work is left alone.
+        if getattr(self, "_integration_paused", False):
+            return  # base switched out-of-band; don't re-point worktrees meanwhile
         for index in range(len(self.sessions)):
             if index == self.active_index:
                 repo, in_flight = getattr(self, "repo", None), getattr(self, "agent_in_flight", False)
@@ -2169,6 +2225,7 @@ class ProxyRunner:
                 # A merge is being resolved; don't make normal commits meanwhile.
                 self._maybe_complete_agent_merge()
             else:
+                self._check_base_branch_drift()  # pause merging before any integration runs
                 self._resume_pending_prompt_if_ready()
                 self._maybe_agent_commit()
                 self._service_background_sessions()

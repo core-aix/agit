@@ -2,6 +2,8 @@ import os
 import threading
 import time
 
+import pytest
+
 from agit.backends.base import TokenUsage
 from agit.opencode_session import SessionTurn
 from agit.backends.proxy_agents import make_proxy_agent
@@ -1754,6 +1756,72 @@ def test_resume_switches_to_already_live_conversation():
 
     assert runner.__dict__.get("_switched") == [0]
     assert "_created" not in runner.__dict__
+
+
+# --- base branch switched out-of-band ---
+
+def _base_drift_runner(current_branch):
+    import types
+
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner._base_branch = "dev"
+    runner.tracking_enabled = True
+    runner._integration_paused = False
+    runner._base_drift_check_at = 0.0
+    runner.base_repo = types.SimpleNamespace(current_branch=lambda: current_branch)
+    runner._debug = lambda *a, **k: None
+    runner.messages = []
+    runner._set_message = lambda m, **k: runner.messages.append(m)
+    runner._render = lambda: None
+    return runner
+
+
+def test_base_branch_drift_pauses_then_resumes():
+    runner = _base_drift_runner("feature-x")
+    runner._check_base_branch_drift()
+    assert runner._integration_paused is True
+    assert any("PAUSED" in m and "feature-x" in m for m in runner.messages)
+
+    runner.base_repo.current_branch = lambda: "dev"  # user switches back
+    runner._base_drift_check_at = 0.0                 # bypass the 2s throttle
+    runner.messages.clear()
+    runner._check_base_branch_drift()
+    assert runner._integration_paused is False
+    assert any("resumed" in m for m in runner.messages)
+
+
+def test_integrate_turn_skips_while_paused():
+    import types
+
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.worktree = types.SimpleNamespace()
+    runner._base_branch = "dev"
+    runner.merge_ctx = None
+    runner._integration_paused = True
+    assert runner._integrate_turn_or_conflict() == "skip"
+
+
+def test_advance_base_refuses_when_base_switched_out_of_band():
+    import types
+
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner._base_branch = "dev"
+    merged = []
+    runner.base_repo = types.SimpleNamespace(
+        current_branch=lambda: "feature-x",            # drifted off the base branch
+        merge_ff_only=lambda ref: merged.append(ref),
+    )
+    with pytest.raises(RuntimeError):
+        runner._advance_base_to("agit/claude/session-1/t1")
+    assert merged == []  # never fast-forwarded the wrong branch
+
+
+def test_sync_idle_worktrees_skipped_while_paused():
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner._integration_paused = True
+    runner.sessions = ["would-explode-if-iterated"]  # not a real session; must not be touched
+    runner.active_index = 0
+    runner._sync_idle_worktrees_to_base()  # returns early; no AttributeError
 
 
 # --- corrupted-worktree reuse / diagnostics ---
