@@ -384,6 +384,7 @@ class ProxyRunner:
         # Base-merge-only: run even the first session in a worktree so the base
         # branch is only advanced by integration, never edited by a live agent.
         self._base_branch = self.base_repo.current_branch()
+        self._cleanup_stale_state_on_startup()
         self._setup_base_merge_only_session()
         self._apply_new_session_if_requested()
         self._sanitize_state_trace()
@@ -887,6 +888,52 @@ class ProxyRunner:
             return bool(self.base_repo.log_range(self._base_branch, branch))
         except Exception:
             return True  # err on the side of keeping the worktree
+
+    def _cleanup_stale_state_on_startup(self) -> None:
+        # A non-graceful exit (the backend dying, SIGKILL, a crash) can leave junk
+        # that makes the *next* run misbehave until a second restart — chiefly:
+        #   • prunable git worktree registrations whose directories are gone, and
+        #   • orphaned worktree *directories* that are no longer valid worktrees
+        #     (e.g. only a `.agit/` recreated by a write after teardown).
+        # git's own `worktree list` can't see the orphaned dirs, so sweep the
+        # filesystem under the worktrees root and delete anything that isn't a real,
+        # registered worktree. Valid dormant worktrees (kept for resume) are
+        # registered, so they're left untouched. Runs before the primary session is
+        # set up so startup is clean from the first launch, not the second.
+        if not getattr(self, "tracking_enabled", True):
+            return
+        try:
+            self.base_repo.worktree_prune()
+        except Exception as error:
+            self._debug(f"startup prune failed: {error!r}")
+        try:
+            worktrees = self._worktrees()
+            root = worktrees.root
+            if not root.is_dir():
+                return
+            registered = set()
+            for info in worktrees.list():
+                try:
+                    registered.add(info.path.resolve())
+                except OSError:
+                    pass
+            removed = 0
+            for entry in sorted(root.iterdir()):
+                if not entry.is_dir():
+                    continue
+                try:
+                    resolved = entry.resolve()
+                except OSError:
+                    continue
+                if resolved in registered or self._is_valid_worktree(entry):
+                    continue  # a real worktree — keep it
+                shutil.rmtree(entry, ignore_errors=True)
+                removed += 1
+                self._debug(f"startup cleanup: removed orphaned worktree dir {entry}")
+            if removed:
+                self.base_repo.worktree_prune()  # removing dirs may strand registrations
+        except Exception as error:
+            self._debug(f"startup cleanup failed: {error!r}")
 
     def _reconcile_sessions_on_startup(self) -> None:
         # Clean up worktrees left by previous runs: integrate any pending commits

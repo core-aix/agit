@@ -1743,6 +1743,46 @@ def test_resume_switches_to_already_live_conversation():
 
 # --- corrupted-worktree reuse / diagnostics ---
 
+def test_cleanup_stale_state_removes_orphaned_worktree_dirs(tmp_path):
+    import types
+
+    root = tmp_path / ".agit" / "worktrees"
+    registered = root / "session-1"
+    registered.mkdir(parents=True)
+    orphan = root / "session-2"
+    (orphan / ".agit").mkdir(parents=True)         # only .agit/ → not a valid worktree
+    (root / "stray-file").write_text("x")           # a file, not a dir → ignored
+
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.tracking_enabled = True
+    runner._debug = lambda *a, **k: None
+    prunes = []
+    runner.base_repo = types.SimpleNamespace(worktree_prune=lambda: prunes.append(1))
+    runner.worktree_manager = types.SimpleNamespace(
+        root=root,
+        list=lambda: [types.SimpleNamespace(path=registered)],  # session-1 is registered
+    )
+    runner._worktrees = lambda: runner.worktree_manager
+
+    runner._cleanup_stale_state_on_startup()
+
+    assert registered.exists()         # a real registered worktree is kept
+    assert not orphan.exists()         # the orphaned .agit/-only dir is swept
+    assert (root / "stray-file").exists()
+    assert prunes                      # pruned stale git registrations
+
+
+def test_cleanup_stale_state_noop_when_read_only():
+    import types
+
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.tracking_enabled = False
+    pruned = []
+    runner.base_repo = types.SimpleNamespace(worktree_prune=lambda: pruned.append(1))
+    runner._cleanup_stale_state_on_startup()
+    assert pruned == []  # a read-only observer touches nothing
+
+
 def test_is_valid_worktree_rejects_leftover_without_git(tmp_path):
     runner = ProxyRunner.__new__(ProxyRunner)
     leftover = tmp_path / "session-1"
