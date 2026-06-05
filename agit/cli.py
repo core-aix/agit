@@ -54,7 +54,13 @@ def _discover_or_init(path: Path) -> GitRepo | None:
     run outside a Git repository, so if the user declines (or we can't prompt),
     return None and let the caller stop."""
     try:
-        return GitRepo.discover(path)
+        repo = GitRepo.discover(path)
+        # A user who ran `git init` themselves leaves an unborn HEAD (no commits),
+        # which aGiT's worktree setup cannot use. Seed an initial commit so an
+        # otherwise-empty repository starts cleanly.
+        if repo.ensure_born():
+            print(f"Seeded an initial commit in empty repository {repo.repo}")
+        return repo
     except GitError:
         pass
     if not (sys.stdin.isatty() and sys.stdout.isatty()):

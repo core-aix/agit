@@ -156,5 +156,10 @@ def available_backends() -> list[str]:
 
 
 def make_proxy_agent(name: str) -> ProxyAgent:
-    agent_class = _AGENTS.get(name, OpenCodeProxyAgent)
+    # Raise on an unknown backend rather than silently substituting one: a stale
+    # or mistyped backend name must surface, not quietly launch the wrong agent.
+    try:
+        agent_class = _AGENTS[name]
+    except KeyError:
+        raise ValueError(f"Unknown backend {name!r}; choose one of {', '.join(available_backends())}.") from None
     return agent_class()

@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from agit.backends.claude import ClaudeBackend
 from agit.backends.proxy_agents import available_backends, make_proxy_agent
 from agit.global_config import GlobalConfig
@@ -28,8 +30,12 @@ def test_claude_proxy_agent_spawn_command_uses_session_id_and_resume():
     assert agent.spawn_command(Path("/repo"), session_id="u1", resume=True) == ["claude", "--resume", "u1"]
 
 
-def test_make_proxy_agent_defaults_to_opencode_for_unknown():
-    assert make_proxy_agent("nonsense").name == "opencode"
+def test_make_proxy_agent_raises_on_unknown_backend():
+    # An unknown/stale backend name must surface loudly, not silently launch
+    # OpenCode (which contradicts the configured default).
+    with pytest.raises(ValueError) as excinfo:
+        make_proxy_agent("nonsense")
+    assert "nonsense" in str(excinfo.value)
 
 
 def test_global_config_default_backend_persists(tmp_path):

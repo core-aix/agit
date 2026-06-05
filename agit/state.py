@@ -118,7 +118,16 @@ class AgitState:
 
     @property
     def backend(self) -> str:
-        return str(self.data.get("backend") or "opencode")
+        # Honour the configured default (not a hardcoded backend) when the record
+        # has no backend yet, or when the stored value is no longer a known
+        # backend, so a missing/stale entry never silently launches the wrong
+        # agent (and make_proxy_agent never receives an invalid name).
+        from agit.backends.proxy_agents import available_backends
+
+        stored = self.data.get("backend")
+        if stored and stored in available_backends():
+            return str(stored)
+        return self._default_backend
 
     @backend.setter
     def backend(self, value: str) -> None:

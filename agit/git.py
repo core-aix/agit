@@ -47,8 +47,24 @@ class GitRepo:
         if process.returncode != 0:
             raise GitError(f"git init failed in {path}:\n{process.stderr.strip()}")
         repo = cls.discover(path)
-        repo._run(["git", "commit", "--allow-empty", "-m", "Initial commit"])
+        repo.ensure_born()
         return repo
+
+    def has_commits(self) -> bool:
+        """True once the repository has at least one commit (a born HEAD)."""
+        return self._run(["git", "rev-parse", "--verify", "--quiet", "HEAD"], check=False).returncode == 0
+
+    def ensure_born(self) -> bool:
+        """Make sure HEAD points at a commit. A freshly `git init`-ed repository
+        has an unborn branch with no commits, which aGiT cannot run on (every
+        session is a worktree, and a worktree needs a valid HEAD). Seed an empty
+        initial commit so the repo is usable; any pre-existing files are left
+        untracked for aGiT's normal pre-agent user-commit flow. Returns True if a
+        seed commit was created, False if HEAD was already born."""
+        if self.has_commits():
+            return False
+        self._run(["git", "commit", "--allow-empty", "-m", "Initial commit"])
+        return True
 
     def status_short(self) -> str:
         return self._run(["git", "status", "--short"]).stdout
