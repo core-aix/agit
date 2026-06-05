@@ -2048,8 +2048,14 @@ class ProxyRunner:
                     exit_code = os.waitstatus_to_exitcode(status) if hasattr(os, "waitstatus_to_exitcode") else 0
                     sample = self.last_child_output_sample[-512:].decode(errors="replace").replace("\x1b", "\\x1b")
                     self._debug(f"child exited pid={self.child_pid} status={status} exit_code={exit_code} last_output={sample!r}")
-                    if len(self.sessions) <= 1:
-                        self._finalize_on_backend_exit()
+                    # Same handling as the master_fd-EOF path: switch away (multi
+                    # session) or relaunch+resume (single) so Claude exiting its own
+                    # picker on Esc doesn't take aGiT down. These two detectors race;
+                    # whichever sees the exit first must relaunch.
+                    if self._handle_active_session_exit():
+                        continue
+                    if self._relaunch_backend_or_exit():
+                        continue
                     return exit_code
         return 0
 
