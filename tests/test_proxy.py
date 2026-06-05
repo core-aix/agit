@@ -650,18 +650,18 @@ def test_wheel_forwarded_when_backend_manages_mouse():
     assert runner.scroll_back == 0
 
 
-def test_read_only_observer_skips_auto_commit():
-    runner = ProxyRunner.__new__(ProxyRunner)
-    runner.tracking_enabled = False
-    # Should return immediately without touching repo/state/watcher attributes.
-    assert runner._maybe_agent_commit() is None
+def test_proxy_refuses_second_instance(monkeypatch, capsys):
+    import sys
 
-
-def test_read_only_observer_skips_pre_agent_commit():
     runner = ProxyRunner.__new__(ProxyRunner)
-    runner.tracking_enabled = False
-    # Returns True (forward the prompt) without inspecting the repo.
-    assert runner._pre_agent_commit_if_needed("do it") is True
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True, raising=False)
+    runner._ensure_backend_available = lambda: True
+    # A live aGiT already holds the lock: acquire fails.
+    runner.management_lock = type("L", (), {"acquire": lambda self: False})()
+
+    assert runner.run() == 1
+    assert "already running" in capsys.readouterr().out
 
 
 def _mux_runner():
@@ -673,7 +673,6 @@ def _mux_runner():
     runner.color_mode = "truecolor"
     runner.host_fg_value = runner.host_bg_value = runner.host_da = None
     runner.host_palette = {}
-    runner.tracking_enabled = True
     runner._render = lambda: None
     runner._resize_child = lambda: None
     runner._enable_host_mouse = lambda: None
@@ -786,7 +785,6 @@ def test_status_line_shows_base_branch(tmp_path):
     runner.backend = type("B", (), {"name": "claude"})()
     runner._base_branch = "main"
     runner.worktree = object()
-    runner.tracking_enabled = True
     runner.scroll_back = 0
     runner.cols = 120
 
@@ -860,7 +858,6 @@ def test_new_session_not_applied_without_flag(tmp_path):
 
 def test_finalize_pending_work_commits_non_interactively():
     runner = ProxyRunner.__new__(ProxyRunner)
-    runner.tracking_enabled = True
     runner.agent_parse_thread = None
     runner.sessions = []
     runner.active_index = 0
@@ -878,24 +875,8 @@ def test_finalize_pending_work_commits_non_interactively():
     assert all(call.get("prompt_untracked") is False for call in calls)
 
 
-def test_finalize_pending_work_skipped_for_read_only_observer():
-    runner = ProxyRunner.__new__(ProxyRunner)
-    runner.tracking_enabled = False
-    called = []
-    runner._finish_agent_parse_if_ready = lambda **k: called.append(k)
-    runner._finalize_pending_work()
-    assert called == []
-
-
-def test_confirm_exit_read_only_exits_without_prompt():
-    runner = ProxyRunner.__new__(ProxyRunner)
-    runner.tracking_enabled = False
-    assert runner._confirm_exit() is True
-
-
 def test_confirm_exit_prompts_when_managing(monkeypatch):
     runner = ProxyRunner.__new__(ProxyRunner)
-    runner.tracking_enabled = True
     monkeypatch.setattr(runner, "_select_popup", lambda *a, **k: "Yes, exit")
     assert runner._confirm_exit() is True
     monkeypatch.setattr(runner, "_select_popup", lambda *a, **k: "No, keep working")
@@ -1816,7 +1797,6 @@ def _drift_runner(recorded_cwd, worktree_path):
     import types
 
     runner = ProxyRunner.__new__(ProxyRunner)
-    runner.tracking_enabled = True
     runner.worktree = types.SimpleNamespace(name="session-1")
     runner.repo = types.SimpleNamespace(repo=worktree_path)
     runner.state = types.SimpleNamespace(backend_session_id="sess-1")
@@ -1863,7 +1843,6 @@ def test_confine_to_worktree_wraps_when_enabled(monkeypatch):
     monkeypatch.setattr(sandbox, "is_available", lambda: True)
     monkeypatch.delenv("AGIT_SANDBOX", raising=False)
     runner = ProxyRunner.__new__(ProxyRunner)
-    runner.tracking_enabled = True
     runner.worktree = types.SimpleNamespace(name="session-1")
     runner.global_config = types.SimpleNamespace(sandbox=True)
     runner.base_repo = types.SimpleNamespace(repo="/repo")
@@ -1880,8 +1859,7 @@ def test_confine_to_worktree_noop_without_worktree_or_when_disabled(monkeypatch)
 
     monkeypatch.setattr(sandbox, "is_available", lambda: True)
     runner = ProxyRunner.__new__(ProxyRunner)
-    runner.tracking_enabled = True
-    runner.worktree = None  # read-only / legacy: nothing to confine
+    runner.worktree = None  # no worktree (legacy): nothing to confine
     runner.global_config = types.SimpleNamespace(sandbox=True)
     assert runner._confine_to_worktree(["claude"]) == ["claude"]
 
@@ -1963,7 +1941,6 @@ def test_relaunch_backend_resets_loop_guard_after_quiet_period(monkeypatch):
 def test_finalize_on_backend_exit_finalizes_once_and_clears_pid():
     runner = ProxyRunner.__new__(ProxyRunner)
     runner.child_pid = 4321
-    runner.tracking_enabled = True
     calls = []
 
     def fake_finalize():  # mirror the real guard inside _finalize_pending_work

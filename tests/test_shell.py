@@ -1,6 +1,8 @@
 import subprocess
 
+import agit.shell as shell_mod
 from agit.git import GitRepo
+from agit.lock import RepoLock
 from agit.shell import AgitShell
 from agit.state import AgitState
 
@@ -24,3 +26,21 @@ def test_new_promptable_untracked_files_count_as_pre_agent_changes(tmp_path):
     shell = AgitShell(GitRepo.discover(tmp_path))
 
     assert shell.actions.has_pre_agent_user_changes() is True
+
+
+def test_second_instance_is_refused(tmp_path, monkeypatch, capsys):
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, stdout=subprocess.PIPE)
+    repo = GitRepo.discover(tmp_path)
+    shell = AgitShell(repo)
+    monkeypatch.setattr(shell_mod, "ensure_installed_backend", lambda *a, **k: shell.state.backend)
+    # Another live aGiT already holds this repo's management lock.
+    holder = RepoLock(repo.repo / ".agit" / "lock")
+    assert holder.acquire() is True
+    # The prompt loop must never start when the repo is already taken.
+    shell.prompt = type("P", (), {"prompt": lambda self: (_ for _ in ()).throw(AssertionError("should not prompt"))})()
+
+    shell.run()
+
+    out = capsys.readouterr().out
+    assert "already running" in out
+    holder.release()

@@ -276,7 +276,6 @@ def test_reconcile_integrates_and_deletes_stale_worktrees(tmp_path):
     runner.base_repo = main
     runner.repo = GitRepo.discover(active.path)  # the active session's worktree
     runner._base_branch = base
-    runner.tracking_enabled = True
     runner.worktree = active
     runner.name = "session-1"
     runner.worktree_manager = wm
@@ -312,7 +311,6 @@ def test_reconcile_flags_conflicting_stale_worktree(tmp_path):
     runner.base_repo = main
     runner.repo = GitRepo.discover(active.path)
     runner._base_branch = base
-    runner.tracking_enabled = True
     runner.worktree = active
     runner.name = "session-1"
     runner.worktree_manager = wm

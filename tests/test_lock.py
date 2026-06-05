@@ -28,6 +28,18 @@ def test_second_holder_is_blocked_by_live_owner(tmp_path):
     assert second.acquire() is True
 
 
+def test_different_repos_get_independent_locks(tmp_path):
+    # The lock is per-repo (its path lives under the repo's .agit/), so aGiT on
+    # one repo never blocks aGiT on another — only a second instance on the SAME
+    # repo is refused.
+    repo_a = RepoLock(tmp_path / "a" / ".agit" / "lock")
+    repo_b = RepoLock(tmp_path / "b" / ".agit" / "lock")
+    assert repo_a.acquire() is True
+    assert repo_b.acquire() is True  # a different repo is unaffected
+    repo_a.release()
+    repo_b.release()
+
+
 def test_stale_lock_from_dead_pid_is_reclaimed(tmp_path):
     path = tmp_path / "lock"
     # Write a lock owned by a almost-certainly-dead pid.

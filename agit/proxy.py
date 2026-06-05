@@ -31,7 +31,7 @@ from agit.backends.proxy_agents import available_backends, make_proxy_agent
 from agit.commit_message import build_agent_commit_message, build_agent_merge_message, build_user_commit_message
 from agit.git import GitRepo
 from agit.global_config import GlobalConfig
-from agit.lock import RepoLock
+from agit.lock import ALREADY_RUNNING_MESSAGE, RepoLock
 from agit import sandbox
 from agit.session import turns_after
 from agit.session_runtime import SESSION_FIELDS, capture_session, default_session_fields, restore_session
@@ -342,9 +342,8 @@ class ProxyRunner:
         self.host_da: bytes | None = None
         self.color_mode = detect_color_mode()
         # Single-writer management: only one aGiT may auto-commit/merge in a
-        # working tree. A second instance runs read-only (tracking disabled).
+        # working tree. A second instance is refused at startup (see `run`).
         self.management_lock = RepoLock(repo.repo / ".agit" / "lock")
-        self.tracking_enabled = True
         # Multiplexer: the active session's live state is on `self`; other
         # sessions are kept as Session snapshots and swapped on to be serviced.
         # With a single session this stays empty/identity and the loop is
@@ -375,9 +374,11 @@ class ProxyRunner:
             raise RuntimeError("Proxy mode requires an interactive terminal. Use --mode json for non-TTY use.")
         if not self._ensure_backend_available():
             return 1
-        self.tracking_enabled = self.management_lock.acquire()
+        if not self.management_lock.acquire():
+            print(ALREADY_RUNNING_MESSAGE)
+            return 1
         self.state.save()
-        if self.tracking_enabled and self.actions.has_pre_agent_user_changes():
+        if self.actions.has_pre_agent_user_changes():
             print("User changes detected before the agent starts.")
             self.actions.create_user_commit()
         # Base-merge-only: run even the first session in a worktree so the base
@@ -409,13 +410,6 @@ class ProxyRunner:
             signal.signal(signal.SIGWINCH, lambda _signum, _frame: self._resize_child())
             signal.signal(signal.SIGTERM, self._handle_exit_signal)
             signal.signal(signal.SIGHUP, self._handle_exit_signal)
-            if not self.tracking_enabled:
-                self._set_message(
-                    "Another aGiT process is already running on this repo —\n"
-                    "this instance is read-only (no auto-commits).",
-                    seconds=6.0,
-                )
-                self._render()
             self._setup_worktree_confinement_notice()
             return self._loop()
         finally:
@@ -473,7 +467,7 @@ class ProxyRunner:
         # sandbox), watch the base repo and warn if the agent writes into it, so
         # edits outside the worktree don't silently go untracked.
         self._monitor_base_edits = False
-        if not getattr(self, "tracking_enabled", True) or getattr(self, "worktree", None) is None:
+        if getattr(self, "worktree", None) is None:
             return
         if not (self.global_config.sandbox and sandbox.is_enabled()):
             return  # user disabled confinement
@@ -525,7 +519,7 @@ class ProxyRunner:
         # it from the cwd the backend records, and warn once with how to recover.
         if getattr(self, "_cwd_drift_checked", False):
             return
-        if getattr(self, "worktree", None) is None or not getattr(self, "tracking_enabled", True):
+        if getattr(self, "worktree", None) is None:
             return
         now = time.monotonic()
         if now - getattr(self, "_cwd_check_at", 0.0) < 3.0:
@@ -561,10 +555,10 @@ class ProxyRunner:
 
     def _confine_to_worktree(self, command: list[str]) -> list[str]:
         # Wrap the backend so it can only write inside its session worktree (plus
-        # the repo's .git), not the base repo it lives in. A no-op for read-only
-        # sessions, when there is no worktree, or when confinement is disabled /
-        # unavailable (the loop then warns if the base working tree is touched).
-        if not getattr(self, "tracking_enabled", True) or getattr(self, "worktree", None) is None:
+        # the repo's .git), not the base repo it lives in. A no-op when there is
+        # no worktree, or when confinement is disabled / unavailable (the loop
+        # then warns if the base working tree is touched).
+        if getattr(self, "worktree", None) is None:
             return command
         if not self.global_config.sandbox:
             return command
@@ -645,9 +639,9 @@ class ProxyRunner:
             self._render()
             return
         self.global_config.default_backend = name
-        if not self.tracking_enabled or self.worktree is None:
-            # Read-only / non-worktree session has nothing to multiplex; restart
-            # the single backend in place (legacy behaviour).
+        if self.worktree is None:
+            # A non-worktree session has nothing to multiplex; restart the single
+            # backend in place (legacy behaviour).
             self.state.remember_backend_session()
             self.state.backend = name
             self.backend = make_proxy_agent(name)
@@ -771,8 +765,6 @@ class ProxyRunner:
         # ever advanced by integration. Reuses an existing worktree (resuming a
         # previous run) or creates a fresh one; falls back to running on the base
         # tree (legacy behaviour, no auto-integration) if neither is possible.
-        if not self.tracking_enabled:
-            return
         root_state = self.state  # the durable repo-root "last session" record
         backend_name = root_state.backend
         prior_message_id = root_state.last_backend_message_id
@@ -903,7 +895,7 @@ class ProxyRunner:
         # session list, so nothing of value is lost. Worktrees whose work cannot
         # be merged cleanly (a conflict, or uncommitted changes) are kept and
         # flagged for the user to resolve.
-        if not self.tracking_enabled or self.worktree is None:
+        if self.worktree is None:
             return
         active_pending = False
         try:
@@ -1640,10 +1632,6 @@ class ProxyRunner:
             return True  # err toward offering the resolve flow
 
     def _prompt_new_session(self) -> None:
-        if not self.tracking_enabled:
-            self._set_message("Read-only: cannot create sessions.")
-            self._render()
-            return
         name = self._prompt_session_name("New Session", default=self._next_session_name())
         if name is None:
             self._set_message("Cancelled.")
@@ -1728,7 +1716,7 @@ class ProxyRunner:
         # lands in the base without waiting to be switched to. A background
         # session whose finished turn cannot fast-forward is brought to the
         # foreground and its resolve options box is surfaced (session + backend).
-        if not getattr(self, "tracking_enabled", True) or self.merge_ctx is not None:
+        if self.merge_ctx is not None:
             return
         now = time.monotonic()
         for index in range(len(self.sessions)):
@@ -2688,10 +2676,7 @@ class ProxyRunner:
         base = getattr(self, "_base_branch", None)
         if base and getattr(self, "worktree", None) is not None:
             session += f" → {base}"  # the branch this session's work merges into
-        if not getattr(self, "tracking_enabled", True):
-            left = f" aGiT READ-ONLY | {session} | {self.backend.name} "
-        else:
-            left = f" aGiT Ctrl-G | {session} | {self.backend.name} "
+        left = f" aGiT Ctrl-G | {session} | {self.backend.name} "
         if getattr(self, "scroll_back", 0) > 0:
             right = f" SCROLLBACK -{self.scroll_back} (scroll down to resume) "
         else:
@@ -2729,11 +2714,6 @@ class ProxyRunner:
             self._finalize_pending_work()
             self.running = False
             self._exit_child()
-            return
-
-        if name in {"git-stage", "git-user-commit", "git-base-branch", "session", "agent-backend"} and not getattr(self, "tracking_enabled", True):
-            self._set_message("Read-only: another aGiT process is managing this repo.")
-            self._render()
             return
 
         if name in {"git-stage", "git-user-commit"}:
@@ -2956,9 +2936,6 @@ class ProxyRunner:
         self.message_until = 0.0
 
     def _confirm_exit(self) -> bool:
-        # A read-only observer has nothing to lose, so it exits immediately.
-        if not getattr(self, "tracking_enabled", True):
-            return True
         choice = self._select_popup("Exit aGiT?", ["No, keep working", "Yes, exit"])
         return choice == "Yes, exit"
 
@@ -2980,8 +2957,6 @@ class ProxyRunner:
         # committed for *every* session before aGiT leaves — otherwise quitting
         # right after a turn drops a commit the idle/stable debounce had not yet
         # made. (Background sessions are committed via the context swap.)
-        if not getattr(self, "tracking_enabled", True):
-            return
         if getattr(self, "_finalized_on_exit", False):
             return  # already finalized (e.g. the backend exited and we ran this)
         self._finalized_on_exit = True
@@ -3129,8 +3104,6 @@ class ProxyRunner:
             return
 
     def _pre_agent_commit_if_needed(self, prompt_text: str = "") -> bool:
-        if not getattr(self, "tracking_enabled", True):
-            return True  # read-only: forward the prompt, never commit
         self._clear_agent_in_flight_if_idle()
         status = self.repo.status_short().strip()
         finished = self._finish_agent_parse_if_ready(quiet=True)
@@ -3342,8 +3315,6 @@ class ProxyRunner:
         return False
 
     def _maybe_agent_commit(self) -> None:
-        if not getattr(self, "tracking_enabled", True):
-            return  # read-only observer: never auto-commit
         now = time.monotonic()
         if self.file_change_event.is_set():
             self.file_change_event.clear()
