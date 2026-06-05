@@ -2231,65 +2231,87 @@ def _user_git_runner(tmp_path, answers):
     runner.global_config = type("GC", (), {"default_backend": "claude"})()
     runner._base_branch = repo.current_branch()
     runner._user_declined = []
+    runner.prompts = []  # (title, body) of each popup shown
     scripted = list(answers)
-    runner._prompt_popup = lambda title, body: scripted.pop(0) if scripted else None
+
+    def prompt(title, body):
+        runner.prompts.append((title, body))
+        return scripted.pop(0) if scripted else None
+
+    runner._prompt_popup = prompt
     return runner, repo
 
 
-def test_git_unstaged_stages_and_commits_declined_base_files(tmp_path):
-    runner, repo = _user_git_runner(tmp_path, answers=["y", "add local config"])
-    (tmp_path / "local.txt").write_text("x\n", encoding="utf-8")
+def test_stage_files_groups_new_and_declined_and_stages_selection(tmp_path):
+    runner, repo = _user_git_runner(tmp_path, answers=["1", "add new"])
+    (tmp_path / "new.py").write_text("x\n", encoding="utf-8")
+    (tmp_path / "local.txt").write_text("y\n", encoding="utf-8")
     runner._user_state().add_declined(["local.txt"])  # recorded by the pre-agent flow
 
-    message = runner._stage_declined_files_popup()
+    message = runner._stage_files_popup()
 
+    body = runner.prompts[0][1]
+    assert "New files:" in body and "new.py" in body
+    assert "Intentionally unstaged:" in body and "local.txt" in body
+    # #1 is new.py (new files listed first); it is staged+committed, local.txt left.
     assert "Committed 1 file" in message
-    assert "local.txt" not in repo.untracked_files()          # now tracked
-    assert runner._user_state().declined_untracked() == []    # cleared from declined
+    assert "new.py" not in repo.untracked_files()
+    assert "local.txt" in repo.untracked_files()
 
 
-def test_git_unstaged_lists_without_staging_when_user_declines(tmp_path):
-    runner, repo = _user_git_runner(tmp_path, answers=["n"])
-    (tmp_path / "local.txt").write_text("x\n", encoding="utf-8")
+def test_stage_files_all_stages_every_candidate(tmp_path):
+    runner, repo = _user_git_runner(tmp_path, answers=["a", "add all"])
+    (tmp_path / "new.py").write_text("x\n", encoding="utf-8")
+    (tmp_path / "local.txt").write_text("y\n", encoding="utf-8")
     runner._user_state().add_declined(["local.txt"])
 
-    message = runner._stage_declined_files_popup()
+    message = runner._stage_files_popup()
 
-    assert "Intentionally unstaged: local.txt" in message
-    assert "local.txt" in repo.untracked_files()  # left untracked
+    assert "Committed 2 file" in message
+    assert repo.untracked_files() == []
+    assert runner._user_state().declined_untracked() == []  # declined cleared too
 
 
-def test_git_unstaged_reads_base_state_not_worktree_state(tmp_path):
-    # Regression: the user's decline is recorded in BASE state; the menu must read
-    # it there, not from the (empty) ephemeral worktree state.
-    runner, repo = _user_git_runner(tmp_path, answers=["n"])
-    (tmp_path / "local.txt").write_text("x\n", encoding="utf-8")
+def test_stage_files_reads_declined_from_base_not_worktree_state(tmp_path):
+    # Regression: declines are recorded in BASE state by the pre-agent prompt; the
+    # menu must surface them from there, not from the (empty) worktree state.
+    runner, repo = _user_git_runner(tmp_path, answers=[""])  # view, then cancel
+    (tmp_path / "local.txt").write_text("y\n", encoding="utf-8")
     runner._user_state().add_declined(["local.txt"])
     runner.state = AgitState(tmp_path / "worktree")  # worktree state: nothing declined
 
-    message = runner._stage_declined_files_popup()
+    message = runner._stage_files_popup()
 
-    assert "local.txt" in message
-
-
-def test_git_stage_commits_chosen_new_base_files(tmp_path):
-    runner, repo = _user_git_runner(tmp_path, answers=["y", "add new file"])
-    (tmp_path / "new.txt").write_text("hi\n", encoding="utf-8")
-
-    message = runner._stage_new_files_popup()
-
-    assert "Committed 1 file" in message
-    assert "new.txt" not in repo.untracked_files()
+    assert "local.txt" in runner.prompts[0][1]
+    assert message == "Nothing staged."
 
 
-def test_git_stage_decline_records_into_base_state(tmp_path):
-    runner, repo = _user_git_runner(tmp_path, answers=["n"])
-    (tmp_path / "new.txt").write_text("hi\n", encoding="utf-8")
+def test_stage_files_empty_when_nothing_to_stage(tmp_path):
+    runner, repo = _user_git_runner(tmp_path, answers=[])
+    assert runner._stage_files_popup() == "No files to stage."
+    assert runner.prompts == []  # nothing to ask about
 
-    message = runner._stage_new_files_popup()
 
-    assert "Left 1 new file(s) unstaged" in message
-    assert "new.txt" in runner._user_state().declined_untracked()
+def test_stage_files_invalid_selection_stages_nothing(tmp_path):
+    runner, repo = _user_git_runner(tmp_path, answers=["9"])  # out of range
+    (tmp_path / "new.py").write_text("x\n", encoding="utf-8")
+
+    message = runner._stage_files_popup()
+
+    assert "nothing staged" in message.lower()
+    assert "new.py" in repo.untracked_files()
+
+
+def test_git_status_returns_full_long_format(tmp_path):
+    from agit.git import GitRepo
+
+    repo = GitRepo.init(tmp_path)
+    (tmp_path / "new.py").write_text("x\n", encoding="utf-8")
+
+    output = repo.status()
+
+    assert "Untracked files" in output  # long format, not --short
+    assert "new.py" in output
 
 
 def test_status_line_unstaged_count_reflects_base_declined(tmp_path):

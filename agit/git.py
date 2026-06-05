@@ -69,6 +69,10 @@ class GitRepo:
     def status_short(self) -> str:
         return self._run(["git", "status", "--short"]).stdout
 
+    def status(self) -> str:
+        # Full (long-format) `git status`, for the user-facing status command.
+        return self._run(["git", "status"]).stdout
+
     def has_changes(self) -> bool:
         return bool(self.status_short().strip())
 

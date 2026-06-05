@@ -160,7 +160,7 @@ class ProxyInput:
     # Order matters (shown in the palette). Only "session" starts with "s" so
     # that pressing s+Enter jumps straight to the session picker. Git-specific
     # commands are grouped under a "git-" prefix.
-    COMMANDS = ["session", "agent-backend", "git-base-branch", "git-status", "git-stage", "git-unstaged", "git-user-commit", "exit"]
+    COMMANDS = ["session", "agent-backend", "git-base-branch", "git-status", "git-stage", "git-user-commit", "exit"]
 
     def __init__(self) -> None:
         self.capturing = False
@@ -2925,11 +2925,9 @@ class ProxyRunner:
             self._exit_child()
             return
 
-        if name in {"git-stage", "git-unstaged", "git-user-commit"}:
+        if name in {"git-stage", "git-user-commit"}:
             if name == "git-stage":
-                self._set_message(self._stage_new_files_popup())
-            elif name == "git-unstaged":
-                self._set_message(self._stage_declined_files_popup())
+                self._set_message(self._stage_files_popup())
             else:
                 created = self._create_user_commit_popup(repo=self.base_repo, state=self._user_state())
                 self._set_message("Created user commit." if created else "No staged user changes to commit.")
@@ -2938,7 +2936,7 @@ class ProxyRunner:
             return
 
         if name == "git-status":
-            self._set_message(self.base_repo.status_short() or "Working tree clean")
+            self._set_message(self.base_repo.status() or "Working tree clean")
         elif name == "agent-backend":
             backends = available_backends()
             selected = arg.strip() or self._select_popup("Backend Agent", backends)
@@ -3088,44 +3086,44 @@ class ProxyRunner:
             state.add_declined(candidates)
             return f"Left {len(candidates)} untracked file(s) unstaged."
 
-    def _stage_new_files_popup(self) -> str:
-        # `git-stage`: review the user's *new* (untracked, not-yet-declined) files
-        # in the base tree, and stage+commit the ones they want — bringing them
-        # into the repo so the agent's worktree (a checkout of base) can see them.
-        base, state = self.base_repo, self._user_state()
-        self._prune_declined_untracked(base, state)
-        declined = set(state.declined_untracked())
-        new_files = [path for path in base.untracked_files() if path not in declined]
-        if not new_files:
-            return "No new files to stage."
-        answer = self._prompt_popup(
-            "Stage New Files", "Stage these new files into git? [y/N]\n" + "\n".join(new_files)
-        )
-        if answer is None:
-            return "Cancelled."
-        if answer.strip().lower() not in {"y", "yes"}:
-            state.add_declined(new_files)
-            return f"Left {len(new_files)} new file(s) unstaged."
-        return self._commit_user_files(new_files, state)
-
-    def _stage_declined_files_popup(self) -> str:
-        # `git-unstaged`: list the files the user intentionally left out (the
-        # declined list, recorded in the base state by the pre-agent prompt) and
-        # let them change their mind — stage+commit any they now want tracked.
+    def _stage_files_popup(self) -> str:
+        # `git-stage`: one menu for the user's stageable base-tree files, in two
+        # groups — *new* files (untracked, not yet decided) and *intentionally
+        # unstaged* files (previously declined, e.g. at the pre-agent prompt). The
+        # user picks which to stage; chosen files are staged+committed so the
+        # agent's worktree (a checkout of base) can see them. Unpicked files are
+        # left as they are. Selection is per-file (numbers, or 'a' for all).
         base, state = self.base_repo, self._user_state()
         self._prune_declined_untracked(base, state)
         declined = state.declined_untracked()
-        if not declined:
-            return "No intentionally unstaged files."
-        answer = self._prompt_popup(
-            "Intentionally Unstaged",
-            "These files were left out of git. Stage them now? [y/N]\n" + "\n".join(declined),
-        )
+        new_files = [path for path in base.untracked_files() if path not in set(declined)]
+        if not new_files and not declined:
+            return "No files to stage."
+        ordered: list[str] = []
+        lines: list[str] = ["Select files to stage:", ""]
+        for header, group in (("New files:", new_files), ("Intentionally unstaged:", declined)):
+            if not group:
+                continue
+            lines.append(header)
+            for path in group:
+                ordered.append(path)
+                lines.append(f"  {len(ordered)}. {path}")
+        lines.append("")
+        lines.append("Enter numbers (e.g. 1 3), 'a' for all, or blank to cancel:")
+        answer = self._prompt_popup("Stage Files", "\n".join(lines))
         if answer is None:
             return "Cancelled."
-        if answer.strip().lower() not in {"y", "yes"}:
-            return "Intentionally unstaged: " + ", ".join(declined)
-        return self._commit_user_files(declined, state)
+        answer = answer.strip().lower()
+        if not answer:
+            return "Nothing staged."
+        if answer in {"a", "all"}:
+            selected = list(ordered)
+        else:
+            selected = [ordered[int(token) - 1] for token in answer.replace(",", " ").split()
+                        if token.isdigit() and 1 <= int(token) <= len(ordered)]
+        if not selected:
+            return "No valid selection; nothing staged."
+        return self._commit_user_files(selected, state)
 
     def _commit_user_files(self, paths: list[str], state: AgitState) -> str:
         # Stage the chosen base-tree files, drop them from the declined list, and
