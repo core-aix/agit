@@ -13,6 +13,12 @@ class SessionTurn:
     final_response: str
     tokens: TokenUsage
     model: str | None
+    # Whether the agent's response to this prompt has finished. False while the
+    # turn is still mid-flight (the backend's last message was a tool call, not a
+    # final answer), so aGiT can defer committing until the prompt is fully
+    # answered and never split one prompt across several commits. Defaults True so
+    # backends that don't report a finish reason keep committing on idle as before.
+    complete: bool = True
 
 
 @dataclass

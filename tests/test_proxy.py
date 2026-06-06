@@ -4,11 +4,13 @@ import time
 
 import pytest
 
+import types
+
 from agit.backends.base import TokenUsage
 from agit.opencode_session import SessionTurn
 from agit.backends.proxy_agents import make_proxy_agent
 from agit.proxy import ProxyInput, ProxyRunner, _escape_sequence_complete, _humanize_age, _short_session, detect_color_mode
-from agit.session import SessionRef
+from agit.session import ExportedSession, SessionRef
 from agit.state import AgitState
 
 
@@ -81,6 +83,7 @@ class FakeCommitRepo:
 
     def commit(self, message: str):
         self.message = message
+        return "abc1234"  # mirror GitRepo.commit returning the new short SHA
 
 
 def test_proxy_ctrl_g_enters_command_mode():
@@ -304,6 +307,93 @@ def test_proxy_agent_commit_preserves_previous_no_change_trace(tmp_path):
     assert message.count("## User\n\nexplain only") == 1
 
 
+def _parse_ready_runner(tmp_path, session, *, last_message_id=None):
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.state = AgitState(tmp_path)
+    runner.worktree = None
+    runner.agent_parse_thread = None
+    runner.backend = types.SimpleNamespace(name="claude")
+    runner._debug = lambda *a, **k: None
+    runner._note_backend_session_change = lambda sid: None
+    runner._mirror_session_to_base = lambda sid: None
+    runner._integrate_session_turn = lambda: None
+    runner.commits = []
+    runner._create_agent_commit_from_turns_popup = lambda **k: (runner.commits.append(k), True)[1]
+    runner.agent_parse_result = (session.session_id, session, last_message_id)
+    return runner
+
+
+def test_finish_agent_parse_defers_commit_while_turn_in_progress(tmp_path):
+    # The latest prompt is still being answered (last message was a tool call), so
+    # the idle/file-stable debounce must NOT commit — otherwise one prompt gets
+    # split into several commits (code now, tests later).
+    in_progress = ExportedSession(
+        session_id="ses-9",
+        model="claude-opus-4-8",
+        updated=None,
+        turns=[SessionTurn("u1", "a1", "fix it and add tests", "Let me add a sanitizer.", TokenUsage(), None, complete=False)],
+    )
+    runner = _parse_ready_runner(tmp_path, in_progress)
+
+    result = runner._finish_agent_parse_if_ready(quiet=True)
+
+    assert result is None  # deferred, not committed
+    assert runner.commits == []
+    # The conversation id is still tracked while we wait, so resume stays correct.
+    assert runner.state.backend_session_id == "ses-9"
+
+
+def test_finish_agent_parse_commits_once_turn_is_complete(tmp_path):
+    finished = ExportedSession(
+        session_id="ses-9",
+        model="claude-opus-4-8",
+        updated=None,
+        turns=[SessionTurn("u1", "a1", "fix it and add tests", "Done — code and tests are in.", TokenUsage(total=1, output=1), None, complete=True)],
+    )
+    runner = _parse_ready_runner(tmp_path, finished)
+
+    assert runner._finish_agent_parse_if_ready(quiet=True) is True
+    assert len(runner.commits) == 1
+
+
+def test_finish_agent_parse_forces_in_progress_commit_on_exit(tmp_path):
+    # On exit the worktree is torn down, so an unfinished turn must still be
+    # committed (require_complete=False) rather than lost.
+    in_progress = ExportedSession(
+        session_id="ses-9",
+        model="claude-opus-4-8",
+        updated=None,
+        turns=[SessionTurn("u1", "a1", "fix it and add tests", "Let me add a sanitizer.", TokenUsage(total=1, output=1), None, complete=False)],
+    )
+    runner = _parse_ready_runner(tmp_path, in_progress)
+
+    forced = runner._finish_agent_parse_if_ready(quiet=True, integrate=False, require_complete=False)
+
+    assert forced is True
+    assert len(runner.commits) == 1
+
+
+def test_agent_commit_popup_includes_commit_id(tmp_path):
+    # The auto-commit confirmation names the short SHA so the user can find the
+    # commit aGiT just made.
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.repo = FakeCommitRepo()
+    runner.state = AgitState(tmp_path)
+    runner.verbose = False
+    runner._review_untracked_popup = lambda include_declined: "No untracked files to review."
+
+    committed = runner._create_agent_commit_from_turns_popup(
+        turns=[SessionTurn("u1", "a1", "do the thing", "done", TokenUsage(total=1, output=1), None)],
+        backend="opencode",
+        backend_session_id="ses-1",
+        model="provider/model",
+        quiet=False,
+    )
+
+    assert committed is True
+    assert runner.message == "Created <agent> commit abc1234."
+
+
 def test_proxy_plain_row_handles_empty_pyte_cell_data():
     runner = ProxyRunner.__new__(ProxyRunner)
     runner.cols = 2
@@ -435,6 +525,84 @@ def test_proxy_render_row_emits_reverse_video():
     assert runner._render_row(0) == "a\x1b[7mb\x1b[0mc"
 
 
+def test_screen_erase_does_not_carry_glyph_attributes():
+    # A backend that clears the screen while underline is still active (Claude's
+    # session-choice picker) must not leave underlined blank cells behind — those
+    # render as stray horizontal lines that linger after the view is dismissed.
+    import pyte
+
+    from agit.proxy import _BackgroundColorEraseScreen
+
+    screen = _BackgroundColorEraseScreen(6, 3, history=10, ratio=0.5)
+    stream = pyte.ByteStream(screen)
+    # Underline on, draw text, then clear the whole display — all while the
+    # cursor still carries the underline + a real background colour.
+    stream.feed(b"\x1b[4m\x1b[44mhi\x1b[2J")
+
+    # The drawn cells (which carried underline) are erased to clean blanks that
+    # keep only the background colour, not the underline.
+    for x in (0, 1):
+        cell = screen.buffer[0][x]
+        assert cell.data == " "
+        assert cell.underscore is False  # glyph attribute dropped on erase
+        assert cell.bg == "blue"  # background-colour-erase preserved
+
+
+def test_screen_erase_in_line_does_not_carry_underline():
+    import pyte
+
+    from agit.proxy import _BackgroundColorEraseScreen
+
+    screen = _BackgroundColorEraseScreen(6, 2, history=10, ratio=0.5)
+    stream = pyte.ByteStream(screen)
+    # Underline on, then erase to end of line: the blanked cells must be clean.
+    stream.feed(b"\x1b[4mx\x1b[K")
+
+    assert screen.buffer[0][0].underscore is True  # the drawn char keeps it
+    for x in range(1, 6):
+        assert screen.buffer[0][x].underscore is False
+
+
+def test_feed_child_output_strips_xtmodkeys_mistaken_for_underline():
+    # Claude toggles the xterm modifyOtherKeys keyboard mode (CSI > 4 m) when it
+    # enters/leaves the session-choice picker. pyte mis-tokenises the >-private
+    # sequence as the SGR \x1b[4m (underline on), which then sticks to everything
+    # drawn afterwards — the stray horizontal lines. The private sequence must be
+    # stripped from what is fed to pyte so no underline leaks.
+    import pyte
+
+    from agit.proxy import _BackgroundColorEraseScreen
+
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.screen = _BackgroundColorEraseScreen(10, 2, history=10, ratio=0.5)
+    runner.stream = pyte.ByteStream(runner.screen)
+
+    runner._feed_child_output(b"\x1b[>4mhello")
+
+    row = runner.screen.buffer[0]
+    assert "".join((row[x].data or " ") for x in range(5)) == "hello"  # not "4mhel.."
+    for x in range(10):
+        assert row[x].underscore is False
+
+
+def test_feed_child_output_preserves_dec_private_modes_and_real_sgr():
+    # The strip must be surgical: real SGR (incl. genuine underline) and DEC
+    # private (?) sequences pass through untouched.
+    import pyte
+
+    from agit.proxy import _BackgroundColorEraseScreen
+
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.screen = _BackgroundColorEraseScreen(10, 2, history=10, ratio=0.5)
+    runner.stream = pyte.ByteStream(runner.screen)
+
+    runner._feed_child_output(b"\x1b[?25l\x1b[4mU\x1b[24mP")
+
+    assert runner.screen.buffer[0][0].underscore is True  # genuine underline kept
+    assert runner.screen.buffer[0][1].underscore is False
+    assert runner.screen.cursor.hidden is True  # ?25l honoured
+
+
 def test_drain_child_output_reads_all_available():
     runner = ProxyRunner.__new__(ProxyRunner)
     read_fd, write_fd = os.pipe()
@@ -533,6 +701,69 @@ def test_render_wraps_frame_in_synchronized_update(monkeypatch):
     assert out.count("\x1b[?2026h") == 1 and out.count("\x1b[?2026l") == 1
     # It is a full repaint: every visible row plus the status line is present.
     assert "r0" in out and "r1" in out and "r2" in out and "STATUS" in out
+
+
+def test_sticky_message_renders_after_timeout(monkeypatch):
+    runner = _paint_runner()
+    runner.cols = 60  # wide enough that the popup text isn't truncated
+    writes = []
+    monkeypatch.setattr(os, "write", lambda fd, data: writes.append(data) or len(data))
+
+    runner._set_message("Created <agent> commit.", sticky=True)
+    runner.message_until = time.monotonic() - 100  # the timeout passed long ago
+
+    runner._render()
+
+    # A sticky message stays up past its timeout (until the next keypress).
+    assert "Created <agent> commit." in writes[0].decode()
+
+
+def test_nonsticky_message_hidden_after_timeout(monkeypatch):
+    runner = _paint_runner()
+    runner.cols = 60
+    writes = []
+    monkeypatch.setattr(os, "write", lambda fd, data: writes.append(data) or len(data))
+
+    runner.message = "transient note"
+    runner.message_until = time.monotonic() - 100
+    runner._message_sticky = False
+
+    runner._render()
+
+    assert "transient note" not in writes[0].decode()
+
+
+def test_keypress_dismisses_sticky_message():
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner._set_message("Created <agent> commit.", sticky=True)
+    assert runner._message_sticky is True
+
+    assert runner._clear_sticky_message_on_input() is True
+    assert runner.message is None
+    assert runner._message_sticky is False
+    # A following keypress has nothing sticky to clear.
+    assert runner._clear_sticky_message_on_input() is False
+
+
+def test_keypress_leaves_nonsticky_message_intact():
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner._set_message("transient note")  # default: not sticky
+
+    assert runner._clear_sticky_message_on_input() is False
+    assert runner.message == "transient note"
+
+
+def test_set_message_requests_a_render():
+    # The render loop only paints when _render_pending is set (or on child
+    # output). A message set from the background idle loop — e.g. the auto-commit
+    # confirmation, when the agent is quiet — must therefore request a repaint, or
+    # the popup is never drawn.
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner._render_pending = False
+
+    runner._set_message("Created <agent> commit.", sticky=True)
+
+    assert runner._render_pending is True
 
 
 def test_track_sync_update_defers_then_releases_render():
@@ -1865,6 +2096,36 @@ def test_exit_removes_fully_merged_worktree():
     assert runner.removed == ["session-1"]  # normal cleanup of a merged session still happens
 
 
+def test_exit_persists_resume_pointer_even_when_worktree_kept():
+    # A primary session that exits with unintegrated work keeps its worktree, but
+    # its resume pointer (which adopts a backend-native session switch) must still
+    # be persisted. Gating that behind worktree removal caused the off-by-one:
+    # next start resumes a stale conversation, and only the start after that lands
+    # on the one the user switched to.
+    runner = _exit_removal_runner(log_range_result="deadbeef still ahead")
+    runner._primary_worktree_name = "session-1"
+    persisted = []
+    runner._persist_last_session_record = lambda: persisted.append(True)
+
+    runner._remove_worktree_on_exit()
+
+    assert runner.removed == []  # unintegrated → worktree still kept
+    assert persisted == [True]   # ...but the resume pointer was persisted anyway
+
+
+def test_exit_does_not_persist_resume_pointer_for_background_session():
+    # Only the primary session owns the durable resume pointer; a non-primary
+    # (background) session must not overwrite it on exit.
+    runner = _exit_removal_runner(log_range_result="deadbeef still ahead")
+    runner._primary_worktree_name = "session-2"  # this session ("session-1") is not primary
+    persisted = []
+    runner._persist_last_session_record = lambda: persisted.append(True)
+
+    runner._remove_worktree_on_exit()
+
+    assert persisted == []
+
+
 def test_sync_idle_worktrees_skipped_while_paused():
     runner = ProxyRunner.__new__(ProxyRunner)
     runner._integration_paused = True
@@ -2074,6 +2335,41 @@ def test_adopt_latest_backend_session_keeps_id_when_unchanged():
 
     assert runner.state.backend_session_id == "same"
     assert runner.state.last_backend_message_id == "m1"  # untouched
+
+
+def test_recover_nonempty_session_returns_latest_with_content(tmp_path):
+    import types
+
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.state = AgitState(tmp_path)
+    runner.state.backend_session_id = "empty-id"
+    runner.repo = types.SimpleNamespace(repo="/wt")
+    runner._debug = lambda *a, **k: None
+    runner._stage_backend_resume = lambda sid: None
+    real = ExportedSession("real-id", "claude-opus-4-8", None, [SessionTurn("u", "a", "p", "r", TokenUsage(), None)])
+    runner.backend = types.SimpleNamespace(
+        latest_session_id=lambda repo: "real-id",
+        export_session=lambda repo, sid: real if sid == "real-id" else ExportedSession(sid, None, None, []),
+    )
+
+    assert runner._recover_nonempty_session() == ("real-id", real)
+
+
+def test_recover_nonempty_session_none_when_latest_also_empty(tmp_path):
+    import types
+
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.state = AgitState(tmp_path)
+    runner.state.backend_session_id = "empty-id"
+    runner.repo = types.SimpleNamespace(repo="/wt")
+    runner._debug = lambda *a, **k: None
+    runner._stage_backend_resume = lambda sid: None
+    runner.backend = types.SimpleNamespace(
+        latest_session_id=lambda repo: "other-empty",
+        export_session=lambda repo, sid: ExportedSession(sid, None, None, []),
+    )
+
+    assert runner._recover_nonempty_session() is None
 
 
 def test_relaunch_backend_resumes_then_gives_up_on_crash_loop(monkeypatch):
