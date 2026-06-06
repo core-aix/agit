@@ -53,9 +53,11 @@ class AgitActions:
         if not self.repo.has_staged_changes():
             return False
 
-        latest_prompt = next((turn.user_prompt for turn in reversed(turns) if turn.user_prompt), f"{backend} changes")
+        # Subject lists every prompt that led to this commit, joined by " / ".
+        prompts = [turn.user_prompt for turn in turns if turn.user_prompt]
+        subject_text = " / ".join(prompts) if prompts else f"{backend} changes"
         message = build_agent_commit_message(
-            latest_prompt=latest_prompt,
+            latest_prompt=subject_text,
             trace=self.state.pending_trace(),
             backend=backend,
             backend_session_id=backend_session_id,

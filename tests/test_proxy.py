@@ -274,10 +274,35 @@ def test_proxy_agent_commit_preserves_incomplete_initial_user_turn(tmp_path):
 
     assert committed is True
     message = runner.repo.message
-    # The subject is the most recent prompt only; the full trace still keeps both.
-    assert message.startswith("<agent> also handle errors")
+    # The subject lists every prompt that led to the commit, joined by " / ".
+    assert message.startswith("<agent> fix it / also handle errors")
     assert message.index("## User\n\nfix it") < message.index("## User\n\nalso handle errors")
     assert message.index("## User\n\nalso handle errors") < message.index("## Agent\n\ndone")
+
+
+def test_agent_commit_subject_joins_all_prompts_with_slash(tmp_path):
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.repo = FakeCommitRepo()
+    runner.state = AgitState(tmp_path)
+    runner.verbose = False
+    runner._review_untracked_popup = lambda include_declined: "No untracked files to review."
+
+    committed = runner._create_agent_commit_from_turns_popup(
+        turns=[
+            SessionTurn("u1", "a1", "add the parser", "done one", TokenUsage(total=1, output=1), None),
+            SessionTurn("u2", "a2", "now add tests", "done two", TokenUsage(total=1, output=1), None),
+            SessionTurn("u3", "a3", "and fix the lint", "done three", TokenUsage(total=1, output=1), None),
+        ],
+        backend="claude",
+        backend_session_id="ses-1",
+        model="m",
+        quiet=True,
+    )
+
+    assert committed is True
+    subject = runner.repo.message.splitlines()[0]
+    # Every prompt that led to the commit, in order, joined by " / ".
+    assert subject == "<agent> add the parser / now add tests / and fix the lint"
 
 
 def test_proxy_agent_commit_preserves_previous_no_change_trace(tmp_path):

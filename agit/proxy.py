@@ -3281,13 +3281,15 @@ class ProxyRunner:
         if not self.repo.has_staged_changes():
             return False
 
-        # The subject reflects only the most recent prompt; the full interaction
-        # trace below still records every prompt in this commit. Joining them all
-        # here bloated the subject with stale prompts from earlier in the session.
-        latest_prompt = subject_prompts[-1] if subject_prompts else f"{backend} changes"
+        # The subject lists every user prompt that led to this commit, joined by
+        # " / " (a commit can cover several turns — e.g. a prompt queued mid-turn).
+        # subject_prompts holds only this commit's prompts, not the whole session,
+        # so it never accumulates stale earlier prompts; the builder truncates the
+        # joined text to GitHub's subject width and keeps the full text below it.
+        subject_text = " / ".join(subject_prompts) if subject_prompts else f"{backend} changes"
         self._last_agent_commit_id = self.repo.commit(
             build_agent_commit_message(
-                latest_prompt=latest_prompt,
+                latest_prompt=subject_text,
                 trace=self.state.pending_trace(),
                 backend=backend,
                 backend_session_id=backend_session_id,
