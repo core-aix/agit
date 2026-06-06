@@ -6,7 +6,10 @@ from textwrap import shorten, wrap
 from agit import __version__
 
 DEFAULT_SUBJECT = "No subject provided"
-MAX_SUBJECT_WIDTH = 50
+# GitHub truncates a commit's subject (its first line) at 72 characters in the
+# commit list, PR commits, blame, etc. — anything longer is ellipsized. Size the
+# whole subject line (prefix included) to that limit so it's never cut off.
+MAX_SUBJECT_WIDTH = 72
 MAX_BODY_WIDTH = 72
 AGENT_SUBJECT_PREFIX = "<agent> "
 SECRET_MASK = "[REDACTED]"

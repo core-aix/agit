@@ -187,7 +187,7 @@ def test_agent_commit_subject_is_capped_for_github():
     )
 
     subject = message.splitlines()[0]
-    assert len(subject) <= 50
+    assert len(subject) <= 72  # GitHub's subject-line truncation limit
     assert subject.startswith("<agent> ")
     assert subject.endswith("...")
     assert "# Full Subject\n" in message
@@ -198,7 +198,7 @@ def test_user_commit_subject_is_capped_for_github():
     message = build_user_commit_message(message="save " * 40, agit_session_id="agit-1")
 
     subject = message.splitlines()[0]
-    assert len(subject) <= 50
+    assert len(subject) <= 72  # GitHub's subject-line truncation limit
     assert subject.endswith("...")
     assert "# Full Subject\n" in message
 
