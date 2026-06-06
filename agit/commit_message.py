@@ -50,7 +50,7 @@ def build_agent_commit_message(
     subject_prompt, full_subject = _subject_parts(_mask_secrets(latest_prompt), width=MAX_SUBJECT_WIDTH - len(AGENT_SUBJECT_PREFIX))
     lines = [f"{AGENT_SUBJECT_PREFIX}{subject_prompt}", ""]
     if full_subject:
-        lines.extend(["# Full Subject", "", *_body_lines(full_subject), ""])
+        lines.extend([*_body_lines(full_subject), ""])
     lines.extend(["# Interaction Trace", ""])
     for item in _limit_trace_turns(trace, trace_turn_limit):
         role = item.get("role", "").strip().lower()
@@ -124,7 +124,7 @@ def build_user_commit_message(
         "",
     ]
     if full_subject:
-        lines.extend(["# Full Subject", "", *_body_lines(full_subject), ""])
+        lines.extend([*_body_lines(full_subject), ""])
     lines.extend(["# aGiT Metadata", "commit_type: user", "backend: agit", f"agit_session_id: {agit_session_id}", f"agit_version: {__version__}"])
     return "\n".join(lines).rstrip() + "\n"
 
