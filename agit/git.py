@@ -101,8 +101,9 @@ class GitRepo:
             return True
         raise GitError(process.stderr.strip() or "Unable to inspect changes")
 
-    def commit(self, message: str) -> None:
+    def commit(self, message: str) -> str:
         self._run(["git", "commit", "-F", "-"], input_text=message)
+        return self._run(["git", "rev-parse", "--short", "HEAD"]).stdout.strip()
 
     # --- branches / worktrees / merges (used by concurrent-session support) ---
 
