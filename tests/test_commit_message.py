@@ -191,11 +191,10 @@ def test_agent_commit_subject_is_capped_for_github():
     assert len(subject) <= 72  # GitHub's subject-line truncation limit
     assert subject.startswith("<agent> ")
     assert subject.endswith("...")
-    # The full (untruncated) text follows the subject line directly as the body —
-    # no separate "# Full Subject" header.
+    # The full (untruncated) text follows the subject line directly — no separate
+    # "# Full Subject" header, and no blank line between subject and continuation.
     assert "# Full Subject" not in message
-    assert lines[1] == ""
-    assert lines[2].startswith("please please")
+    assert lines[1].startswith("please please")
 
 
 def test_user_commit_subject_is_capped_for_github():
@@ -205,10 +204,9 @@ def test_user_commit_subject_is_capped_for_github():
     subject = lines[0]
     assert len(subject) <= 72  # GitHub's subject-line truncation limit
     assert subject.endswith("...")
-    # Full text follows the subject directly, with no "# Full Subject" header.
+    # Full text follows the subject directly — no header, no blank line between.
     assert "# Full Subject" not in message
-    assert lines[1] == ""
-    assert lines[2].startswith("save save")
+    assert lines[1].startswith("save save")
 
 
 def test_commit_message_body_lines_are_wrapped_to_72():

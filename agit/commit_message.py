@@ -48,9 +48,12 @@ def build_agent_commit_message(
     session_name: str | None = None,
 ) -> str:
     subject_prompt, full_subject = _subject_parts(_mask_secrets(latest_prompt), width=MAX_SUBJECT_WIDTH - len(AGENT_SUBJECT_PREFIX))
-    lines = [f"{AGENT_SUBJECT_PREFIX}{subject_prompt}", ""]
+    lines = [f"{AGENT_SUBJECT_PREFIX}{subject_prompt}"]
     if full_subject:
-        lines.extend([*_body_lines(full_subject), ""])
+        # The truncated subject flows straight into its full text with no blank
+        # line between them, so the extended subject reads as one continued line.
+        lines.extend(_body_lines(full_subject))
+    lines.append("")
     lines.extend(["# Interaction Trace", ""])
     for item in _limit_trace_turns(trace, trace_turn_limit):
         role = item.get("role", "").strip().lower()
@@ -119,12 +122,11 @@ def build_user_commit_message(
     if not user_message:
         raise ValueError("User commit message is required")
     subject, full_subject = _subject_parts(_mask_secrets(user_message), width=MAX_SUBJECT_WIDTH)
-    lines = [
-        subject,
-        "",
-    ]
+    lines = [subject]
     if full_subject:
-        lines.extend([*_body_lines(full_subject), ""])
+        # Extended subject continues directly under the subject line (no blank).
+        lines.extend(_body_lines(full_subject))
+    lines.append("")
     lines.extend(["# aGiT Metadata", "commit_type: user", "backend: agit", f"agit_session_id: {agit_session_id}", f"agit_version: {__version__}"])
     return "\n".join(lines).rstrip() + "\n"
 
