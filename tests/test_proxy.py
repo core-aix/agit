@@ -435,6 +435,44 @@ def test_proxy_render_row_emits_reverse_video():
     assert runner._render_row(0) == "a\x1b[7mb\x1b[0mc"
 
 
+def test_screen_erase_does_not_carry_glyph_attributes():
+    # A backend that clears the screen while underline is still active (Claude's
+    # session-choice picker) must not leave underlined blank cells behind — those
+    # render as stray horizontal lines that linger after the view is dismissed.
+    import pyte
+
+    from agit.proxy import _BackgroundColorEraseScreen
+
+    screen = _BackgroundColorEraseScreen(6, 3, history=10, ratio=0.5)
+    stream = pyte.ByteStream(screen)
+    # Underline on, draw text, then clear the whole display — all while the
+    # cursor still carries the underline + a real background colour.
+    stream.feed(b"\x1b[4m\x1b[44mhi\x1b[2J")
+
+    # The drawn cells (which carried underline) are erased to clean blanks that
+    # keep only the background colour, not the underline.
+    for x in (0, 1):
+        cell = screen.buffer[0][x]
+        assert cell.data == " "
+        assert cell.underscore is False  # glyph attribute dropped on erase
+        assert cell.bg == "blue"  # background-colour-erase preserved
+
+
+def test_screen_erase_in_line_does_not_carry_underline():
+    import pyte
+
+    from agit.proxy import _BackgroundColorEraseScreen
+
+    screen = _BackgroundColorEraseScreen(6, 2, history=10, ratio=0.5)
+    stream = pyte.ByteStream(screen)
+    # Underline on, then erase to end of line: the blanked cells must be clean.
+    stream.feed(b"\x1b[4mx\x1b[K")
+
+    assert screen.buffer[0][0].underscore is True  # the drawn char keeps it
+    for x in range(1, 6):
+        assert screen.buffer[0][x].underscore is False
+
+
 def test_drain_child_output_reads_all_available():
     runner = ProxyRunner.__new__(ProxyRunner)
     read_fd, write_fd = os.pipe()

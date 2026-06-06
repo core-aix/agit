@@ -129,6 +129,44 @@ def _humanize_age(updated: float) -> str:
     return f"{int(delta // 86400)}d ago"
 
 
+class _BackgroundColorEraseScreen(pyte.HistoryScreen):
+    # pyte erases cells using the cursor's *full* SGR attributes, so a backend
+    # that clears the screen (or a line) while underline — or any glyph
+    # attribute — is still active leaves the blanked cells carrying that
+    # attribute. The host terminal then renders those underlined blanks as stray
+    # horizontal lines that linger after the view is dismissed (seen on Claude's
+    # session-choice picker). Real terminals do background-colour-erase: erased
+    # cells keep only the background colour, not glyph attributes. Mirror that by
+    # blanking everything except the background on the cursor attrs we erase with.
+    def _erase_attrs(self):
+        return self.cursor.attrs._replace(
+            data=" ",
+            fg="default",
+            bold=False,
+            italics=False,
+            underscore=False,
+            strikethrough=False,
+            reverse=False,
+            blink=False,
+        )
+
+    def erase_in_line(self, how: int = 0, private: bool = False) -> None:
+        saved = self.cursor.attrs
+        self.cursor.attrs = self._erase_attrs()
+        try:
+            super().erase_in_line(how, private)
+        finally:
+            self.cursor.attrs = saved
+
+    def erase_in_display(self, how: int = 0, *args, **kwargs) -> None:
+        saved = self.cursor.attrs
+        self.cursor.attrs = self._erase_attrs()
+        try:
+            super().erase_in_display(how, *args, **kwargs)
+        finally:
+            self.cursor.attrs = saved
+
+
 class RepoChangeHandler(FileSystemEventHandler):
     IGNORED_PARTS = {".agit", ".git", ".pytest_cache", ".venv", "__pycache__"}
 
@@ -2425,7 +2463,7 @@ class ProxyRunner:
         self.rows, self.cols = self._terminal_size()
         # HistoryScreen keeps lines that scroll off the top so aGiT can offer
         # scrollback for backends that stream to the normal screen (Claude).
-        self.screen = pyte.HistoryScreen(self.cols, max(self.rows - 1, 1), history=5000, ratio=0.5)
+        self.screen = _BackgroundColorEraseScreen(self.cols, max(self.rows - 1, 1), history=5000, ratio=0.5)
         self.stream = pyte.ByteStream(self.screen)
         self.scroll_back = 0
         self._in_sync_update = False
