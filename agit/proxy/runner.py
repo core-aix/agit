@@ -247,8 +247,7 @@ class ProxyRunner:
         _integration: "IntegrationService | None" = None,
         _lock: "RepoLock | None" = None,
     ) -> None:
-        # The initial session object. Per-session attribute assignments below
-        # land on it via the compat property layer (see end of this module).
+        # Attach the initial session; per-session state lives on it.
         self.active = Session.bare()
         self.repo = repo
         self._force_new_session = new_session  # start a fresh conversation, do not resume
@@ -404,32 +403,17 @@ class ProxyRunner:
 
     # --- session pointer -------------------------------------------------
 
-    # NOTE (P3 review): inside temp-swap helpers (_with_session, _pump_background,
+    # NOTE: inside temp-swap helpers (_with_session, _pump_background,
     # _stop_session, _finalize_pending_work) `active` — and therefore
-    # `active_index` and every compat property — refers to the session being
-    # SERVICED, not the user-facing foreground one. Do not call UI or
-    # session-list helpers (_session_name, _session_status, _background_fds,
-    # popups) from code reachable inside those windows; they would classify the
-    # real foreground session as background. Pinned for P4-P6 implementers.
-    #
-    # The lazy Session.bare() below exists only for legacy ProxyRunner.__new__
-    # test construction and is NOT thread-safe (a read materializes state);
-    # production assigns `active` in __init__ before any thread starts. The
-    # whole layer is removed in P7.
+    # `active_index` — refers to the session being SERVICED, not the
+    # user-facing foreground one. Do not call UI or session-list helpers
+    # (_session_name, _session_status, _background_fds, popups) from code
+    # reachable inside those windows; they would classify the real foreground
+    # session as background.
     @property
     def active(self) -> Session:
-        """The Session whose state the runner currently operates on.
-
-        Runners built via ``ProxyRunner.__new__`` in tests never run
-        ``__init__``; mirror the old behaviour (where per-session attributes
-        simply lived on the instance) by lazily materialising a bare Session
-        to hold them on first access.
-        """
-        session = self.__dict__.get("_active_session")
-        if session is None:
-            session = Session.bare()
-            self.__dict__["_active_session"] = session
-        return session
+        """The Session whose state the runner currently operates on."""
+        return self.__dict__["_active_session"]
 
     @active.setter
     def active(self, session: Session) -> None:
@@ -437,20 +421,17 @@ class ProxyRunner:
 
     @property
     def active_index(self) -> int:
-        # Derived from the pointer: the active session's position in
-        # self.sessions. Falls back to the last explicitly-assigned value for
-        # __new__-built tests whose sessions list holds placeholder objects.
+        """Derived from the session pointer: position of the active Session in self.sessions."""
         sessions = self.__dict__.get("sessions")
         active = self.__dict__.get("_active_session")
         if sessions and active is not None:
             for index, session in enumerate(sessions):
                 if session is active:
                     return index
-        return self.__dict__.get("_active_index_compat", 0)
+        return 0
 
     @active_index.setter
     def active_index(self, index: int) -> None:
-        self.__dict__["_active_index_compat"] = index
         sessions = self.__dict__.get("sessions")
         if sessions and 0 <= index < len(sessions) and isinstance(sessions[index], Session):
             self.active = sessions[index]
@@ -550,6 +531,14 @@ class ProxyRunner:
             "_force_new_session": False,
             "_primary_worktree_name": None,
             "global_config": None,
+            # Lazily-set fields that getattr() guards in production methods:
+            "_monitor_base_edits": False,
+            "_base_check_at": 0.0,
+            "_cwd_drift_checked": False,
+            "_cwd_check_at": 0.0,
+            "_relaunch_times": [],
+            "_exiting": False,
+            "_finalized_on_exit": False,
         })
         # Apply timing class-constant defaults (so CHILD_IDLE_SECONDS etc. resolve).
         # These stay as class attributes; no instance-level override needed unless
@@ -709,7 +698,7 @@ class ProxyRunner:
         paused, new_check_at, message = self._integration.check_base_drift(
             base_branch=self._base_branch,
             integration_paused=self._integration_paused,
-            last_check_at=getattr(self, "_base_drift_check_at", 0.0),
+            last_check_at=self._base_drift_check_at,
             drift_check_seconds=self.BASE_DRIFT_CHECK_SECONDS,
         )
         self._base_drift_check_at = new_check_at
@@ -731,10 +720,10 @@ class ProxyRunner:
         # Fallback for un-sandboxed platforms: detect the agent editing the base
         # repo (its working tree gaining uncommitted changes beyond the startup
         # baseline) and warn, since those edits bypass aGiT's worktree tracking.
-        if not getattr(self, "_monitor_base_edits", False):
+        if not self._monitor_base_edits:
             return
         now = time.monotonic()
-        if now - getattr(self, "_base_check_at", 0.0) < self.BASE_EDIT_CHECK_SECONDS:
+        if now - self._base_check_at < self.BASE_EDIT_CHECK_SECONDS:
             return
         self._base_check_at = now
         try:
@@ -781,12 +770,12 @@ class ProxyRunner:
         # that happens the agent works in the wrong directory: its turns aren't
         # tracked here and writes outside the worktree are sandbox-blocked. Detect
         # it from the cwd the backend records, and warn once with how to recover.
-        if getattr(self, "_cwd_drift_checked", False):
+        if self._cwd_drift_checked:
             return
         if self.worktree is None:
             return
         now = time.monotonic()
-        if now - getattr(self, "_cwd_check_at", 0.0) < self.CWD_CHECK_SECONDS:
+        if now - self._cwd_check_at < self.CWD_CHECK_SECONDS:
             return
         self._cwd_check_at = now
         fn = getattr(self.backend, "recorded_working_dir", None)
@@ -826,7 +815,7 @@ class ProxyRunner:
             return command
         if not self.global_config.sandbox:
             return command
-        base = getattr(self, "base_repo", None)
+        base = self.base_repo
         if base is None:
             return command
         return sandbox.wrap_command(command, base=str(base.repo), worktree=str(self.repo.repo))
@@ -1016,7 +1005,7 @@ class ProxyRunner:
     def _apply_new_session_if_requested(self) -> None:
         # `agit --new-session`: start a fresh backend conversation (don't resume)
         # and mint a new aGiT session id.
-        if not getattr(self, "_force_new_session", False):
+        if not self._force_new_session:
             return
         self.state.backend_session_id = None
         self.state.last_backend_message_id = None
@@ -1039,7 +1028,7 @@ class ProxyRunner:
         # have one, otherwise the repo's most recent backend conversation (e.g. one
         # you ran with plain claude/opencode before aGiT). Resume is by id, which
         # the backend resolves regardless of which directory it runs in.
-        if getattr(self, "_force_new_session", False):
+        if self._force_new_session:
             resume_id = None
         else:
             resume_id = root_state.backend_session_id or self._repo_latest_session_id()
@@ -1268,7 +1257,7 @@ class ProxyRunner:
         # from another session), surface the resolve options box and let the
         # user choose how to handle it.
         result = self._integrate_turn_or_conflict()
-        if result == "conflict" and not getattr(self, "_exiting", False):
+        if result == "conflict" and not self._exiting:
             # On exit there is no UI to drive a resolution; the work stays on its
             # branch for the next startup / session menu to surface.
             self._prompt_resolve_conflict(self.repo.current_branch())
@@ -1279,7 +1268,7 @@ class ProxyRunner:
         # out and needs resolution), or "skip" (nothing to integrate).
         if self.worktree is None or self._base_branch is None or self.merge_ctx:
             return "skip"
-        if getattr(self, "_integration_paused", False):
+        if self._integration_paused:
             return "skip"  # base switched out-of-band; merging is paused
         turn_branch = self.repo.current_branch()
         if not turn_branch.startswith("agit/"):
@@ -1326,7 +1315,7 @@ class ProxyRunner:
         # committed-but-unintegrated work into the base, then detach and delete
         # the turn branch (an empty one is dropped too). Conflicts / dirty trees
         # are left intact for the next startup to surface.
-        if self.worktree is None or getattr(self, "_base_branch", None) is None:
+        if self.worktree is None or self._base_branch is None:
             return
         try:
             self._integration.integrate_session_on_exit(self.repo, self.merge_ctx)
@@ -1353,7 +1342,7 @@ class ProxyRunner:
         # that has its own committed work has the new base commits merged into its
         # turn branch (cleanly, or skipped on conflict) — see `_align_session_to_base`.
         # Only idle, clean worktrees are touched, so in-flight work is left alone.
-        if getattr(self, "_integration_paused", False):
+        if self._integration_paused:
             return  # base switched out-of-band; don't re-point worktrees meanwhile
         for index in range(len(self.sessions)):
             if index == self.active_index:
@@ -1468,7 +1457,7 @@ class ProxyRunner:
             and previous
             and new_session_id
             and new_session_id != previous
-            and not getattr(self, "_warned_backend_session", False)
+            and not self._warned_backend_session
         ):
             self._warned_backend_session = True
             self._set_message(
@@ -2202,7 +2191,7 @@ class ProxyRunner:
         # quitting with it. Guard against a crash loop: if the backend keeps dying
         # quickly, stop relaunching and exit normally.
         now = time.monotonic()
-        recent = [t for t in getattr(self, "_relaunch_times", []) if now - t < 12.0]
+        recent = [t for t in self._relaunch_times if now - t < 12.0]
         if len(recent) >= 3:
             self._debug("backend exited 3x within 12s; quitting instead of relaunching")
             self._finalize_on_backend_exit()
@@ -2494,13 +2483,13 @@ class ProxyRunner:
         # Diagnostic logs live in the *base* repo's .agit/ (one file per run), not
         # the session worktree's — the worktree is removed on exit, which would
         # both destroy the log and recreate a half-dir that breaks the next resume.
-        base = getattr(self, "base_repo", None)
+        base = self.base_repo
         root = (base.repo if base is not None else self.repo.repo) / ".agit"
-        run = getattr(self, "_diag_run", "") or time.strftime("%Y%m%d-%H%M%S")
+        run = self._diag_run or time.strftime("%Y%m%d-%H%M%S")
         return root / f"{kind}-{run}.log"
 
     def _debug(self, message: str) -> None:
-        if not getattr(self, "debug_proxy", False):
+        if not self.debug_proxy:
             return
         try:
             path = self._diag_path("proxy-debug")
@@ -2513,7 +2502,7 @@ class ProxyRunner:
     def _raw_capture(self, tag: str, data: bytes) -> None:
         # Append a raw I/O chunk (child output "<", user input ">", or "EOF") for
         # byte-exact replay of an interactive glitch.
-        if not getattr(self, "raw_capture", False):
+        if not self.raw_capture:
             return
         try:
             path = self._diag_path("proxy-raw")
@@ -2665,7 +2654,7 @@ class ProxyRunner:
             input_matches=self.input.matches() if capturing else [],
             input_selected=self.input.selected() if capturing else None,
             message=self.message,
-            message_sticky=getattr(self, "_message_sticky", False),
+            message_sticky=self._message_sticky,
             message_until=self.message_until,
         )
     def _append_command_palette(self, parts: list[str]) -> None:
@@ -2842,7 +2831,7 @@ class ProxyRunner:
     def _menu_label(self) -> str:
         # Human-readable name of the configured menu key, for the status line
         # and every message that points the user at the aGiT menu.
-        return getattr(getattr(self, "global_config", None), "menu_key_label", None) or "Ctrl-G"
+        return getattr(self.global_config, "menu_key_label", None) or "Ctrl-G"
 
     def _status_line(self) -> str:
         return ScreenRenderer.status_line(
@@ -2851,10 +2840,10 @@ class ProxyRunner:
             name=self.name,
             backend_name=self.backend.name,
             session_id=self.state.backend_session_id,
-            base_branch=getattr(self, "_base_branch", None),
+            base_branch=self._base_branch,
             worktree=self.worktree,
             scroll_back=self.scroll_back,
-            user_declined=getattr(self, "_user_declined", []),
+            user_declined=self._user_declined,
             short_session_fn=_short_session,
             menu_label=self._menu_label(),
         )
@@ -2932,7 +2921,7 @@ class ProxyRunner:
         stdin_fd = sys.stdin.fileno()
         dead: set[int] = set()
         while True:
-            background = self._background_fds() if getattr(self, "sessions", None) else {}
+            background = self._background_fds() if self.sessions else {}
             master = self.master_fd
             fds = [stdin_fd]
             if master is not None and master not in dead:
@@ -3145,7 +3134,7 @@ class ProxyRunner:
     def _agent_commit_message(self) -> str:
         # The auto-commit confirmation, including the short SHA of the commit aGiT
         # just made so the user can find it (e.g. `git show <id>`).
-        commit_id = getattr(self, "_last_agent_commit_id", None)
+        commit_id = self._last_agent_commit_id
         return f"Created <agent> commit {commit_id}." if commit_id else "Created <agent> commit."
 
     def _set_message(self, message: str, *, seconds: float = 4.0, sticky: bool = False) -> None:
@@ -3168,7 +3157,7 @@ class ProxyRunner:
     def _clear_sticky_message_on_input(self) -> bool:
         # The next keypress dismisses a sticky message. Returns True if one was
         # showing (so the caller can repaint to remove the popup).
-        if getattr(self, "_message_sticky", False):
+        if self._message_sticky:
             self._clear_message()
             return True
         return False
@@ -3192,7 +3181,7 @@ class ProxyRunner:
         # Double-Ctrl-C: a second Ctrl-C while the confirmation popup is open
         # sets _popup_exit_force and exits immediately — but still gracefully
         # (finalize included). Returns True when aGiT is exiting.
-        if getattr(self, "_popup_exit_pending", False):
+        if self._popup_exit_pending:
             # A second Ctrl-C, inside one of the exit-confirmation popups: take
             # it as an emphatic yes — skip the questions, keep the finalize.
             self._popup_exit_force = True
@@ -3253,7 +3242,7 @@ class ProxyRunner:
         # committed for *every* session before aGiT leaves — otherwise quitting
         # right after a turn drops a commit the idle/stable debounce had not yet
         # made. (Background sessions are committed via the context swap.)
-        if getattr(self, "_finalized_on_exit", False):
+        if self._finalized_on_exit:
             return  # already finalized (e.g. the backend exited and we ran this)
         self._finalized_on_exit = True
         self._exiting = True
@@ -3315,11 +3304,11 @@ class ProxyRunner:
         # loop can wait on it once it dies, instead of leaving a zombie for the
         # rest of the run. Host-level (shared across sessions), not swapped.
         if pid:
-            self._reap_pids = getattr(self, "_reap_pids", [])
+            self._reap_pids = self._reap_pids
             self._reap_pids.append(pid)
 
     def _reap_stopped_children(self) -> None:
-        pids = getattr(self, "_reap_pids", None)
+        pids = self._reap_pids
         if not pids:
             return
         remaining = []
@@ -3349,7 +3338,7 @@ class ProxyRunner:
         # conversation persists (keyed by the worktree path) and is recreated if
         # the session is resumed, so nothing of value is lost.
         info = self.worktree
-        if info is None or getattr(self, "_base_branch", None) is None:
+        if info is None or self._base_branch is None:
             return
         # Persist the primary session's resume pointer FIRST — before deciding
         # whether its worktree can be removed. _persist_last_session_record runs
@@ -3363,7 +3352,7 @@ class ProxyRunner:
         # Adopting writes both the worktree state (used when the worktree is kept)
         # and the repo-root state (used when it is removed), so the right
         # conversation resumes either way.
-        if info.name == getattr(self, "_primary_worktree_name", None):
+        if info.name == self._primary_worktree_name:
             self._persist_last_session_record()
         try:
             if self.merge_ctx or self.repo.merge_in_progress() or self.repo.has_changes():
@@ -3452,7 +3441,7 @@ class ProxyRunner:
         # never sees them. Detect tracked modifications, or new files the user
         # has not already declined, so they can be committed and synced into the
         # worktree before the agent runs.
-        base = getattr(self, "base_repo", None)
+        base = self.base_repo
         if base is None or self.worktree is None:
             return False
         try:
@@ -3473,7 +3462,7 @@ class ProxyRunner:
             self._base_edits_declined_status = None
             return
         status = self._base_edits_fingerprint()
-        if status is not None and status == getattr(self, "_base_edits_declined_status", None):
+        if status is not None and status == self._base_edits_declined_status:
             return  # already declined for this exact state; don't nag every prompt
         self._set_message("User changes detected in the base repo before agent runs.")
         self._render()
@@ -3562,7 +3551,7 @@ class ProxyRunner:
         # Drop cached entries no longer untracked in the base tree (committed,
         # staged, or deleted out-of-band). Cheap enough for the base-poll cadence.
         untracked = set(self.base_repo.untracked_files())
-        self._user_declined = [path for path in getattr(self, "_user_declined", []) if path in untracked]
+        self._user_declined = [path for path in self._user_declined if path in untracked]
 
     def _forwarded_submits(self, forwarded: list[bytes]) -> bool:
         # Not every Enter submits the prompt — several keybindings insert a
@@ -3626,7 +3615,7 @@ class ProxyRunner:
         # commit waits for it to land as a turn (see _finish_agent_parse_if_ready),
         # keeping the queued prompt in the same commit as the turn it follows.
         self._awaited_followups = CommitEngine(self.repo, self.state).await_followup(
-            prompt_text, getattr(self, "_awaited_followups", [])
+            prompt_text, self._awaited_followups
         )
 
     def _discover_spawned_session(self) -> str | None:
@@ -3665,7 +3654,7 @@ class ProxyRunner:
             quiet=quiet,
             prompt_untracked=prompt_untracked,
             require_complete=require_complete,
-            awaited_followups=getattr(self, "_awaited_followups", []),
+            awaited_followups=self._awaited_followups,
             agent_is_active_fn=self._agent_is_active,
             debug_fn=self._debug,
             note_session_change_fn=self._note_backend_session_change,
@@ -3768,11 +3757,11 @@ class ProxyRunner:
         # integrate them now.
         if self.worktree is None or self.merge_ctx:
             return
-        if self._base_branch is None or getattr(self, "_integration_paused", False):
+        if self._base_branch is None or self._integration_paused:
             return
         if self._agent_is_active() or now - self.last_child_output < self.CHILD_IDLE_SECONDS:
             return
-        if now - getattr(self, "_idle_integrate_at", 0.0) < self.BASE_POLL_SECONDS:
+        if now - self._idle_integrate_at < self.BASE_POLL_SECONDS:
             return
         self._idle_integrate_at = now
         try:
@@ -3818,16 +3807,18 @@ class ProxyRunner:
 # ---------------------------------------------------------------------------
 # P3 backward-compat layer: per-session state as runner attributes.
 #
-# Hundreds of runner methods (and the ~120 ProxyRunner.__new__-built test
-# sites) still read/write per-session state as plain attributes on the runner
-# (self.agent_in_flight, self.screen, self.master_fd, ...). Each Session field
-# is exposed as a property delegating to ``self.active``, so that code — and
-# the duck-typed ScreenRenderer/TerminalHost delegation from P1, which reads
-# display state via ``self.<attr>`` — keeps working unchanged while the state
-# itself lives on the Session object.
+# Production runner methods use ``self.repo``, ``self.state``, ``self.backend``
+# etc. throughout. These are Session-level fields that live on ``self.active``;
+# the property layer delegates every Session.FIELDS name to the active session
+# so that context-switching helpers like ``_with_session`` work correctly.
 #
-# P7 removes these properties and moves call sites to ``runner.active.<field>``.
+# The ``ProxyRunner.__new__`` test idiom has been replaced by
+# ``ProxyRunner.for_testing()`` (Stage 1–3); Session.bare() lazy materialisation
+# in the ``active`` getter and the ``_active_index_compat`` fallback have been
+# removed (Stage 4). The delegation properties themselves remain because
+# all production call sites still use the short forms.
 # ---------------------------------------------------------------------------
+
 
 def _delegate_to_active_session(field: str) -> property:
     def getter(self):
@@ -3839,7 +3830,7 @@ def _delegate_to_active_session(field: str) -> property:
     return property(
         getter,
         setter,
-        doc=f"Per-session state: delegates to ``self.active.{field}`` (P3 compat; removed in P7).",
+        doc=f"Per-session state: delegates to ``self.active.{field}``.",
     )
 
 

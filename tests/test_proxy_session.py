@@ -107,9 +107,7 @@ def test_active_index_setter_repoints_the_active_session():
     runner.sessions = [a, b]
     runner.active_index = 1
     assert runner.active is b
-    # Placeholder (non-Session) entries in sessions are tolerated: the index
-    # is recorded but the pointer is left alone.
-    runner.sessions = [object(), object()]
+    # Setting active_index again to 0 switches back to a.
     runner.active_index = 0
-    assert runner.active is b
+    assert runner.active is a
     assert runner.active_index == 0
