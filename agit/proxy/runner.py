@@ -124,11 +124,14 @@ class ProxyInput:
     # commands are grouped under a "git-" prefix.
     COMMANDS = ["session", "agent-backend", "git-base-branch", "git-status", "git-stage", "git-unstaged", "git-user-commit", "exit"]
 
-    def __init__(self) -> None:
+    def __init__(self, menu_key: bytes = b"\x07") -> None:
         self.capturing = False
         self.buffer = bytearray()
         self.selected_index = 0
         self.escape_buffer: bytearray | None = None
+        # The control byte that opens the command menu (default Ctrl-G;
+        # configurable via "menu_key" in ~/.agit/config.json).
+        self.menu_key = menu_key
 
     def feed(self, data: bytes) -> tuple[list[bytes], bytes, str | None, bool]:
         forwarded: list[bytes] = []
@@ -189,7 +192,7 @@ class ProxyInput:
                     self.selected_index = 0
                 continue
 
-            if char == b"\x07":
+            if char == self.menu_key:
                 self.capturing = True
                 self.selected_index = 0
                 self.escape_buffer = None
@@ -256,7 +259,7 @@ class ProxyRunner:
         self.backend = make_proxy_agent(self.state.backend)
         self.actions = AgitActions(repo, self.state, verbose=verbose)
         self.verbose = verbose
-        self.input = ProxyInput()
+        self.input = ProxyInput(menu_key=self.global_config.menu_key_byte)
         self.child_pid: int | None = None
         self.master_fd: int | None = None
         self.last_poll = 0.0
@@ -343,7 +346,7 @@ class ProxyRunner:
         self.base_repo = repo
         # IntegrationService: encapsulates all branch/merge/integration policy.
         # base_branch is set at startup (run()) and updated by _perform_base_switch.
-        self._integration: IntegrationService = IntegrationService(repo, None)
+        self._integration: IntegrationService = IntegrationService(repo, None, menu_label=self._menu_label())
         self._base_branch: str | None = None  # integration target branch (set at startup)
         self._integration_paused = False  # set when the base repo is switched off _base_branch out-of-band
         self._base_drift_check_at = 0.0
@@ -453,7 +456,7 @@ class ProxyRunner:
         if svc is None:
             base_repo = self.__dict__.get("base_repo")
             base_branch = self.__dict__.get("_base_branch")
-            svc = IntegrationService(base_repo, base_branch)
+            svc = IntegrationService(base_repo, base_branch, menu_label=self._menu_label())
             self.__dict__["_integration_svc"] = svc
         return svc
 
@@ -691,7 +694,7 @@ class ProxyRunner:
             f"not this session's worktree:\n    {self.repo.repo}\n"
             "This is Claude's resume-cwd bug (#58591): turns made there are NOT committed "
             "by aGiT, and edits outside the worktree are blocked by the sandbox.\n"
-            "To recover: Ctrl-G → session → start a NEW session (it launches fresh in the "
+            f"To recover: {self._menu_label()} → session → start a NEW session (it launches fresh in the "
             "worktree) and re-send your request there; resuming this conversation will keep "
             "landing in the wrong directory. Any work already done in the other directory "
             "stays there — move it into the worktree by hand if you need it tracked.",
@@ -1116,7 +1119,7 @@ class ProxyRunner:
             notes.append(f"{len(flagged)} stale session(s) need attention: {', '.join(flagged)}")
         if notes:
             self._set_message(
-                "⚠ " + "; ".join(notes) + ".\nUse Ctrl-G → session (s) to handle them.",
+                "⚠ " + "; ".join(notes) + f".\nUse {self._menu_label()} → session (s) to handle them.",
                 seconds=12.0,
             )
 
@@ -1186,13 +1189,13 @@ class ProxyRunner:
             [
                 "Merge automatically (agent resolves conflicts)",
                 "Merge manually (you resolve here, then Complete merge)",
-                "Leave for later (resolve via Ctrl-G → session)",
+                f"Leave for later (resolve via {self._menu_label()} → session)",
             ],
         )
         if not choice or choice.startswith("Leave"):
             self._set_message(
                 f"'{self.name}' has unintegrated work that conflicts with '{self._base_branch}'. "
-                "Resolve it any time via Ctrl-G → session.",
+                f"Resolve it any time via {self._menu_label()} → session.",
                 seconds=8.0,
             )
             self._render()
@@ -1331,7 +1334,7 @@ class ProxyRunner:
         self.agent_in_flight = True
         self._set_message(
             f"Merge conflict in {', '.join(files) or 'this session'} — asking the agent to resolve it… "
-            "aGiT will commit the merge once the agent finishes (or use Ctrl-G → session → Complete merge).",
+            f"aGiT will commit the merge once the agent finishes (or use {self._menu_label()} → session → Complete merge).",
             seconds=12.0,
         )
         self._render()
@@ -1351,7 +1354,7 @@ class ProxyRunner:
             self._warned_backend_session = True
             self._set_message(
                 "Detected a new conversation started inside the backend. Its changes are tracked on "
-                f"this session's branch. To get a separate branch, start sessions with Ctrl-G → session → New.",
+                f"this session's branch. To get a separate branch, start sessions with {self._menu_label()} → session → New.",
                 seconds=12.0,
             )
 
@@ -1488,7 +1491,7 @@ class ProxyRunner:
             self._exiting = False
             self._set_message(
                 f"Cannot switch base: unresolved work in {', '.join(blocked)}. "
-                "Resolve it (Ctrl-G → session), then try again.",
+                f"Resolve it ({self._menu_label()} → session), then try again.",
                 seconds=14.0,
             )
             self._render()
@@ -2645,6 +2648,11 @@ class ProxyRunner:
     def parse_host_terminal_responses(self, data: bytes, *, debug_fn=None) -> None:
         TerminalHost.parse_host_terminal_responses(self, data, debug_fn=debug_fn or self._debug)
 
+    def _menu_label(self) -> str:
+        # Human-readable name of the configured menu key, for the status line
+        # and every message that points the user at the aGiT menu.
+        return getattr(getattr(self, "global_config", None), "menu_key_label", None) or "Ctrl-G"
+
     def _status_line(self) -> str:
         return ScreenRenderer.status_line(
             self,
@@ -2657,6 +2665,7 @@ class ProxyRunner:
             scroll_back=self.scroll_back,
             user_declined=getattr(self, "_user_declined", []),
             short_session_fn=_short_session,
+            menu_label=self._menu_label(),
         )
     def _render_status(self, text: str) -> None:
         prompt = text.replace("\r", "").replace("\n", "")

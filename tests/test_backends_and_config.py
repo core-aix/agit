@@ -195,3 +195,24 @@ def test_claude_backend_model_falls_back_to_total_volume():
     )
     _response, _session_id, model, _tokens = backend._parse_output(output)
     assert model == "claude-opus-4-8"
+
+
+def test_menu_key_defaults_and_validation(tmp_path):
+    from agit.global_config import GlobalConfig
+
+    config = GlobalConfig(tmp_path / "config.json")
+    assert config.menu_key == "ctrl-g"
+    assert config.menu_key_byte == b"\x07"
+    assert config.menu_key_label == "Ctrl-G"
+
+    # A configured key is normalized and converted to its control byte.
+    config.data["menu_key"] = "Ctrl+P"
+    assert config.menu_key == "ctrl-p"
+    assert config.menu_key_byte == b"\x10"
+    assert config.menu_key_label == "Ctrl-P"
+
+    # Conflicting or invalid values fall back to the default, so a config
+    # typo can never lock the user out of the menu.
+    for bad in ("ctrl-c", "ctrl-m", "ctrl-i", "ctrl-j", "ctrl-h", "shift-g", "g", 7, None):
+        config.data["menu_key"] = bad
+        assert config.menu_key == "ctrl-g"

@@ -2,10 +2,18 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
 DEFAULT_BACKEND = "opencode"
+
+# The key that opens aGiT's command menu in proxy mode. Configurable as
+# "menu_key" in config.json ("ctrl-<letter>"); a few control keys are excluded
+# because the terminal or aGiT already gives them a meaning: Ctrl-C (exit
+# flow), Ctrl-H (Backspace), Ctrl-I (Tab), Ctrl-J/Ctrl-M (Enter).
+DEFAULT_MENU_KEY = "ctrl-g"
+_MENU_KEY_RE = re.compile(r"^ctrl[-+]([a-bd-gk-ln-z])$")
 
 # Tunable timings (all in seconds) governing aGiT's polling / debounce behaviour.
 # Stored under the "timings" key in config.json; any subset may be overridden, and
@@ -80,6 +88,26 @@ class GlobalConfig:
     def sandbox(self, value: bool) -> None:
         self.data["sandbox"] = bool(value)
         self.save()
+
+    @property
+    def menu_key(self) -> str:
+        # Normalized "ctrl-<letter>" spec for the aGiT menu key. Invalid or
+        # conflicting values fall back to the default so a config typo can
+        # never lock the user out of the menu.
+        value = self.data.get("menu_key")
+        if isinstance(value, str):
+            match = _MENU_KEY_RE.match(value.strip().lower())
+            if match:
+                return f"ctrl-{match.group(1)}"
+        return DEFAULT_MENU_KEY
+
+    @property
+    def menu_key_byte(self) -> bytes:
+        return bytes([ord(self.menu_key[-1]) - 96])  # ctrl-a..ctrl-z → 0x01..0x1a
+
+    @property
+    def menu_key_label(self) -> str:
+        return f"Ctrl-{self.menu_key[-1].upper()}"
 
     @property
     def timings(self) -> dict[str, float]:

@@ -141,8 +141,9 @@ class IntegrationService:
     temp-swap windows.
     """
 
-    def __init__(self, base_repo: GitRepo, base_branch: str | None) -> None:
+    def __init__(self, base_repo: GitRepo, base_branch: str | None, *, menu_label: str = "Ctrl-G") -> None:
         self.base_repo = base_repo
+        self.menu_label = menu_label
         self.base_branch = base_branch  # mutable; updated by runner on base-switch
 
     # ------------------------------------------------------------------
@@ -404,7 +405,7 @@ class IntegrationService:
         if repo.has_conflict_markers() or repo.unmerged_paths():
             return False, (
                 "Conflict markers remain. Resolve them (or ask the agent again), "
-                "then Ctrl-G → session → Complete merge."
+                f"then {self.menu_label} → session → Complete merge."
             )
         repo.commit(
             build_agent_merge_message(
@@ -463,7 +464,7 @@ class IntegrationService:
             return "conflict_auto", ctx, None
         msg = (
             f"Conflicts in {', '.join(files) or 'this session'}. Resolve them here (edit the files or ask the agent), "
-            "then Ctrl-G → session → Complete merge."
+            f"then {self.menu_label} → session → Complete merge."
         )
         return "conflict_manual", ctx, msg
 

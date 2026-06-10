@@ -3850,3 +3850,15 @@ def test_duck_type_aliases_cover_extracted_classes():
             assert hasattr(ProxyRunner, name), (
                 f"ProxyRunner is missing alias {name!r}, self-called inside {cls.__name__}"
             )
+def test_configured_menu_key_opens_command_capture():
+    # menu_key in ~/.agit/config.json rebinds the aGiT menu (default Ctrl-G).
+    parser = ProxyInput(menu_key=b"\x10")  # ctrl-p
+
+    forwarded, _echo, command, _exit = parser.feed(b"\x10git-status\r")
+    assert forwarded == []
+    assert command == "git-status"
+
+    # The default key is now ordinary input and goes to the backend.
+    forwarded, _echo, command, _exit = parser.feed(b"\x07")
+    assert forwarded == [b"\x07"]
+    assert command is None

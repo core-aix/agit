@@ -22,7 +22,7 @@ Run in the current repository:
 agit
 ```
 
-By default, `agit` runs in proxy mode: it launches the real backend TUI (OpenCode or Claude) in a pseudo-terminal, renders it through an internal terminal screen, and reserves a bottom status line for aGiT. Press `Ctrl-G` to enter aGiT command mode.
+By default, `agit` runs in proxy mode: it launches the real backend TUI (OpenCode or Claude) in a pseudo-terminal, renders it through an internal terminal screen, and reserves a bottom status line for aGiT. Press `Ctrl-G` to enter aGiT command mode (configurable via `menu_key` in `~/.agit/config.json` — see Configuration).
 
 Run against another repository:
 
@@ -164,6 +164,7 @@ User-wide settings live in `~/.agit/config.json` (override the directory with `A
 ```json
 {
   "default_backend": "opencode",
+  "menu_key": "ctrl-g",
   "timings": {
     "base_poll_seconds": 3.0
   }
@@ -171,6 +172,8 @@ User-wide settings live in `~/.agit/config.json` (override the directory with `A
 ```
 
 `default_backend` (`opencode` or `claude`) is used for repositories that have no backend recorded yet. It is updated whenever you pass `--backend` or switch backends with `agent-backend`.
+
+`menu_key` sets the key that opens aGiT's command menu in proxy mode. The default is `ctrl-g`; any `ctrl-<letter>` works except keys the terminal or aGiT already uses (`ctrl-c` exit flow, `ctrl-h` Backspace, `ctrl-i` Tab, `ctrl-j`/`ctrl-m` Enter). An invalid value falls back to `ctrl-g`, so a typo can never lock you out of the menu. The status line and aGiT's messages show whichever key is configured.
 
 `timings` tunes aGiT's polling and debounce intervals (all in seconds). Specify only the keys you want to change; anything omitted — or set to a non-positive / non-numeric value — keeps its default:
 

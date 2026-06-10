@@ -453,12 +453,13 @@ class ScreenRenderer:
         scroll_back: int,
         user_declined: list,
         short_session_fn,
+            menu_label: str = "Ctrl-G",
     ) -> str:
         declined = len(user_declined)
         session = f"{name or 'session'}" + (f" [{short_session_fn(session_id)}]" if session_id else "")
         if base_branch and worktree is not None:
             session += f" → {base_branch}"  # the branch this session's work merges into
-        left = f" aGiT Ctrl-G | {session} | {backend_name} "
+        left = f" aGiT {menu_label} | {session} | {backend_name} "
         if scroll_back > 0:
             right = f" SCROLLBACK -{scroll_back} (scroll down to resume) "
         else:
