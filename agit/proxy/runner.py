@@ -232,7 +232,21 @@ class ProxyRunner:
     RENDER_MIN_INTERVAL = 0.033  # coalesce output-driven repaints to ~30fps
     SYNC_MAX_HOLD = 0.05  # cap how long a backend synchronized-update may defer a paint
 
-    def __init__(self, repo: GitRepo, *, verbose: bool = False, backend: str | None = None, new_session: bool = False) -> None:
+    def __init__(
+        self,
+        repo: GitRepo,
+        *,
+        verbose: bool = False,
+        backend: str | None = None,
+        new_session: bool = False,
+        # Optional injected collaborators (default to production construction).
+        # These keyword arguments are for testing and advanced use; the CLI call
+        # site passes only the first four parameters and is unaffected.
+        _global_config: "GlobalConfig | None" = None,
+        _state: "AgitState | None" = None,
+        _integration: "IntegrationService | None" = None,
+        _lock: "RepoLock | None" = None,
+    ) -> None:
         # The initial session object. Per-session attribute assignments below
         # land on it via the compat property layer (see end of this module).
         self.active = Session.bare()
@@ -241,9 +255,9 @@ class ProxyRunner:
         self.name = "main"  # session label (multiplexer assigns names to others)
         self._primary_worktree_name: str | None = None  # session kept across exits for auto-resume
         self.worktree = None  # set when this session runs in a git worktree
-        self.global_config = GlobalConfig()
+        self.global_config = _global_config if _global_config is not None else GlobalConfig()
         self._apply_timings(self.global_config.timings)
-        self.state = AgitState(repo.repo, default_backend=self.global_config.default_backend)
+        self.state = _state if _state is not None else AgitState(repo.repo, default_backend=self.global_config.default_backend)
         if backend and backend != self.state.backend:
             self.state.remember_backend_session()
             self.state.backend = backend
@@ -331,7 +345,7 @@ class ProxyRunner:
         self.color_mode = detect_color_mode()
         # Single-writer management: only one aGiT may auto-commit/merge in a
         # working tree. A second instance is refused at startup (see `run`).
-        self.management_lock = RepoLock(repo.repo / ".agit" / "lock")
+        self.management_lock = _lock if _lock is not None else RepoLock(repo.repo / ".agit" / "lock")
         # Multiplexer: every session (active included) is a Session object in
         # `self.sessions`; `self.active` points at the one being serviced and
         # switching sessions is a pointer assignment. With a single session
@@ -340,7 +354,10 @@ class ProxyRunner:
         self.base_repo = repo
         # IntegrationService: encapsulates all branch/merge/integration policy.
         # base_branch is set at startup (run()) and updated by _perform_base_switch.
-        self._integration: IntegrationService = IntegrationService(repo, None, menu_label=self._menu_label())
+        self._integration: IntegrationService = (
+            _integration if _integration is not None
+            else IntegrationService(repo, None, menu_label=self._menu_label())
+        )
         self._base_branch: str | None = None  # integration target branch (set at startup)
         self._integration_paused = False  # set when the base repo is switched off _base_branch out-of-band
         self._base_drift_check_at = 0.0
