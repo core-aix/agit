@@ -57,7 +57,7 @@ from agit.proxy.renderer import (
 from agit.proxy.terminal import TerminalHost
 # Modal state-machines (P6 Stage 2): PromptModal and SelectModal encode the
 # byte-handling logic for free-text and selection popups.
-from agit.proxy.modal import PromptModal, SelectModal
+from agit.proxy.modal import PromptModal, SelectModal, _escape_sequence_complete
 
 _SGR_MOUSE_RE = re.compile(rb"\x1b\[<\d+;\d+;\d+[Mm]")
 _SGR_MOUSE_EVENT_RE = re.compile(rb"\x1b\[<(\d+);(\d+);(\d+)([Mm])")
@@ -110,15 +110,6 @@ class RepoChangeHandler(FileSystemEventHandler):
             return
         self.changed.set()
 
-
-def _escape_sequence_complete(sequence: bytes) -> bool:
-    if sequence.startswith(b"\x1b[<"):
-        return sequence[-1:] in {b"M", b"m"}
-    if sequence.startswith(b"\x1b[M"):
-        return len(sequence) >= 6
-    if sequence.startswith(b"\x1b["):
-        return len(sequence) >= 3 and 0x40 <= sequence[-1] <= 0x7E
-    return len(sequence) >= 2
 
 
 class ProxyInput:
@@ -2203,7 +2194,7 @@ class ProxyRunner:
             # --- phase 1: select ------------------------------------------
             background, readable = self._reactor_select_phase()
             # --- phase 2: pty-output --------------------------------------
-            sentinel = self._reactor_pty_output_phase(background, readable)
+            sentinel = self._reactor_pty_output_phase(readable)
             if sentinel == "continue":
                 continue
             if sentinel == "break":
@@ -2243,7 +2234,7 @@ class ProxyRunner:
                 self._pump_background(background[fd])
         return background, readable
 
-    def _reactor_pty_output_phase(self, background: dict, readable: list) -> "str | None":
+    def _reactor_pty_output_phase(self, readable: list) -> "str | None":
         """Phase 2 — drain and process the active session's PTY output.
 
         Returns a loop-control sentinel or None to continue normally.

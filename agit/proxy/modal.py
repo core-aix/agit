@@ -15,19 +15,16 @@ Action tuples returned by ``feed()``:
                           (exit declined), re-feed subsequent bytes normally.
     ("redraw", None)    — state changed; caller should re-render and continue
 
-Both modals share one helper: ``_escape_sequence_complete`` from runner.py is
-re-exported here so unit tests do not need to import from runner.
+``_escape_sequence_complete`` lives HERE as the single source of truth;
+runner.py imports it from this module (modal.py must not import runner —
+runner imports the modal classes, so the dependency points this way).
 """
 
 from __future__ import annotations
 
 
 def _escape_sequence_complete(sequence: bytes) -> bool:
-    """Return True when *sequence* is a complete ANSI/VT escape sequence.
-
-    Mirrors the identically-named helper in runner.py; copied here so
-    modal unit tests can import only this module.
-    """
+    """Return True when *sequence* is a complete ANSI/VT escape sequence."""
     if sequence.startswith(b"\x1b[<"):
         return sequence[-1:] in {b"M", b"m"}
     if sequence.startswith(b"\x1b[M"):
@@ -60,9 +57,6 @@ class PromptModal:
         self.prompt = prompt
         self.value = default
         self._escape_buffer: bytearray | None = None
-        # Tracks whether the previous feed call ended mid-escape-sequence so
-        # the next call can complete it (rare: split read boundary).
-        self._pending_exit: bool = False
 
     def render_message(self) -> str:
         """Return the message string that should be shown in the popup area."""

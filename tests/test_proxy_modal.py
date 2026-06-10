@@ -170,41 +170,33 @@ def _modal_runner(monkeypatch, stdin_fd):
     return runner
 
 
-def test_run_modal_pty_drain_while_prompt_open(monkeypatch):
-    """A session PTY is drained while a PromptModal is open.
+def test_popup_read_input_pumps_background_sessions(monkeypatch):
+    """While a modal waits, BACKGROUND session PTYs are pumped too.
 
-    This validates the key property of Stage 2: the reactor iteration inside
-    _run_modal keeps draining PTY fds so a long-lived popup never back-pressures
-    a running backend and stalls it.
+    The #22 stall was worst for background sessions (nothing else drains
+    them); _popup_read_input must select on their fds and route them through
+    _pump_background, not just the active master_fd.
     """
     stdin_r, stdin_w = os.pipe()
-    child_r, child_w = os.pipe()
+    bg_r, bg_w = os.pipe()
     try:
         runner = _modal_runner(monkeypatch, stdin_r)
-        runner.master_fd = child_r
+        runner.master_fd = None  # no active PTY: only the background fd matters
 
-        fed = []
-        runner._feed_child_output = lambda output: fed.append(output)
+        bg_session = types.SimpleNamespace(master_fd=bg_r, name="bg")
+        runner._background_fds = lambda: {bg_r: bg_session}
+        runner.sessions = [bg_session]
+        pumped = []
+        runner._pump_background = lambda session: pumped.append(session.name)
 
-        # Backend streams while the modal waits for user input.
-        os.write(child_w, b"backend output while modal open")
-        # User types "hi" and confirms.
-        os.write(stdin_w, b"h")
+        os.write(bg_w, b"background backend streams during the modal")
+        os.write(stdin_w, b"x")  # the keypress that ends the read
 
-        # We need a second stdin write to confirm; but _popup_read_input returns
-        # one read at a time.  Drive the modal manually via a patched _popup_read_input.
-        reads = iter([b"h", b"i", b"\r"])
-        runner._popup_read_input = lambda: next(reads)
-
-        modal = PromptModal("Title", "Prompt:")
-        # The first call to _run_modal will render, then call _popup_read_input.
-        # We replace _popup_read_input above; the PTY drain happens inside
-        # _popup_read_input (which the real implementation selects on).
-        # For this test we just verify the _run_modal orchestration is correct.
-        result = runner._run_modal(modal)
-        assert result == "hi"
+        data = runner._popup_read_input()
+        assert data == b"x"
+        assert pumped == ["bg"]
     finally:
-        for fd in (stdin_r, stdin_w, child_r, child_w):
+        for fd in (stdin_r, stdin_w, bg_r, bg_w):
             try:
                 os.close(fd)
             except OSError:
@@ -379,8 +371,8 @@ def test_exit_byte_in_modal_reaches_finalize_pending_work():
     result = runner._run_modal(PromptModal("Stage", "Some prompt:"))
 
     assert result is None
-    assert "finalize" in events, "finalize must be called on confirmed exit"
-    assert "exit" in events, "exit must be called on confirmed exit"
+    # Order matters: pending work is finalized BEFORE the child is torn down.
+    assert events == ["finalize", "exit"]
 
 
 def test_exit_byte_in_modal_decline_continues_modal():
@@ -408,3 +400,28 @@ def test_exit_byte_in_modal_decline_continues_modal():
     result = runner._run_modal(PromptModal("Stage", "Enter:"))
     assert result == "ok"
     assert finalized == [], "finalize must NOT be called when exit is declined"
+
+
+def test_select_modal_escape_sequence_split_across_reads():
+    """An arrow key split across read boundaries must still navigate, and the
+    cross-feed escape buffer must not be confused with a lone-Esc cancel."""
+    modal = SelectModal("Pick", ["a", "b", "c"])
+    # b"\x1b[" arrives alone: incomplete sequence, no action yet.
+    action, value = modal.feed(b"\x1b[")
+    assert action in ("redraw", "continue", None) or action == "redraw"
+    assert modal.selected == 0 or modal.selected == 0  # nothing moved yet
+    # The tail b"B" completes Down: selection advances, no cancel.
+    modal.feed(b"B")
+    assert modal.selected == 1
+    # Enter confirms the option the split sequence selected.
+    action, value = modal.feed(b"\r")
+    assert (action, value) == ("done", "b")
+
+
+def test_prompt_modal_split_escape_not_treated_as_text():
+    modal = PromptModal("T", "P:", default="")
+    modal.feed(b"\x1b[")
+    modal.feed(b"C")  # completes Right-arrow: consumed silently, not text
+    modal.feed(b"h")
+    action, value = modal.feed(b"\r")
+    assert (action, value) == ("done", "h")
