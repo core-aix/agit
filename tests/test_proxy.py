@@ -332,7 +332,7 @@ def test_proxy_agent_commit_preserves_previous_no_change_trace(tmp_path):
 
 
 def _parse_ready_runner(tmp_path, session, *, last_message_id=None):
-    runner = make_runner()  # unused - replaced below
+    runner = make_runner()
     runner.state = AgitState(tmp_path)
     runner.worktree = None
     runner.agent_parse_thread = None
@@ -1241,7 +1241,6 @@ def test_new_session_not_applied_without_flag(tmp_path):
 def test_finalize_pending_work_commits_non_interactively():
     runner = make_runner(
         agent_parse_thread=None,
-        active_index=0,
     )
     runner.sessions = []
     runner._set_message = lambda *a, **k: None
@@ -2148,7 +2147,6 @@ def _resume_runner():
 
     runner = make_runner(
         name="session-1",
-        active_index=0,
     )
     s0 = types.SimpleNamespace(name="session-1", state=types.SimpleNamespace(backend_session_id="live-1"))
     runner.sessions = [s0]
@@ -2330,8 +2328,8 @@ def test_exit_does_not_persist_resume_pointer_for_background_session():
     assert persisted == []
 
 
-def _bg_confirm_runner(statuses, active_index=0):
-    runner = make_runner(active_index=active_index)
+def _bg_confirm_runner(statuses):
+    runner = make_runner()
     runner.sessions = [object()] * len(statuses)
     runner._session_status = lambda i: statuses[i]
     runner._session_name = lambda i: f"session-{i}"
@@ -2368,7 +2366,6 @@ def test_confirm_terminate_background_sessions_prompts_and_names_them():
 def test_sync_idle_worktrees_skipped_while_paused():
     runner = make_runner(
         _integration_paused=True,
-        active_index=0,
     )
     runner.sessions = ["would-explode-if-iterated"]  # not a real session; must not be touched
     runner._sync_idle_worktrees_to_base()  # returns early; no AttributeError
@@ -2731,7 +2728,6 @@ def test_sync_idle_worktrees_aligns_idle_skips_in_flight():
     import types
 
     runner = make_runner(
-        active_index=0,
         repo="repoA",
         agent_in_flight=False,
     )
@@ -2889,7 +2885,6 @@ def _base_edit_runner(tmp_path, answers):
         _base_advanced=False,
         _base_edits_declined_status=None,
         _integration_paused=False,
-        active_index=0,
         agent_in_flight=False,
         agent_parse_thread=None,
         state=AgitState(wt_path),
@@ -3934,3 +3929,28 @@ def test_configured_menu_key_opens_command_capture():
     forwarded, _echo, command, _exit = parser.feed(b"\x07")
     assert forwarded == [b"\x07"]
     assert command is None
+
+def test_real_init_defines_all_lifecycle_flags(tmp_path):
+    # P7 removed the getattr() guards on these flags; for_testing() seeds them
+    # too, which would mask a missing __init__ initialization from the whole
+    # suite. Build a runner through the REAL __init__ (with injected stubs) and
+    # require every flag to exist, so a future sweep cannot ship a runner that
+    # crashes on its first reactor tick while the tests stay green.
+    import subprocess as sp
+
+    sp.run(["git", "init", "-q", str(tmp_path)], check=True)
+    sp.run(["git", "-C", str(tmp_path), "commit", "-q", "--allow-empty", "-m", "init"], check=True)
+    from agit.git import GitRepo
+
+    runner = ProxyRunner(GitRepo(tmp_path))
+    for flag in (
+        "_monitor_base_edits",
+        "_base_check_at",
+        "_cwd_drift_checked",
+        "_cwd_check_at",
+        "_relaunch_times",
+        "_exiting",
+        "_finalized_on_exit",
+    ):
+        assert flag in runner.__dict__ or hasattr(type(runner), flag), flag
+        getattr(runner, flag)  # must not raise

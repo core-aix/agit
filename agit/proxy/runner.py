@@ -373,6 +373,17 @@ class ProxyRunner:
         self._idle_integrate_at = 0.0  # throttle for integrating agent-made commits
         self._base_poll_at = 0.0  # throttle for the base-HEAD poll
         self._warned_backend_session = False  # one-shot "use agit to start sessions" notice
+        # Lifecycle flags read before their first conditional assignment. These
+        # MUST be initialized here: their getattr() guards were removed in P7,
+        # and for_testing() seeding them alone would hide a missing init from
+        # the suite (the real __init__ is the production path).
+        self._monitor_base_edits = False
+        self._base_check_at = 0.0
+        self._cwd_drift_checked = False
+        self._cwd_check_at = 0.0
+        self._relaunch_times: list[float] = []
+        self._exiting = False
+        self._finalized_on_exit = False
         # The user's intentionally-unstaged files belong to the base working tree
         # (their repo), not the ephemeral session worktree; cache the list so the
         # status line can show its count without a per-frame disk read.
@@ -438,12 +449,9 @@ class ProxyRunner:
 
     @property
     def _integration(self) -> IntegrationService:
-        """The IntegrationService for this runner.
-
-        Lazily materialised for ``ProxyRunner.__new__``-built test runners that
-        never call ``__init__``.  Production code always has it set in
-        ``__init__``; the property is just a safety net.
-        """
+        """The integration service. Lazily constructed only as a safety net for
+        partially-constructed runners; production wires it in __init__ and
+        tests inject it via for_testing()/_integration kwarg."""
         svc = self.__dict__.get("_integration_svc")
         if svc is None:
             base_repo = self.__dict__.get("base_repo")
@@ -556,9 +564,20 @@ class ProxyRunner:
         session = Session(**session_kwargs)
         instance.__dict__["_active_session"] = session
 
-        # Apply runner-level overrides.
+        # Apply runner-level overrides. Names shadowed by a class property are
+        # routed through it; a read-only property makes the misuse loud instead
+        # of silently leaving the kwarg inert in __dict__.
         for key, value in runner_overrides.items():
-            instance.__dict__[key] = value
+            descriptor = getattr(cls, key, None)
+            if isinstance(descriptor, property):
+                if descriptor.fset is None:
+                    raise TypeError(
+                        f"for_testing() cannot set {key!r}: it is a read-only "
+                        f"property derived from runner state"
+                    )
+                setattr(instance, key, value)
+            else:
+                instance.__dict__[key] = value
 
         # base_repo defaults to repo if not explicitly overridden.
         if instance.__dict__.get("base_repo") is None:
@@ -3304,8 +3323,7 @@ class ProxyRunner:
         # loop can wait on it once it dies, instead of leaving a zombie for the
         # rest of the run. Host-level (shared across sessions), not swapped.
         if pid:
-            self._reap_pids = self._reap_pids
-            self._reap_pids.append(pid)
+                self._reap_pids.append(pid)
 
     def _reap_stopped_children(self) -> None:
         pids = self._reap_pids
