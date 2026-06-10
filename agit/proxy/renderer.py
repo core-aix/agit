@@ -206,8 +206,8 @@ class ScreenRenderer:
         if self.stream is not None:
             try:
                 self.stream.feed(pyte_hostile_csi_re.sub(b"", output))
-            except Exception:  # never let a parse hiccup kill the session
-                pass
+            except Exception as error:  # never let a parse hiccup kill the session
+                getattr(self, "_debug", lambda message: None)(f"pyte feed error: {error!r}")
 
     # ------------------------------------------------------------------
     # Synchronized-update tracking

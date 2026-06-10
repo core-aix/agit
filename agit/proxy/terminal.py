@@ -171,11 +171,3 @@ class TerminalHost:
     # ------------------------------------------------------------------
     # Resize (stdout write side only; PTY ioctl stays in runner for now)
     # ------------------------------------------------------------------
-
-    def write_resize_terminal(self, rows: int, cols: int, render_fn) -> None:
-        """Write-side of resize: update screen geometry and repaint.
-
-        The PTY ioctl (TIOCSWINSZ on master_fd) is performed by the runner
-        since it needs access to the fd; this method handles the stdout side.
-        """
-        render_fn()

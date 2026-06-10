@@ -3707,11 +3707,10 @@ def test_screen_renderer_selection_ranges_span():
 def test_screen_renderer_render_line_empty_cells():
     r = ScreenRenderer(24, 10, color_mode="truecolor")
     line = r.render_line({}, cols=10)
-    assert len(line.replace("\x1b[0m", "").replace("\x1b[m", "")) >= 0
-    # Must produce 10 characters of visible content
+    # Empty cells render as 10 spaces with no styling left active.
     import re
     plain = re.sub(r"\x1b\[[^m]*m", "", line)
-    assert len(plain) == 10
+    assert plain == " " * 10
 
 
 def test_screen_renderer_track_sync_update_sets_flag():
@@ -3828,3 +3827,25 @@ def test_screen_renderer_feed_strips_hostile_csi():
     chars = [row0.get(c) for c in range(5)]
     text = "".join((c.data if c else " ") for c in chars)
     assert text == "Hello"
+
+
+def test_duck_type_aliases_cover_extracted_classes():
+    # ScreenRenderer and TerminalHost methods run with `self` being a
+    # ProxyRunner via unbound delegation. A `self.foo()` inside those classes
+    # therefore resolves on ProxyRunner, not on the class — so every method
+    # name the classes SELF-CALL must exist on ProxyRunner too. A missing
+    # alias crashes at runtime in paths the suite does not exercise (e.g.
+    # run() startup), so pin the contract here.
+    import inspect
+    import re as _re
+
+    from agit.proxy.renderer import ScreenRenderer
+    from agit.proxy.terminal import TerminalHost
+
+    for cls in (ScreenRenderer, TerminalHost):
+        own_methods = {n for n, _ in inspect.getmembers(cls, inspect.isfunction)}
+        self_calls = set(_re.findall(r"self\.([a-zA-Z_][a-zA-Z0-9_]*)\(", inspect.getsource(cls)))
+        for name in sorted(self_calls & own_methods):
+            assert hasattr(ProxyRunner, name), (
+                f"ProxyRunner is missing alias {name!r}, self-called inside {cls.__name__}"
+            )

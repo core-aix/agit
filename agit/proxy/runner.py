@@ -2546,9 +2546,9 @@ class ProxyRunner:
         ScreenRenderer.append_command_palette(
             self, parts,
             rows=self.rows, cols=self.cols,
-            input_text=self.input.text() if hasattr(self.input, "text") else "",
-            input_matches=self.input.matches() if hasattr(self.input, "matches") else [],
-            input_selected=self.input.selected() if hasattr(self.input, "selected") else None,
+            input_text=self.input.text(),
+            input_matches=self.input.matches(),
+            input_selected=self.input.selected(),
         )
     def _append_message_popup(self, parts: list[str], message: str) -> None:
         ScreenRenderer.append_message_popup(self, parts, message, rows=self.rows, cols=self.cols)
@@ -2692,6 +2692,26 @@ class ProxyRunner:
 
     def feed(self, output: bytes, *, pyte_hostile_csi_re) -> None:
         ScreenRenderer.feed(self, output, pyte_hostile_csi_re=pyte_hostile_csi_re)
+
+    def init_screen(self, rows: int, cols: int) -> None:
+        ScreenRenderer.init_screen(self, rows, cols)
+
+    # Public aliases used by TerminalHost's internal self-calls when 'self' is a
+    # ProxyRunner (same duck-typing contract as the ScreenRenderer aliases).
+    def set_raw(self) -> None:
+        TerminalHost.set_raw(self)
+
+    def set_cooked(self) -> None:
+        TerminalHost.set_cooked(self)
+
+    def enable_host_mouse(self) -> None:
+        TerminalHost.enable_host_mouse(self)
+
+    def disable_host_terminal_modes(self) -> None:
+        TerminalHost.disable_host_terminal_modes(self)
+
+    def parse_host_terminal_responses(self, data: bytes, *, debug_fn=None) -> None:
+        TerminalHost.parse_host_terminal_responses(self, data, debug_fn=debug_fn or self._debug)
 
     def _status_line(self) -> str:
         return ScreenRenderer.status_line(
