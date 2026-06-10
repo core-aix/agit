@@ -41,17 +41,19 @@ class AgitActions:
     ) -> bool:
         if not turns:
             return False
+        self.repo.add_tracked()
+        self.review_untracked(include_declined=False)
+        if not self.repo.has_staged_changes():
+            return False
+        # Accumulate trace and tokens only once the commit will actually happen:
+        # a failed attempt re-processes the same turns on the next call, and the
+        # persisted trace/token state would double-count them.
         for turn in turns:
             if turn.user_prompt:
                 self.state.append_trace("user", turn.user_prompt)
             if turn.final_response:
                 self.state.append_trace("agent", turn.final_response)
             self.state.add_token_usage(turn.tokens)
-
-        self.repo.add_tracked()
-        self.review_untracked(include_declined=False)
-        if not self.repo.has_staged_changes():
-            return False
 
         # Subject lists every prompt that led to this commit, joined by " / ".
         prompts = [turn.user_prompt for turn in turns if turn.user_prompt]

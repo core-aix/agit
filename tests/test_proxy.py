@@ -2908,3 +2908,78 @@ def test_resume_pending_prompt_checks_base_user_edits(tmp_path):
     finally:
         os.close(read_fd)
         os.close(write_fd)
+
+
+def test_agent_commit_failed_attempt_does_not_double_count_tokens(tmp_path):
+    # Issue #14: a commit attempt that finds nothing to stage returns False
+    # without advancing last_backend_message_id, so the next parse re-processes
+    # the same turns. Token usage is cumulative state — it must only be added
+    # once the commit actually happens, or the metadata overstates real usage
+    # once per failed attempt.
+    runner = ProxyRunner.__new__(ProxyRunner)
+    repo = FakeCommitRepo()
+    runner.repo = repo
+    runner.state = AgitState(tmp_path)
+    runner.verbose = False
+    runner._review_untracked_popup = lambda include_declined: "No untracked files to review."
+
+    first_turn = SessionTurn("u1", "a1", "fix it", "done", TokenUsage(total=140, input=130, output=10), None)
+
+    # First attempt: the turn left nothing staged (e.g. the agent reverted its
+    # edit) — no commit, and crucially no token accumulation.
+    repo.has_staged_changes = lambda: False
+    assert runner._create_agent_commit_from_turns_popup(
+        turns=[first_turn], backend="claude", backend_session_id="ses-1", model="m", quiet=True,
+    ) is False
+    assert runner.state.pending_token_usage()["input"] == 0
+
+    # Next parse returns the same turn again plus a new one; this time changes
+    # are staged and the commit happens. Each turn must be counted exactly once.
+    repo.has_staged_changes = lambda: True
+    second_turn = SessionTurn("u2", "a2", "now edit", "edited", TokenUsage(total=5, input=3, output=2), None)
+    assert runner._create_agent_commit_from_turns_popup(
+        turns=[first_turn, second_turn], backend="claude", backend_session_id="ses-1", model="m", quiet=True,
+    ) is True
+    message = repo.message
+    assert "tokens_since_last_commit_input: 133" in message
+    assert "tokens_since_last_commit_output: 12" in message
+
+
+def test_actions_agent_commit_failed_attempt_does_not_double_count(tmp_path):
+    from agit.actions import AgitActions
+
+    class Repo:
+        def __init__(self):
+            self.staged = False
+            self.message = None
+
+        def add_tracked(self):
+            pass
+
+        def untracked_files(self):
+            return []
+
+        def has_staged_changes(self):
+            return self.staged
+
+        def commit(self, message):
+            self.message = message
+
+    repo = Repo()
+    state = AgitState(tmp_path)
+    actions = AgitActions(repo, state)
+    turn = SessionTurn("u1", "a1", "fix it", "done", TokenUsage(total=140, input=130, output=10), None)
+
+    assert actions.create_agent_commit_from_turns(
+        turns=[turn], backend="claude", backend_session_id="ses-1", model="m", quiet=True,
+    ) is False
+    # Nothing staged: neither tokens nor trace were accumulated.
+    assert state.pending_token_usage()["input"] == 0
+    assert state.pending_trace() == []
+
+    repo.staged = True
+    assert actions.create_agent_commit_from_turns(
+        turns=[turn], backend="claude", backend_session_id="ses-1", model="m", quiet=True,
+    ) is True
+    assert "tokens_since_last_commit_input: 130" in repo.message
+    assert repo.message.count("## User\n\nfix it") == 1

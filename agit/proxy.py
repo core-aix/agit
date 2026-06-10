@@ -3264,7 +3264,6 @@ class ProxyRunner:
                     remaining_pending_users.remove(turn.user_prompt)
             if turn.final_response:
                 self.state.append_trace("agent", turn.final_response)
-            self.state.add_token_usage(turn.tokens)
 
         for pending_user in remaining_pending_users:
             subject_prompts.append(pending_user)
@@ -3281,6 +3280,12 @@ class ProxyRunner:
             self.repo.stage_paths([path for path in self.repo.untracked_files() if path not in declined])
         if not self.repo.has_staged_changes():
             return False
+        # Count tokens only once the commit will actually happen. A failed
+        # attempt (nothing staged) re-processes the same turns on the next parse
+        # — the trace above is rebuilt from scratch each call, but token usage is
+        # cumulative and would be double-counted.
+        for turn in turns:
+            self.state.add_token_usage(turn.tokens)
 
         # The subject lists every user prompt that led to this commit, joined by
         # " / " (a commit can cover several turns — e.g. a prompt queued mid-turn).
