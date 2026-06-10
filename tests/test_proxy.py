@@ -543,6 +543,44 @@ def test_proxy_hex_color_preserves_truecolor_encoding():
     assert runner._hex_color_code("0a0a0a", foreground=False) == "48;2;10;10;10"
 
 
+def test_proxy_hex_color_falls_back_to_ansi16_in_16_mode():
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.color_mode = "16"
+    # Exact ANSI palette entries map to their base/bright SGR codes; arbitrary
+    # hexes snap to the nearest of the 16.
+    assert runner._hex_color_code("cd0000", foreground=True) == "31"
+    assert runner._hex_color_code("cd0000", foreground=False) == "41"
+    assert runner._hex_color_code("ff0000", foreground=True) == "91"
+    assert runner._hex_color_code("ffffff", foreground=False) == "107"
+    assert runner._hex_color_code("123456", foreground=True) == "30"
+
+
+def test_proxy_named_color_codes():
+    runner = ProxyRunner.__new__(ProxyRunner)
+    assert runner._color_code("red", foreground=True) == "31"
+    assert runner._color_code("blue", foreground=False) == "44"
+    assert runner._color_code("brightgreen", foreground=True) == "92"
+    assert runner._color_code("brown", foreground=True) == "33"  # pyte's name for yellow
+    assert runner._color_code("default", foreground=True) is None
+    assert runner._color_code("nonsense", foreground=True) is None
+
+
+def test_selection_ranges_span_multiple_rows():
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.cols = 10
+    runner.sel_active = True
+    runner.sel_anchor = (0, 3)
+    runner.sel_point = (2, 1)
+    # First row runs from the anchor column to the end, middle rows span fully,
+    # last row runs up to the point column.
+    assert runner._selection_ranges() == {0: (3, 9), 1: (0, 9), 2: (0, 1)}
+    # Anchor and point are order-independent.
+    runner.sel_anchor, runner.sel_point = runner.sel_point, runner.sel_anchor
+    assert runner._selection_ranges() == {0: (3, 9), 1: (0, 9), 2: (0, 1)}
+    runner.sel_active = False
+    assert runner._selection_ranges() == {}
+
+
 def test_proxy_render_line_emits_256_colors_in_256_mode():
     runner = ProxyRunner.__new__(ProxyRunner)
     runner.color_mode = "256"
@@ -1734,7 +1772,7 @@ def _backend_switch_runner(monkeypatch):
     runner.backend = types.SimpleNamespace(name="claude")
     runner.worktree = object()
     runner.global_config = types.SimpleNamespace(default_backend="claude")
-    monkeypatch.setattr("agit.proxy.backend_installed", lambda n: True)
+    monkeypatch.setattr("agit.proxy.runner.backend_installed", lambda n: True)
     return runner
 
 
@@ -2331,7 +2369,7 @@ def test_open_session_worktree_recreates_corrupted_leftover(tmp_path):
     runner.worktree_manager = types.SimpleNamespace(
         worktree_path=lambda name: tmp_path / name, create=_create)
     runner._worktrees = lambda: runner.worktree_manager
-    import agit.proxy as proxymod
+    import agit.proxy.runner as proxymod
     orig = proxymod.GitRepo
     proxymod.GitRepo = lambda path: types.SimpleNamespace(current_branch=lambda: "")
     try:
@@ -2510,7 +2548,7 @@ def test_relaunch_backend_resumes_then_gives_up_on_crash_loop(monkeypatch):
     runner._finalize_on_backend_exit = lambda: calls.append("finalize")
 
     t = [1000.0]
-    monkeypatch.setattr("agit.proxy.time.monotonic", lambda: t[0])
+    monkeypatch.setattr("agit.proxy.runner.time.monotonic", lambda: t[0])
 
     # Backend keeps dying quickly: first 3 relaunch, the 4th gives up and exits.
     assert runner._relaunch_backend_or_exit() is True
@@ -2529,7 +2567,7 @@ def test_relaunch_backend_resets_loop_guard_after_quiet_period(monkeypatch):
     runner._finalize_on_backend_exit = lambda: relaunches.append("finalize")
 
     t = [1000.0]
-    monkeypatch.setattr("agit.proxy.time.monotonic", lambda: t[0])
+    monkeypatch.setattr("agit.proxy.runner.time.monotonic", lambda: t[0])
     for _ in range(3):
         runner._relaunch_backend_or_exit()
     t[0] += 60.0  # a minute later the old exits no longer count
@@ -3226,7 +3264,7 @@ def test_reaper_keeps_still_running_children():
 
 
 def _popup_io_runner(monkeypatch, stdin_fd):
-    import agit.proxy as proxy_mod
+    import agit.proxy.runner as proxy_mod
 
     runner = ProxyRunner.__new__(ProxyRunner)
     monkeypatch.setattr(proxy_mod.sys, "stdin", types.SimpleNamespace(fileno=lambda: stdin_fd))
@@ -3394,7 +3432,7 @@ def test_double_ctrl_c_finalizes_before_exiting():
 
 
 def test_sync_terminal_modes_mirrors_keyboard_protocol(monkeypatch):
-    import agit.proxy as proxy_mod
+    import agit.proxy.runner as proxy_mod
 
     runner = ProxyRunner.__new__(ProxyRunner)
     runner.child_mouse = False
