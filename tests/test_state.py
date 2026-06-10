@@ -120,3 +120,58 @@ def test_trace_turn_limit_defaults_and_reads_config(tmp_path):
     config.write_text('{"trace_turn_limit": 3}\n', encoding="utf-8")
 
     assert AgitState(tmp_path).trace_turn_limit == 3
+
+
+# --- issue #17: corrupt state must not brick startup; writes are atomic --------
+
+
+def test_corrupt_state_json_falls_back_to_defaults_and_keeps_backup(tmp_path):
+    state_path = tmp_path / ".agit" / "state.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text('{"agit_session_id": "agit-x", "backe', encoding="utf-8")  # truncated mid-write
+
+    state = AgitState(tmp_path)  # must not raise
+
+    assert state.session_id.startswith("agit-")
+    # The corrupt file is kept aside for debugging, not silently destroyed.
+    backup = state_path.with_name("state.json.bak")
+    assert backup.exists()
+    assert backup.read_text(encoding="utf-8").endswith('"backe')
+    # And the state is usable again: save() writes a fresh valid file.
+    state.save()
+    assert AgitState(tmp_path).session_id == state.session_id
+
+
+def test_non_dict_state_json_is_treated_as_corrupt(tmp_path):
+    state_path = tmp_path / ".agit" / "state.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text('["not", "a", "dict"]', encoding="utf-8")
+
+    state = AgitState(tmp_path)  # must not raise
+
+    assert state.session_id.startswith("agit-")
+    assert state_path.with_name("state.json.bak").exists()
+
+
+def test_corrupt_config_json_falls_back_to_defaults(tmp_path):
+    config_path = tmp_path / ".agit" / "config.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text("{not json", encoding="utf-8")
+
+    state = AgitState(tmp_path)  # must not raise
+
+    assert state.trace_turn_limit == 5  # default config
+
+
+def test_save_is_atomic_and_leaves_no_temp_file(tmp_path):
+    state = AgitState(tmp_path)
+    state.save()
+
+    state_dir = tmp_path / ".agit"
+    assert (state_dir / "state.json").exists()
+    assert list(state_dir.glob("*.tmp")) == []
+    # The written file is complete, valid JSON round-tripping the data.
+    import json
+
+    with (state_dir / "state.json").open(encoding="utf-8") as handle:
+        assert json.load(handle)["agit_session_id"] == state.session_id

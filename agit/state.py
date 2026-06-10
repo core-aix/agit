@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import uuid
 from pathlib import Path
@@ -19,11 +20,26 @@ class AgitState:
     def _load(self) -> dict[str, Any]:
         if not self.path.exists():
             return self._default()
-        with self.path.open("r", encoding="utf-8") as handle:
-            data = json.load(handle)
+        try:
+            with self.path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            # A truncated or invalid state file must not brick startup. Keep the
+            # corrupt file aside for debugging and start from defaults.
+            self._quarantine_corrupt()
+            return self._default()
+        if not isinstance(data, dict):
+            self._quarantine_corrupt()
+            return self._default()
         default = self._default()
         default.update(data)
         return default
+
+    def _quarantine_corrupt(self) -> None:
+        try:
+            self.path.replace(self.path.with_name(self.path.name + ".bak"))
+        except OSError:
+            pass
 
     def _default(self) -> dict[str, Any]:
         return {
@@ -61,17 +77,25 @@ class AgitState:
         default = self._default_config()
         if not self.config_path.exists():
             return default
-        with self.config_path.open("r", encoding="utf-8") as handle:
-            data = json.load(handle)
+        try:
+            with self.config_path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            return default  # user-edited file; don't crash, just use defaults
         default.update(data if isinstance(data, dict) else {})
         return default
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._ensure_repo_local_ignore()
-        with self.path.open("w", encoding="utf-8") as handle:
+        # Atomic write: save() runs on every property setter, so an in-place
+        # rewrite interrupted by a crash/SIGKILL/full disk would leave exactly
+        # the truncated file that bricks the next startup.
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        with tmp.open("w", encoding="utf-8") as handle:
             json.dump(self.data, handle, indent=2, sort_keys=True)
             handle.write("\n")
+        os.replace(tmp, self.path)
 
     def _ensure_repo_local_ignore(self) -> None:
         exclude = self._exclude_path()
