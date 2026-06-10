@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import base64
 import os
-import pty
 import re
 import select
 import shutil
@@ -37,6 +36,7 @@ from agit.session import turns_after
 from agit.session_runtime import SESSION_FIELDS, capture_session, default_session_fields, restore_session
 from agit.state import AgitState
 from agit.worktree import WorktreeInfo, WorktreeManager, _sanitize_name
+from agit.proxy.process import BackendProcess
 
 
 # Map every xterm-256 palette colour back to its index so that colours pyte
@@ -570,19 +570,13 @@ class ProxyRunner:
                 self._pre_spawn_session_ids = {ref.id for ref in self.backend.list_sessions(self.repo.repo)}
         command = self.backend.spawn_command(self.repo.repo, session_id=session_id, resume=resume)
         command = self._confine_to_worktree(command)
-        pid, fd = pty.fork()
-        if pid == 0:
-            # The child must never survive a failed exec (backend uninstalled
-            # mid-session, PATH change, worktree deleted): the exception would
-            # otherwise propagate and leave a duplicate aGiT running from the
-            # fork point, sharing state files, locks, and the terminal.
-            try:
-                os.chdir(self.repo.repo)
-                os.execvp(command[0], command)
-            except BaseException:
-                os._exit(127)
-        self.child_pid = pid
-        self.master_fd = fd
+        # Fork/exec mechanics delegated to BackendProcess; policy (command
+        # construction, sandbox wrapping) stays here in the runner.
+        proc = BackendProcess.spawn(command, str(self.repo.repo))
+        # Keep child_pid / master_fd on the runner so session_runtime.py and
+        # tests that access these attributes directly continue to work unchanged.
+        self.child_pid = proc.child_pid
+        self.master_fd = proc.master_fd
 
     def _setup_worktree_confinement_notice(self) -> None:
         # When confinement is requested but the platform can't enforce it (no
@@ -762,6 +756,8 @@ class ProxyRunner:
         return self.backend.session_belongs_to_repo(self.repo.repo, session_id)
 
     def _teardown_child(self) -> None:
+        # Dispatch through the bound method (not BackendProcess.cleanup directly)
+        # so subclass/test overrides of _cleanup_child keep applying to teardown.
         self._cleanup_child()
         if self.master_fd is not None:
             try:
@@ -1365,10 +1361,11 @@ class ProxyRunner:
         if self.master_fd is None:
             return
         payload = " ".join(text.split()).encode("utf-8", errors="replace")
+        proc = BackendProcess(self.master_fd, getattr(self, "child_pid", None))
         try:
-            os.write(self.master_fd, payload)
+            proc.write(payload)
         except OSError:
-            return
+            return  # text never reached the backend; don't schedule its Enter
         self._pending_enter_at = time.monotonic() + 0.4
         self._pending_enter_fd = self.master_fd  # submit to THIS backend, not whatever is active later
 
@@ -1384,9 +1381,9 @@ class ProxyRunner:
         if fd is None:
             return
         try:
-            os.write(fd, b"\r")
+            BackendProcess(fd).write(b"\r")
         except OSError:
-            return
+            return  # Enter never reached the backend; the merge gate stays closed
         if self.merge_ctx is not None and self.master_fd == fd:
             self.merge_ctx["prompt_sent_at"] = time.monotonic()
 
@@ -2386,7 +2383,7 @@ class ProxyRunner:
                             if submitted_prompt:
                                 # A new prompt starts a turn on its own branch.
                                 self._ensure_turn_branch()
-                        os.write(self.master_fd, b"".join(forwarded))
+                        BackendProcess(self.master_fd, getattr(self, "child_pid", None)).write(b"".join(forwarded))
                 if command:
                     self._run_command(command)
             self._flush_pending_render()
@@ -2425,31 +2422,8 @@ class ProxyRunner:
         return 0
 
     def _drain_child_output(self) -> bytes | None:
-        # Read all currently-available output in one go (capped) and render once,
-        # instead of re-rendering after every 4 KB. During heavy output (e.g.
-        # fast scrolling in OpenCode) this keeps the PTY drained so the backend's
-        # writes never block, which otherwise stalls/kills the backend.
-        assert self.master_fd is not None
-        chunks: list[bytes] = []
-        total = 0
-        # Bound per-iteration output so the (pure-Python) pyte parse stays small
-        # and the loop keeps draining the PTY promptly; leftover output is read
-        # on the next iteration.
-        while total < 262_144:
-            try:
-                data = os.read(self.master_fd, 65536)
-            except OSError:
-                break
-            if not data:
-                break
-            chunks.append(data)
-            total += len(data)
-            readable, _, _ = select.select([self.master_fd], [], [], 0)
-            if self.master_fd not in readable:
-                break
-        if not chunks:
-            return None  # EOF or read error with nothing buffered
-        return b"".join(chunks)
+        # Delegate to BackendProcess for the bounded PTY read loop.
+        return BackendProcess(getattr(self, "master_fd", None), getattr(self, "child_pid", None)).drain()
 
     def _diag_path(self, kind: str):
         # Diagnostic logs live in the *base* repo's .agit/ (one file per run), not
@@ -2685,7 +2659,7 @@ class ProxyRunner:
             response += self.host_da
         if response:
             try:
-                os.write(self.master_fd, bytes(response))
+                BackendProcess(self.master_fd, getattr(self, "child_pid", None)).write(bytes(response))
             except OSError:
                 pass
 
@@ -3577,19 +3551,14 @@ class ProxyRunner:
     def _terminate_child(self) -> None:
         # Stop the current session's backend process and release its PTY, so its
         # worktree is no longer in use and can be removed.
-        if getattr(self, "child_pid", None):
-            try:
-                os.kill(self.child_pid, signal.SIGINT)
-            except ProcessLookupError:
-                pass
-            self._note_pid_for_reaping(self.child_pid)
-            self.child_pid = None
-        if getattr(self, "master_fd", None) is not None:
-            try:
-                os.close(self.master_fd)
-            except OSError:
-                pass
-            self.master_fd = None
+        pid = getattr(self, "child_pid", None)
+        if pid:
+            self._note_pid_for_reaping(pid)
+        proc = BackendProcess(getattr(self, "master_fd", None), pid)
+        proc.terminate()
+        # Sync the nulled fd/pid back to the runner attributes.
+        self.master_fd = proc.master_fd
+        self.child_pid = proc.child_pid
 
     def _remove_worktree_on_exit(self) -> None:
         # On exit, drop a fully-merged session's worktree so directories do not
@@ -3647,11 +3616,9 @@ class ProxyRunner:
     def _exit_child(self) -> None:
         self.running = False
         self._disable_host_terminal_modes()
-        if self.child_pid:
-            try:
-                os.kill(self.child_pid, signal.SIGINT)
-            except ProcessLookupError:
-                pass
+        # SIGINT to child delegated to BackendProcess (does not close fd --
+        # the run() finally block handles that so it always runs).
+        BackendProcess(getattr(self, "master_fd", None), getattr(self, "child_pid", None)).signal_exit()
 
     def _handle_exit_signal(self, signum, _frame) -> None:
         self.running = False
@@ -3661,24 +3628,8 @@ class ProxyRunner:
         raise SystemExit(128 + int(signum))
 
     def _cleanup_child(self) -> None:
-        if not self.child_pid:
-            return
-        try:
-            done, _status = os.waitpid(self.child_pid, os.WNOHANG)
-            if done:
-                return
-            os.kill(self.child_pid, signal.SIGINT)
-            deadline = time.monotonic() + 1.0
-            while time.monotonic() < deadline:
-                done, _status = os.waitpid(self.child_pid, os.WNOHANG)
-                if done:
-                    return
-                time.sleep(0.05)
-            os.kill(self.child_pid, signal.SIGTERM)
-        except ChildProcessError:
-            return
-        except ProcessLookupError:
-            return
+        # Delegate SIGINT -> wait -> SIGTERM escalation to BackendProcess.
+        BackendProcess(getattr(self, "master_fd", None), getattr(self, "child_pid", None)).cleanup()
 
     def _pre_agent_commit_if_needed(self, prompt_text: str = "") -> bool:
         self._clear_agent_in_flight_if_idle()
@@ -3807,7 +3758,7 @@ class ProxyRunner:
             self._ensure_turn_branch()  # a new prompt starts a turn on its own branch
         self.agent_in_flight = True
         self._clear_message()
-        os.write(self.master_fd, b"".join(forwarded))
+        BackendProcess(self.master_fd, getattr(self, "child_pid", None)).write(b"".join(forwarded))
 
     def _prune_declined_untracked(self, repo: GitRepo | None = None, state: AgitState | None = None) -> None:
         repo = repo or self.repo
@@ -4219,15 +4170,12 @@ class ProxyRunner:
         if self.master_fd is None:
             return
         try:
-            import fcntl
-            import struct
-
             self.rows, self.cols = self._terminal_size()
             if self.screen is not None:
                 self.screen.resize(max(self.rows - 1, 1), self.cols)
             self.scroll_back = 0  # history geometry changed; return to live view
-            winsize = struct.pack("HHHH", max(self.rows - 1, 1), self.cols, 0, 0)
-            fcntl.ioctl(self.master_fd, termios.TIOCSWINSZ, winsize)
+            # PTY ioctl delegated to BackendProcess.
+            BackendProcess(self.master_fd, getattr(self, "child_pid", None)).resize(max(self.rows - 1, 1), self.cols)
             self._render()
         except OSError:
             pass
