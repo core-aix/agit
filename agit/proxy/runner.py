@@ -55,6 +55,9 @@ from agit.proxy.renderer import (
 )
 # TerminalHost lives in terminal.py (P1).
 from agit.proxy.terminal import TerminalHost
+# Modal state-machines (P6 Stage 2): PromptModal and SelectModal encode the
+# byte-handling logic for free-text and selection popups.
+from agit.proxy.modal import PromptModal, SelectModal
 
 _SGR_MOUSE_RE = re.compile(rb"\x1b\[<\d+;\d+;\d+[Mm]")
 _SGR_MOUSE_EVENT_RE = re.compile(rb"\x1b\[<(\d+);(\d+);(\d+)([Mm])")
@@ -2839,82 +2842,59 @@ class ProxyRunner:
             if stdin_fd in readable:
                 return os.read(stdin_fd, 32)
 
-    def _prompt_popup(self, title: str, prompt: str, *, default: str = "") -> str | None:
-        value = default
-        escape_buffer: bytearray | None = None
+    def _run_modal(self, modal: "PromptModal | SelectModal") -> "str | None":
+        """Run *modal* to completion, keeping all session PTYs draining.
+
+        This is the shared reactor iteration for modal dialogs.  It repeatedly:
+          1. Renders the modal's current message via ``_set_message`` + ``_render``.
+          2. Calls ``_popup_read_input()`` — which selects on stdin AND every
+             session PTY so back-pressure never builds up while the popup is open.
+          3. Passes the bytes to ``modal.feed()`` and acts on the returned action:
+
+             ``("done",   value)``  — clears the message, renders, and returns value.
+             ``("cancel", None)``   — clears the message, renders, and returns None.
+             ``("exit",   None)``   — calls ``_run_exit_flow()``; returns None on
+                                      confirmed exit, otherwise redraws and continues.
+             ``("redraw", None)``   — redraws and continues.
+
+        The call-shape is synchronous, which preserves the ~25 existing call
+        sites unmodified.  ``_prompt_popup`` and ``_select_popup`` are thin
+        facades that construct the appropriate modal and delegate here.
+        """
         while True:
-            self._set_message(f"{title}\n{prompt}\n> {value}", seconds=60)
+            self._set_message(modal.render_message(), seconds=60)
             self._render()
             data = self._popup_read_input()
-            if data == b"\x1b":
+            action, value = modal.feed(data)
+            if action == "done":
+                self._clear_message()
+                self._render()
+                return value
+            if action == "cancel":
                 self._clear_message()
                 self._render()
                 return None
-            for byte in data:
-                char = bytes([byte])
-                if escape_buffer is not None:
-                    escape_buffer.extend(char)
-                    if _escape_sequence_complete(bytes(escape_buffer)):
-                        escape_buffer = None
-                    continue
-                if char == b"\x03":
-                    if self._run_exit_flow():
-                        return None
-                    break  # exit declined: redraw the popup and keep listening
-                if char == b"\x1b":
-                    escape_buffer = bytearray(char)
-                    continue
-                if char in {b"\r", b"\n"}:
-                    self._clear_message()
-                    self._render()
-                    return value
-                if char in {b"\x7f", b"\b"}:
-                    value = value[:-1]
-                elif byte >= 32:
-                    value += char.decode(errors="ignore")
+            if action == "exit":
+                if self._run_exit_flow():
+                    return None
+                # Exit declined: redraw the modal and keep listening.
+
+    def _prompt_popup(self, title: str, prompt: str, *, default: str = "") -> str | None:
+        """Free-text input popup.  Thin facade over ``_run_modal(PromptModal(...))``.
+
+        Tests stub this method heavily; the name and signature are stable.
+        """
+        return self._run_modal(PromptModal(title, prompt, default=default))
 
     def _select_popup(self, title: str, options: list[str]) -> str | None:
+        """Selection popup.  Thin facade over ``_run_modal(SelectModal(...))``.
+
+        Tests stub this method heavily; the name and signature are stable.
+        Returns ``""`` immediately when *options* is empty (unchanged behaviour).
+        """
         if not options:
             return ""
-        selected = 0
-        escape_buffer: bytearray | None = None
-        while True:
-            lines = [title, "Up/Down selects. Enter confirms.", ""]
-            for index, option in enumerate(options):
-                prefix = "> " if index == selected else "  "
-                lines.append(prefix + option)
-            self._set_message("\n".join(lines), seconds=60)
-            self._render()
-            data = self._popup_read_input()
-            if data == b"\x1b":
-                self._clear_message()
-                self._render()
-                return None
-            for byte in data:
-                char = bytes([byte])
-                if escape_buffer is not None:
-                    escape_buffer.extend(char)
-                    sequence = bytes(escape_buffer)
-                    if sequence == b"\x1b[A":
-                        selected = (selected - 1) % len(options)
-                        escape_buffer = None
-                    elif sequence == b"\x1b[B":
-                        selected = (selected + 1) % len(options)
-                        escape_buffer = None
-                    elif _escape_sequence_complete(sequence):
-                        escape_buffer = None
-                    continue
-                if char == b"\x03":
-                    if self._run_exit_flow():
-                        return None
-                    break  # exit declined: redraw the popup and keep listening
-                if char == b"\x1b":
-                    escape_buffer = bytearray(char)
-                    continue
-                if char in {b"\r", b"\n"}:
-                    self._clear_message()
-                    self._render()
-                    return options[selected]
+        return self._run_modal(SelectModal(title, options))
 
     def _create_user_commit_popup(self, *, repo: GitRepo | None = None, state: AgitState | None = None) -> bool:
         # Defaults to the active worktree (capturing uncommitted worktree changes
