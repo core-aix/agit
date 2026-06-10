@@ -117,6 +117,14 @@ _INCOMPLETE_TAIL_RE = re.compile(rb"\x1b\[[<0-9;]*$")
 # ``?`` (DEC private) forms are deliberately NOT matched — pyte models several of
 # them and aGiT syncs the rest from the raw output separately.
 _PYTE_HOSTILE_CSI_RE = re.compile(rb"\x1b\[[<>=][0-9;:]*[ -/]*[@-~]")
+# Keyboard-protocol negotiation the backend sends to its (virtual) terminal:
+# kitty keyboard protocol push/set/pop/query (``CSI > flags u`` / ``CSI = ... u``
+# / ``CSI < ... u`` / ``CSI ? u``) and xterm modifyOtherKeys (``CSI > 4 ; N m``).
+# aGiT renders from a pyte model, so the HOST terminal never sees these unless
+# they are mirrored — and without them the host keeps sending plain ``\r`` for
+# Shift+Enter instead of the disambiguated encoding the backend's keybindings
+# (e.g. Claude's newline-in-input) expect.
+_KEYBOARD_PROTO_RE = re.compile(rb"\x1b\[(?:[><=][0-9;]*u|\?u|>4(?:;[0-9]+)?m)")
 
 
 def _short_session(session_id: str | None) -> str:
@@ -226,8 +234,20 @@ class ProxyInput:
         for byte in data:
             char = bytes([byte])
             if char == b"\x03":
-                should_exit = True
-                break
+                if self.capturing:
+                    # Inside aGiT's own command palette, Ctrl-C cancels it
+                    # (like Esc). Everywhere else the backend owns the key.
+                    self.buffer.clear()
+                    self.capturing = False
+                    self.selected_index = 0
+                    self.escape_buffer = None
+                    continue
+                # Pass Ctrl-C through: backends rely on it (interrupt the
+                # agent, clear the input box, their own double-press exit) and
+                # aGiT must not change the keybindings users already know.
+                # Exiting aGiT is Ctrl-G → exit, or quitting the backend.
+                forwarded.append(char)
+                continue
             if self.capturing:
                 if self.escape_buffer is not None:
                     self.escape_buffer.extend(char)
@@ -428,6 +448,7 @@ class ProxyRunner:
         self._popup_exit_pending = False  # a popup Ctrl-C exit flow is running
         self._popup_exit_force = False  # second Ctrl-C inside the exit confirmation
         self._reap_pids: list[int] = []  # signalled backends awaiting their waitpid
+        self._last_ctrl_c_at = 0.0  # when a Ctrl-C was last forwarded to the backend
         self._base_poll_at = 0.0  # throttle for the base-HEAD poll
         self._warned_backend_session = False  # one-shot "use agit to start sessions" notice
         # The user's intentionally-unstaged files belong to the base working tree
@@ -2185,6 +2206,14 @@ class ProxyRunner:
         # quitting with it. Guard against a crash loop: if the backend keeps dying
         # quickly, stop relaunching and exit normally.
         now = time.monotonic()
+        if now - getattr(self, "_last_ctrl_c_at", 0.0) < 3.0:
+            # The exit followed a Ctrl-C the user sent THROUGH aGiT to the
+            # backend (e.g. Claude's own double-Ctrl-C quit): they meant to
+            # leave. Follow the backend out — gracefully — instead of
+            # relaunching the session they just closed.
+            self._debug("backend exited right after a forwarded Ctrl-C; exiting with it")
+            self._finalize_on_backend_exit()
+            return False
         recent = [t for t in getattr(self, "_relaunch_times", []) if now - t < 12.0]
         if len(recent) >= 3:
             self._debug("backend exited 3x within 12s; quitting instead of relaunching")
@@ -2197,7 +2226,7 @@ class ProxyRunner:
             # _restart_agent tears down the dead PTY, re-baselines (so existing
             # history is not re-committed) and respawns; _spawn resumes the same
             # conversation via _should_continue_session.
-            self._restart_agent("Backend exited — relaunched and resumed (Ctrl-C to quit aGiT).")
+            self._restart_agent("Backend exited — relaunched and resumed (Ctrl-G → exit to quit aGiT).")
         except Exception as error:
             self._debug(f"relaunch failed, exiting: {error!r}")
             self._finalize_on_backend_exit()
@@ -2580,6 +2609,12 @@ class ProxyRunner:
                 self.child_mouse = True
             if b"\x1b[?" + mode + b"l" in output:
                 self.child_mouse = False
+        # Mirror keyboard-protocol negotiation (kitty protocol, modifyOtherKeys)
+        # so the host starts sending the enhanced key encodings the backend asked
+        # for — Shift+Enter et al. arrive on stdin already encoded and are
+        # forwarded to the backend like any other input.
+        for match in _KEYBOARD_PROTO_RE.finditer(output):
+            os.write(sys.stdout.fileno(), match.group(0))
 
     def _detect_host_terminal(self) -> None:
         # Ask the host terminal the same questions OpenCode asks on startup and
@@ -2749,7 +2784,7 @@ class ProxyRunner:
         lines = [
             "aGiT commands",
             f"> {text}",
-            "Up/Down selects. Tab completes. Enter runs. Ctrl-C exits.",
+            "Up/Down selects. Tab completes. Enter runs. Esc/Ctrl-C cancels.",
             "",
         ]
         lines.extend(matches[:8])
@@ -3816,6 +3851,13 @@ class ProxyRunner:
             if chunk == b"\x1b":
                 self.passthrough_escape = bytearray(chunk)
                 continue
+            if chunk == b"\x03":
+                # Ctrl-C reached the backend: it clears any pending input there,
+                # so mirror that here. Remember when, so a backend exiting right
+                # after is recognized as the user quitting it on purpose.
+                self.passthrough_prompt.clear()
+                self._last_ctrl_c_at = time.monotonic()
+                continue
             if chunk in {b"\r", b"\n"}:
                 continue
             if chunk in {b"\x7f", b"\b"}:
@@ -4118,6 +4160,9 @@ class ProxyRunner:
             sys.stdout.fileno(),
             b"\x1b[?9l\x1b[?1000l\x1b[?1001l\x1b[?1002l\x1b[?1003l\x1b[?1004l"
             b"\x1b[?1005l\x1b[?1006l\x1b[?1007l\x1b[?1015l\x1b[?1016l\x1b[?2004l"
+            # Undo any keyboard-protocol state mirrored for the backend: pop the
+            # kitty flags and switch modifyOtherKeys off.
+            b"\x1b[<u\x1b[>4;0m"
             b"\x1b[?25h\x1b[0m",
         )
 

@@ -123,15 +123,19 @@ def test_proxy_forwards_slash_commands():
     assert should_exit is False
 
 
-def test_proxy_ctrl_c_exits_in_command_capture():
+def test_proxy_ctrl_c_cancels_command_capture():
     parser = ProxyInput()
 
     forwarded, local_echo, command, should_exit = parser.feed(b"\x07sta\x03")
 
+    # Inside aGiT's palette Ctrl-C cancels it (like Esc): nothing forwarded,
+    # no command, no exit — and the parser is back in passthrough mode.
     assert forwarded == []
     assert local_echo == b""
     assert command is None
-    assert should_exit is True
+    assert should_exit is False
+    assert parser.capturing is False
+    assert parser.text() == ""
 
 
 def test_proxy_escape_cancels_command_capture():
@@ -228,15 +232,17 @@ def test_popup_escape_sequence_consumer_waits_for_mouse_terminator():
     assert _escape_sequence_complete(b"\x1b[35;88;11M") is True
 
 
-def test_proxy_ctrl_c_exits_in_passthrough_mode():
+def test_proxy_ctrl_c_is_forwarded_to_the_backend():
+    # Issue #28: backends own Ctrl-C (interrupt the agent, clear the input box,
+    # their own double-press exit). aGiT must not hijack it as its own exit.
     parser = ProxyInput()
 
     forwarded, local_echo, command, should_exit = parser.feed(b"\x03")
 
-    assert forwarded == []
+    assert forwarded == [b"\x03"]
     assert local_echo == b""
     assert command is None
-    assert should_exit is True
+    assert should_exit is False
 
 
 def test_proxy_agent_commit_preserves_incomplete_initial_user_turn(tmp_path):
@@ -3382,3 +3388,70 @@ def test_double_ctrl_c_finalizes_before_exiting():
     # _confirm_exit popup; the second Ctrl-C arrives inside it.
     assert runner._run_exit_flow() is True
     assert events == ["finalize", "exit"]
+
+
+# --- issue #28: backend keybindings work through the proxy ----------------------
+
+
+def test_sync_terminal_modes_mirrors_keyboard_protocol(monkeypatch):
+    import agit.proxy as proxy_mod
+
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.child_mouse = False
+    writes = []
+    monkeypatch.setattr(proxy_mod.os, "write", lambda fd, data: writes.append(data))
+
+    # Claude/OpenCode negotiate enhanced key encodings (Shift+Enter etc.):
+    # kitty protocol push/pop and xterm modifyOtherKeys. The host terminal
+    # must see these or it keeps sending a plain \r for Shift+Enter.
+    runner._sync_terminal_modes(b"hello\x1b[>1u world \x1b[>4;2m text \x1b[<u\x1b[>4;0m")
+
+    assert b"\x1b[>1u" in writes      # kitty push
+    assert b"\x1b[>4;2m" in writes    # modifyOtherKeys on
+    assert b"\x1b[<u" in writes       # kitty pop
+    assert b"\x1b[>4;0m" in writes    # modifyOtherKeys off
+    # Only the negotiation sequences are mirrored, never the text around them.
+    assert all(payload.startswith(b"\x1b[") for payload in writes)
+
+
+def test_ctrl_c_clears_passthrough_prompt_and_is_remembered():
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.passthrough_prompt = bytearray(b"half-typed prompt")
+    runner.passthrough_escape = None
+    runner._last_ctrl_c_at = 0.0
+
+    runner._update_passthrough_prompt([b"\x03"])
+
+    assert runner.passthrough_prompt == bytearray(b"")  # backend cleared its input
+    assert runner._last_ctrl_c_at > 0.0
+
+
+def test_backend_exit_after_forwarded_ctrl_c_exits_with_it():
+    # The user quit the backend through its own keybinding (e.g. Claude's
+    # double Ctrl-C): aGiT must follow it out gracefully, not relaunch the
+    # session they just closed.
+    runner = ProxyRunner.__new__(ProxyRunner)
+    events = []
+    runner._debug = lambda *a, **k: None
+    runner._last_ctrl_c_at = time.monotonic()
+    runner._finalize_on_backend_exit = lambda: events.append("finalize")
+    runner._restart_agent = lambda message: events.append("relaunch")
+
+    assert runner._relaunch_backend_or_exit() is False
+    assert events == ["finalize"]
+
+
+def test_backend_exit_without_recent_ctrl_c_still_relaunches():
+    # Claude exiting via Esc on its native session picker (no Ctrl-C involved)
+    # keeps the existing recover-and-resume behavior.
+    runner = ProxyRunner.__new__(ProxyRunner)
+    events = []
+    runner._debug = lambda *a, **k: None
+    runner._last_ctrl_c_at = 0.0
+    runner._relaunch_times = []
+    runner.child_pid = 1234
+    runner._finalize_on_backend_exit = lambda: events.append("finalize")
+    runner._restart_agent = lambda message: events.append("relaunch")
+
+    assert runner._relaunch_backend_or_exit() is True
+    assert events == ["relaunch"]
