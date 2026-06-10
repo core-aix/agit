@@ -55,6 +55,9 @@ from agit.proxy.renderer import (
 )
 # TerminalHost lives in terminal.py (P1).
 from agit.proxy.terminal import TerminalHost
+# Modal state-machines (P6 Stage 2): PromptModal and SelectModal encode the
+# byte-handling logic for free-text and selection popups.
+from agit.proxy.modal import PromptModal, SelectModal, _escape_sequence_complete
 
 _SGR_MOUSE_RE = re.compile(rb"\x1b\[<\d+;\d+;\d+[Mm]")
 _SGR_MOUSE_EVENT_RE = re.compile(rb"\x1b\[<(\d+);(\d+);(\d+)([Mm])")
@@ -107,15 +110,6 @@ class RepoChangeHandler(FileSystemEventHandler):
             return
         self.changed.set()
 
-
-def _escape_sequence_complete(sequence: bytes) -> bool:
-    if sequence.startswith(b"\x1b[<"):
-        return sequence[-1:] in {b"M", b"m"}
-    if sequence.startswith(b"\x1b[M"):
-        return len(sequence) >= 6
-    if sequence.startswith(b"\x1b["):
-        return len(sequence) >= 3 and 0x40 <= sequence[-1] <= 0x7E
-    return len(sequence) >= 2
 
 
 class ProxyInput:
@@ -989,7 +983,11 @@ class ProxyRunner:
         return f"session-{number}"
 
     def _prompt_startup_name(self, continuing: bool) -> str:
-        # Asked in cooked mode, before the alt-screen is entered.
+        # Pre-reactor, cooked mode: the alt-screen has not been entered yet so
+        # the terminal is still in line-buffered cooked mode.  Using input()
+        # here is intentional — the reactor loop is not running, so there are
+        # no PTY fds to drain, and the simple cooked readline is the right tool.
+        # Do NOT convert this to a modal; modals require the reactor to be live.
         default = self._first_free_session_name()
         print("Continuing a conversation that has no name yet."
               if continuing else "Starting a new session.")
@@ -2185,119 +2183,187 @@ class ProxyRunner:
         return mapping
 
     def _loop(self) -> int:
+        # Main event loop.  Each iteration is decomposed into five named reactor
+        # phases; the phases communicate via a simple sentinel convention:
+        #   "continue"  → restart the while loop immediately (skip later phases)
+        #   "break"     → leave the while loop (clean exit)
+        #   int         → leave the while loop and return that exit code
+        #   None        → proceed to the next phase as usual
         assert self.master_fd is not None
         while self.running:
-            timeout = 0.016 if self._render_pending else 0.2
-            background = self._background_fds()
-            readable, _, _ = select.select([sys.stdin.fileno(), self.master_fd, *background], [], [], timeout)
-            for fd in readable:
-                if fd in background:
-                    self._pump_background(background[fd])
-            if self.master_fd in readable:
-                output = self._drain_child_output()
-                if output is None:
-                    sample = self.last_child_output_sample[-2048:].decode(errors="replace").replace("\x1b", "\\x1b")
-                    self._debug(f"master_fd closed (backend gone); last_output={sample!r}")
-                    self._raw_capture("EOF", b"")
-                    if self._handle_active_session_exit():
-                        continue
-                    if self._relaunch_backend_or_exit():
-                        continue
-                    break
-                if output:
-                    self._raw_capture("<", output)
-                    self.last_child_output = time.monotonic()
-                    self.last_child_output_sample = (self.last_child_output_sample + output)[-4096:]
-                    self._answer_terminal_queries(output)
-                    self._sync_terminal_modes(output)
-                    self._track_sync_update(output)
-                    self._feed_child_output(output)
-                    self._render_output()
-            if sys.stdin.fileno() in readable:
-                data = os.read(sys.stdin.fileno(), 4096)
-                self._raw_capture(">", data)
-                # Any keypress dismisses a sticky message (e.g. the auto-commit
-                # confirmation) so it no longer overlays the live view; repaint to
-                # remove the popup even if the key produces no child echo.
-                if self._clear_sticky_message_on_input():
-                    self._render_pending = True
-                data = self._input_tail + data
-                data, self._input_tail = self._hold_incomplete_tail(data)
-                data = self._intercept_scroll(data)
-                was_capturing = self.input.capturing
-                forwarded, local_echo, command, should_exit = self.input.feed(data)
-                if should_exit:
-                    # One shared flow (also reachable from inside popups): a
-                    # second Ctrl-C during the confirmation popup exits
-                    # immediately but still finalizes pending work first.
-                    if self._run_exit_flow():
-                        break
-                    self._render()
-                    continue
-                if local_echo:
-                    self._render_status(local_echo.decode(errors="ignore"))
-                if self.input.capturing:
-                    self._render()
-                elif was_capturing and command is None:
-                    self._render()
-                if forwarded:
-                    self.scroll_back = 0  # interacting snaps back to the live view
-                    submit = self._forwarded_submits(forwarded)
-                    self._update_passthrough_prompt(forwarded)
-                    submitted_prompt = ""
-                    if submit:
-                        submitted_prompt = self.passthrough_prompt.decode(errors="ignore").strip()
-                        if not self._pre_agent_commit_if_needed(submitted_prompt):
-                            self.pending_forwarded = [chunk for chunk in forwarded if chunk in {b"\r", b"\n"}]
-                            self.pending_prompt_text = submitted_prompt
-                            forwarded = [chunk for chunk in forwarded if chunk not in {b"\r", b"\n"}]
-                            submit = False
-                    if submit:
-                        self.passthrough_prompt.clear()
-                        self.passthrough_escape = None
-                    if forwarded:
-                        if submit:
-                            self.agent_in_flight = True
-                            if submitted_prompt:
-                                # A new prompt starts a turn on its own branch.
-                                self._ensure_turn_branch()
-                        self.active.process.write(b"".join(forwarded))
-                if command:
-                    self._run_command(command)
-            self._flush_pending_render()
-            self._flush_pending_enter()
-            if self.merge_ctx:
-                # A merge is being resolved; don't make normal commits meanwhile.
-                self._maybe_complete_agent_merge()
-            else:
-                self._check_base_branch_drift()  # pause merging before any integration runs
-                self._resume_pending_prompt_if_ready()
-                self._ensure_worktree_alive()
-                self._maybe_agent_commit()
-                self._service_background_sessions()
-                self._poll_base_advanced()
-                self._warn_if_base_edited()
-                self._warn_if_cwd_drifted()
-            if self._base_advanced:
-                self._base_advanced = False
-                self._sync_idle_worktrees_to_base()
-            self._reap_stopped_children()  # collect SIGINT'd backends as they exit
-            if self.child_pid is not None:
-                done, status = os.waitpid(self.child_pid, os.WNOHANG)
-                if done:
-                    exit_code = os.waitstatus_to_exitcode(status) if hasattr(os, "waitstatus_to_exitcode") else 0
-                    sample = self.last_child_output_sample[-512:].decode(errors="replace").replace("\x1b", "\\x1b")
-                    self._debug(f"child exited pid={self.child_pid} status={status} exit_code={exit_code} last_output={sample!r}")
-                    # Same handling as the master_fd-EOF path: switch away (multi
-                    # session) or relaunch+resume (single) so Claude exiting its own
-                    # picker on Esc doesn't take aGiT down. These two detectors race;
-                    # whichever sees the exit first must relaunch.
-                    if self._handle_active_session_exit():
-                        continue
-                    if self._relaunch_backend_or_exit():
-                        continue
-                    return exit_code
+            # --- phase 1: select ------------------------------------------
+            background, readable = self._reactor_select_phase()
+            # --- phase 2: pty-output --------------------------------------
+            sentinel = self._reactor_pty_output_phase(readable)
+            if sentinel == "continue":
+                continue
+            if sentinel == "break":
+                break
+            # --- phase 3: stdin -------------------------------------------
+            sentinel = self._reactor_stdin_phase(readable)
+            if sentinel == "continue":
+                continue
+            if sentinel == "break":
+                break
+            # --- phase 4: timers / background tasks -----------------------
+            self._reactor_timers_phase()
+            # --- phase 5: child-exit --------------------------------------
+            sentinel = self._reactor_child_exit_phase()
+            if sentinel == "continue":
+                continue
+            if isinstance(sentinel, int):
+                return sentinel
         return 0
+
+    # ------------------------------------------------------------------
+    # Reactor phases (called exclusively from _loop)
+    # ------------------------------------------------------------------
+
+    def _reactor_select_phase(self) -> tuple[dict, list]:
+        """Phase 1 — compute the fd set, block in select, drain background PTYs.
+
+        Returns (background_fds_map, readable_list).  Background sessions are
+        drained here so their PTY buffers never fill up regardless of which
+        phase the main loop is in.
+        """
+        timeout = 0.016 if self._render_pending else 0.2
+        background = self._background_fds()
+        readable, _, _ = select.select([sys.stdin.fileno(), self.master_fd, *background], [], [], timeout)
+        for fd in readable:
+            if fd in background:
+                self._pump_background(background[fd])
+        return background, readable
+
+    def _reactor_pty_output_phase(self, readable: list) -> "str | None":
+        """Phase 2 — drain and process the active session's PTY output.
+
+        Returns a loop-control sentinel or None to continue normally.
+        """
+        if self.master_fd not in readable:
+            return None
+        output = self._drain_child_output()
+        if output is None:
+            sample = self.last_child_output_sample[-2048:].decode(errors="replace").replace("\x1b", "\\x1b")
+            self._debug(f"master_fd closed (backend gone); last_output={sample!r}")
+            self._raw_capture("EOF", b"")
+            if self._handle_active_session_exit():
+                return "continue"
+            if self._relaunch_backend_or_exit():
+                return "continue"
+            return "break"
+        if output:
+            self._raw_capture("<", output)
+            self.last_child_output = time.monotonic()
+            self.last_child_output_sample = (self.last_child_output_sample + output)[-4096:]
+            self._answer_terminal_queries(output)
+            self._sync_terminal_modes(output)
+            self._track_sync_update(output)
+            self._feed_child_output(output)
+            self._render_output()
+        return None
+
+    def _reactor_stdin_phase(self, readable: list) -> "str | None":
+        """Phase 3 — read stdin and route bytes to the active session or handler.
+
+        Returns a loop-control sentinel or None to continue normally.
+        """
+        if sys.stdin.fileno() not in readable:
+            return None
+        data = os.read(sys.stdin.fileno(), 4096)
+        self._raw_capture(">", data)
+        # Any keypress dismisses a sticky message (e.g. the auto-commit
+        # confirmation) so it no longer overlays the live view; repaint to
+        # remove the popup even if the key produces no child echo.
+        if self._clear_sticky_message_on_input():
+            self._render_pending = True
+        data = self._input_tail + data
+        data, self._input_tail = self._hold_incomplete_tail(data)
+        data = self._intercept_scroll(data)
+        was_capturing = self.input.capturing
+        forwarded, local_echo, command, should_exit = self.input.feed(data)
+        if should_exit:
+            # One shared flow (also reachable from inside popups): a
+            # second Ctrl-C during the confirmation popup exits
+            # immediately but still finalizes pending work first.
+            if self._run_exit_flow():
+                return "break"
+            self._render()
+            return "continue"
+        if local_echo:
+            self._render_status(local_echo.decode(errors="ignore"))
+        if self.input.capturing:
+            self._render()
+        elif was_capturing and command is None:
+            self._render()
+        if forwarded:
+            self.scroll_back = 0  # interacting snaps back to the live view
+            submit = self._forwarded_submits(forwarded)
+            self._update_passthrough_prompt(forwarded)
+            submitted_prompt = ""
+            if submit:
+                submitted_prompt = self.passthrough_prompt.decode(errors="ignore").strip()
+                if not self._pre_agent_commit_if_needed(submitted_prompt):
+                    self.pending_forwarded = [chunk for chunk in forwarded if chunk in {b"\r", b"\n"}]
+                    self.pending_prompt_text = submitted_prompt
+                    forwarded = [chunk for chunk in forwarded if chunk not in {b"\r", b"\n"}]
+                    submit = False
+            if submit:
+                self.passthrough_prompt.clear()
+                self.passthrough_escape = None
+            if forwarded:
+                if submit:
+                    self.agent_in_flight = True
+                    if submitted_prompt:
+                        # A new prompt starts a turn on its own branch.
+                        self._ensure_turn_branch()
+                self.active.process.write(b"".join(forwarded))
+        if command:
+            self._run_command(command)
+        return None
+
+    def _reactor_timers_phase(self) -> None:
+        """Phase 4 — flush pending renders, deferred enters, and all background tasks."""
+        self._flush_pending_render()
+        self._flush_pending_enter()
+        if self.merge_ctx:
+            # A merge is being resolved; don't make normal commits meanwhile.
+            self._maybe_complete_agent_merge()
+        else:
+            self._check_base_branch_drift()  # pause merging before any integration runs
+            self._resume_pending_prompt_if_ready()
+            self._ensure_worktree_alive()
+            self._maybe_agent_commit()
+            self._service_background_sessions()
+            self._poll_base_advanced()
+            self._warn_if_base_edited()
+            self._warn_if_cwd_drifted()
+        if self._base_advanced:
+            self._base_advanced = False
+            self._sync_idle_worktrees_to_base()
+
+    def _reactor_child_exit_phase(self) -> "str | int | None":
+        """Phase 5 — reap stopped children and check whether the active child exited.
+
+        Returns a loop-control sentinel (``"continue"``, an ``int`` exit code),
+        or ``None`` to proceed normally.
+        """
+        self._reap_stopped_children()  # collect SIGINT'd backends as they exit
+        if self.child_pid is not None:
+            done, status = os.waitpid(self.child_pid, os.WNOHANG)
+            if done:
+                exit_code = os.waitstatus_to_exitcode(status) if hasattr(os, "waitstatus_to_exitcode") else 0
+                sample = self.last_child_output_sample[-512:].decode(errors="replace").replace("\x1b", "\\x1b")
+                self._debug(f"child exited pid={self.child_pid} status={status} exit_code={exit_code} last_output={sample!r}")
+                # Same handling as the master_fd-EOF path: switch away (multi
+                # session) or relaunch+resume (single) so Claude exiting its own
+                # picker on Esc doesn't take aGiT down. These two detectors race;
+                # whichever sees the exit first must relaunch.
+                if self._handle_active_session_exit():
+                    return "continue"
+                if self._relaunch_backend_or_exit():
+                    return "continue"
+                return exit_code
+        return None
 
     def _drain_child_output(self) -> bytes | None:
         # Delegate to the session-owned BackendProcess for the bounded PTY read loop.
@@ -2414,6 +2480,10 @@ class ProxyRunner:
             os.write(sys.stdout.fileno(), match.group(0))
 
     def _detect_host_terminal(self) -> None:
+        # Pre-reactor: called once during run() startup, before _loop() starts.
+        # The bounded 0.5 s select-and-read loop inside terminal.py is correct
+        # here because no PTY children are running yet and no reactor iteration
+        # is live.  Do NOT convert to a modal — there is nothing to drain yet.
         TerminalHost.detect_host_terminal(self, debug_fn=self._debug if self.debug_proxy else None)
     def _parse_host_terminal_responses(self, data: bytes) -> None:
         TerminalHost.parse_host_terminal_responses(self, data, debug_fn=self._debug if self.debug_proxy else None)
@@ -2771,82 +2841,59 @@ class ProxyRunner:
             if stdin_fd in readable:
                 return os.read(stdin_fd, 32)
 
-    def _prompt_popup(self, title: str, prompt: str, *, default: str = "") -> str | None:
-        value = default
-        escape_buffer: bytearray | None = None
+    def _run_modal(self, modal: "PromptModal | SelectModal") -> "str | None":
+        """Run *modal* to completion, keeping all session PTYs draining.
+
+        This is the shared reactor iteration for modal dialogs.  It repeatedly:
+          1. Renders the modal's current message via ``_set_message`` + ``_render``.
+          2. Calls ``_popup_read_input()`` — which selects on stdin AND every
+             session PTY so back-pressure never builds up while the popup is open.
+          3. Passes the bytes to ``modal.feed()`` and acts on the returned action:
+
+             ``("done",   value)``  — clears the message, renders, and returns value.
+             ``("cancel", None)``   — clears the message, renders, and returns None.
+             ``("exit",   None)``   — calls ``_run_exit_flow()``; returns None on
+                                      confirmed exit, otherwise redraws and continues.
+             ``("redraw", None)``   — redraws and continues.
+
+        The call-shape is synchronous, which preserves the ~25 existing call
+        sites unmodified.  ``_prompt_popup`` and ``_select_popup`` are thin
+        facades that construct the appropriate modal and delegate here.
+        """
         while True:
-            self._set_message(f"{title}\n{prompt}\n> {value}", seconds=60)
+            self._set_message(modal.render_message(), seconds=60)
             self._render()
             data = self._popup_read_input()
-            if data == b"\x1b":
+            action, value = modal.feed(data)
+            if action == "done":
+                self._clear_message()
+                self._render()
+                return value
+            if action == "cancel":
                 self._clear_message()
                 self._render()
                 return None
-            for byte in data:
-                char = bytes([byte])
-                if escape_buffer is not None:
-                    escape_buffer.extend(char)
-                    if _escape_sequence_complete(bytes(escape_buffer)):
-                        escape_buffer = None
-                    continue
-                if char == b"\x03":
-                    if self._run_exit_flow():
-                        return None
-                    break  # exit declined: redraw the popup and keep listening
-                if char == b"\x1b":
-                    escape_buffer = bytearray(char)
-                    continue
-                if char in {b"\r", b"\n"}:
-                    self._clear_message()
-                    self._render()
-                    return value
-                if char in {b"\x7f", b"\b"}:
-                    value = value[:-1]
-                elif byte >= 32:
-                    value += char.decode(errors="ignore")
+            if action == "exit":
+                if self._run_exit_flow():
+                    return None
+                # Exit declined: redraw the modal and keep listening.
+
+    def _prompt_popup(self, title: str, prompt: str, *, default: str = "") -> str | None:
+        """Free-text input popup.  Thin facade over ``_run_modal(PromptModal(...))``.
+
+        Tests stub this method heavily; the name and signature are stable.
+        """
+        return self._run_modal(PromptModal(title, prompt, default=default))
 
     def _select_popup(self, title: str, options: list[str]) -> str | None:
+        """Selection popup.  Thin facade over ``_run_modal(SelectModal(...))``.
+
+        Tests stub this method heavily; the name and signature are stable.
+        Returns ``""`` immediately when *options* is empty (unchanged behaviour).
+        """
         if not options:
             return ""
-        selected = 0
-        escape_buffer: bytearray | None = None
-        while True:
-            lines = [title, "Up/Down selects. Enter confirms.", ""]
-            for index, option in enumerate(options):
-                prefix = "> " if index == selected else "  "
-                lines.append(prefix + option)
-            self._set_message("\n".join(lines), seconds=60)
-            self._render()
-            data = self._popup_read_input()
-            if data == b"\x1b":
-                self._clear_message()
-                self._render()
-                return None
-            for byte in data:
-                char = bytes([byte])
-                if escape_buffer is not None:
-                    escape_buffer.extend(char)
-                    sequence = bytes(escape_buffer)
-                    if sequence == b"\x1b[A":
-                        selected = (selected - 1) % len(options)
-                        escape_buffer = None
-                    elif sequence == b"\x1b[B":
-                        selected = (selected + 1) % len(options)
-                        escape_buffer = None
-                    elif _escape_sequence_complete(sequence):
-                        escape_buffer = None
-                    continue
-                if char == b"\x03":
-                    if self._run_exit_flow():
-                        return None
-                    break  # exit declined: redraw the popup and keep listening
-                if char == b"\x1b":
-                    escape_buffer = bytearray(char)
-                    continue
-                if char in {b"\r", b"\n"}:
-                    self._clear_message()
-                    self._render()
-                    return options[selected]
+        return self._run_modal(SelectModal(title, options))
 
     def _create_user_commit_popup(self, *, repo: GitRepo | None = None, state: AgitState | None = None) -> bool:
         # Defaults to the active worktree (capturing uncommitted worktree changes
@@ -3010,13 +3057,20 @@ class ProxyRunner:
         return choice == "Yes, exit"
 
     def _run_exit_flow(self) -> bool:
-        # THE exit path: confirm, confirm terminating running background
-        # sessions, finalize pending work, then exit. Used by the main loop's
-        # Ctrl-C handling, the exit command, and Ctrl-C inside any popup — so
-        # no route out of aGiT can skip _finalize_pending_work(). A second
-        # Ctrl-C while the confirmation popup is open lands in the nested
-        # branch below and exits immediately BUT still gracefully (finalize
-        # included). Returns True when aGiT is exiting.
+        # THE single exit path (P6 Stage 3 — exit-path unification).
+        #
+        # Every interactive way out of aGiT goes through here:
+        #   * Main loop: Ctrl-C in _reactor_stdin_phase → _run_exit_flow()
+        #   * Modal: Ctrl-C inside any popup → _run_modal() → _run_exit_flow()
+        #   * "exit" command: _run_command("exit") → _run_exit_flow()
+        #
+        # This guarantees _finalize_pending_work() is never skipped for
+        # interactive exits.  Signal exits (SIGTERM/SIGHUP) go through
+        # _handle_exit_signal which does a fast non-interactive teardown.
+        #
+        # Double-Ctrl-C: a second Ctrl-C while the confirmation popup is open
+        # sets _popup_exit_force and exits immediately — but still gracefully
+        # (finalize included). Returns True when aGiT is exiting.
         if getattr(self, "_popup_exit_pending", False):
             # A second Ctrl-C, inside one of the exit-confirmation popups: take
             # it as an emphatic yes — skip the questions, keep the finalize.
