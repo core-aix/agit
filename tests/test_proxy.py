@@ -10,6 +10,7 @@ from agit.backends.base import TokenUsage
 from agit.opencode_session import SessionTurn
 from agit.backends.proxy_agents import make_proxy_agent
 from agit.proxy import ProxyInput, ProxyRunner, _escape_sequence_complete, _short_session, detect_color_mode
+from agit.proxy.integration import MergeContext, MergePhase
 from agit.session import ExportedSession, SessionRef
 from agit.state import AgitState
 
@@ -1162,7 +1163,7 @@ def test_inject_prompt_defers_enter_until_text_settles():
     try:
         runner = ProxyRunner.__new__(ProxyRunner)
         runner.master_fd = write_fd
-        runner.merge_ctx = {"prompt_sent_at": None}
+        runner.merge_ctx = MergeContext(source_branch="agit/s/t1", context="", phase=MergePhase.PENDING)
         runner._pending_enter_at = None
 
         runner._inject_prompt("resolve the\nconflict   now")
@@ -1171,7 +1172,7 @@ def test_inject_prompt_defers_enter_until_text_settles():
         typed = os.read(read_fd, 4096)
         assert typed == b"resolve the conflict now"
         assert runner._pending_enter_at is not None
-        assert runner.merge_ctx["prompt_sent_at"] is None  # not submitted yet
+        assert runner.merge_ctx.prompt_sent_at is None  # not submitted yet
 
         # Too early: the Enter is still pending.
         runner._flush_pending_enter()
@@ -1182,7 +1183,8 @@ def test_inject_prompt_defers_enter_until_text_settles():
         runner._flush_pending_enter()
         assert os.read(read_fd, 16) == b"\r"
         assert runner._pending_enter_at is None
-        assert runner.merge_ctx["prompt_sent_at"] is not None
+        assert runner.merge_ctx.prompt_sent_at is not None
+        assert runner.merge_ctx.phase is MergePhase.RESOLVING  # PENDING → RESOLVING on Enter
     finally:
         os.close(read_fd)
         os.close(write_fd)
@@ -1928,7 +1930,7 @@ def test_service_background_finalizes_pending_merge():
     runner = _mux_runner()
     runner.merge_ctx = None
     b = _bg_session("B")
-    b.merge_ctx = {"source_branch": "agit/B/t1"}
+    b.merge_ctx = MergeContext(source_branch="agit/B/t1", context="")
     runner.sessions.append(b)
     called = []
     runner._with_session = lambda session, fn: called.append((session.name, fn.__name__))
@@ -1940,7 +1942,7 @@ def test_service_background_finalizes_pending_merge():
 
 def test_service_background_skips_while_active_merge_in_progress():
     runner = _mux_runner()
-    runner.merge_ctx = {"busy": 1}
+    runner.merge_ctx = MergeContext(source_branch="agit/A/t1", context="")  # any truthy merge_ctx
     b = _bg_session("B")
     b.agent_in_flight = True
     runner.sessions.append(b)
@@ -2019,16 +2021,18 @@ def test_flush_pending_enter_marks_sent_only_when_still_active(monkeypatch):
     # Same session still active -> prompt_sent_at is recorded.
     active = ProxyRunner.__new__(ProxyRunner)
     active._pending_enter_at, active._pending_enter_fd, active.master_fd = 0.0, 7, 7
-    active.merge_ctx = {"prompt_sent_at": None}
+    active.merge_ctx = MergeContext(source_branch="agit/s/t1", context="", phase=MergePhase.PENDING)
     active._flush_pending_enter()
-    assert active.merge_ctx["prompt_sent_at"] is not None
+    assert active.merge_ctx.prompt_sent_at is not None
+    assert active.merge_ctx.phase is MergePhase.RESOLVING  # PENDING promoted to RESOLVING
 
     # Switched away -> the active session's merge_ctx is NOT marked.
     switched = ProxyRunner.__new__(ProxyRunner)
     switched._pending_enter_at, switched._pending_enter_fd, switched.master_fd = 0.0, 7, 99
-    switched.merge_ctx = {"prompt_sent_at": None}
+    switched.merge_ctx = MergeContext(source_branch="agit/s/t1", context="", phase=MergePhase.PENDING)
     switched._flush_pending_enter()
-    assert switched.merge_ctx["prompt_sent_at"] is None
+    assert switched.merge_ctx.prompt_sent_at is None
+    assert switched.merge_ctx.phase is MergePhase.PENDING  # not promoted (Enter went to different fd)
 
 
 # --- session name uniqueness + per-backend resume ---

@@ -73,20 +73,29 @@ class MergePhase(Enum):
 
 @dataclass
 class MergeContext:
-    """Replaces the ad-hoc ``merge_ctx`` dict.  Stored on ``Session.merge_ctx``.
+    """In-progress agent-assisted merge resolution.  Stored on ``Session.merge_ctx``.
 
-    ``auto_tried`` is kept for backward compatibility with ProxyRunner.__new__
-    test sites that check ``ctx.get("auto_tried")``.  New code should test
-    ``phase`` instead.
+    ``auto_tried`` encodes the old ``merge_ctx["auto_tried"]`` flag:
+    - For AUTO contexts (agent resolves conflicts): starts False; set to True
+      after the first auto-finalize attempt so it is never tried twice.
+    - For MANUAL contexts (user resolves): set to True at creation so
+      ``should_auto_complete_merge`` never fires for them.
+
+    ``phase`` formalises the lifecycle:
+    - PENDING  → auto: merge started, prompt injected, waiting for Enter to land.
+    - RESOLVING → auto: Enter sent; agent output expected.
+    - MANUAL   → user resolves manually; no auto-finalize ever.
+
+    The dict-shim methods (``get``, ``__getitem__``, ``__setitem__``,
+    ``__contains__``) are kept because existing runner call sites use
+    ``ctx["prompt_sent_at"]`` and ``ctx.get("auto_tried")`` notation;
+    production always constructs MergeContext (never plain dicts).
     """
 
     source_branch: str
     context: str
     started: float = field(default_factory=time.monotonic)
     phase: MergePhase = MergePhase.PENDING
-    # Backward-compat aliases used by existing runner code:
-    # ``ctx["auto_tried"]`` → ``ctx.auto_tried``
-    # ``ctx["prompt_sent_at"]`` → ``ctx.prompt_sent_at``
     auto_tried: bool = False
     prompt_sent_at: float | None = None
 
@@ -172,32 +181,39 @@ class IntegrationService:
     # Base-alignment helpers
     # ------------------------------------------------------------------
 
-    def align_session_to_base(self, repo: GitRepo) -> None:
+    def align_session_to_base(self, repo: GitRepo) -> str:
         """Bring an idle session worktree up to date with the base branch.
 
         Two cases:
         - No unintegrated commits → re-point (detach) at the current base.
         - Has its own work → merge new base commits in cleanly; skip on conflict.
         A dirty or mid-merge worktree is left untouched.
+
+        Returns a short outcome string for the caller to log:
+        - ``"merged:<branch>"``  — base merged cleanly into session branch.
+        - ``"conflict:<branch>"`` — base conflicts with session branch; aborted.
+        - ``"repointed"``        — session worktree re-pointed to base.
+        - ``"noop"``             — nothing to do.
+
+        Raises on unexpected git errors so the caller can log them.
         """
         if self.base_branch is None:
-            return
-        try:
-            if repo.merge_in_progress() or repo.has_changes():
-                return
-            branch = repo.current_branch()
-            if branch.startswith("agit/") and self.base_repo.log_range(self.base_branch, branch):
-                if not self.base_repo.log_range(branch, self.base_branch):
-                    return  # already contains the base
-                if repo.merge(self.base_branch):
-                    pass  # clean merge
-                else:
-                    repo.merge_abort()  # conflicts; leave for integration
-                return
-            if repo.rev_parse("HEAD") != self.base_repo.rev_parse(self.base_branch):
-                repo.switch_detach(self.base_branch)
-        except Exception:
-            pass  # caller may log if needed
+            return "noop"
+        if repo.merge_in_progress() or repo.has_changes():
+            return "noop"
+        branch = repo.current_branch()
+        if branch.startswith("agit/") and self.base_repo.log_range(self.base_branch, branch):
+            if not self.base_repo.log_range(branch, self.base_branch):
+                return "noop"  # already contains the base
+            if repo.merge(self.base_branch):
+                return f"merged:{branch}"
+            else:
+                repo.merge_abort()  # conflicts; leave for integration
+                return f"conflict:{branch}"
+        if repo.rev_parse("HEAD") != self.base_repo.rev_parse(self.base_branch):
+            repo.switch_detach(self.base_branch)
+            return "repointed"
+        return "noop"
 
     def worktree_has_pending_work(self, repo: GitRepo, branch: str) -> bool:
         """Return True if the worktree has uncommitted changes or unintegrated commits."""
@@ -271,6 +287,7 @@ class IntegrationService:
         """Clean up a session's branch on exit: integrate committed work or drop empty branch.
 
         Conflicts and dirty trees are left intact for the next startup.
+        Raises on unexpected git errors so the caller can log them.
         """
         if self.base_branch is None:
             return
@@ -279,16 +296,14 @@ class IntegrationService:
         branch = repo.current_branch()
         if not branch.startswith("agit/"):
             return
-        try:
-            if not self.base_repo.log_range(self.base_branch, branch):
-                self._advance_base(repo, branch)
-                return
-            if repo.merge(self.base_branch):
-                self._advance_base(repo, branch)
-            else:
-                repo.merge_abort()
-        except Exception:
-            pass
+        if not self.base_repo.log_range(self.base_branch, branch):
+            # Nothing ahead of base: just drop the empty turn branch.
+            self._advance_base(repo, branch)
+            return
+        if repo.merge(self.base_branch):
+            self._advance_base(repo, branch)
+        else:
+            repo.merge_abort()
 
     # ------------------------------------------------------------------
     # Merge-context lifecycle
@@ -337,7 +352,7 @@ class IntegrationService:
 
     def should_auto_complete_merge(
         self,
-        merge_ctx,
+        merge_ctx: MergeContext,
         last_child_output: float,
         child_idle_seconds: float,
     ) -> bool:
@@ -349,16 +364,14 @@ class IntegrationService:
         3. The agent has been idle for ``child_idle_seconds + 2`` seconds.
         4. Auto-complete has not already been attempted (``auto_tried`` is False).
 
-        ``merge_ctx`` may be a :class:`MergeContext` or a legacy plain dict.
+        MANUAL contexts always have ``auto_tried=True`` and are never auto-finalized.
         """
-        # Support both MergeContext (attribute access) and legacy plain dicts.
-        get = merge_ctx.get if hasattr(merge_ctx, "get") else merge_ctx.__getitem__
-        if get("auto_tried"):
+        if merge_ctx.auto_tried:
             return False
-        sent_at = get("prompt_sent_at") if "prompt_sent_at" in merge_ctx else None
-        if not sent_at:
+        sent_at = merge_ctx.prompt_sent_at
+        if not sent_at:  # the submit Enter has not gone out yet
             return False
-        if last_child_output <= sent_at:
+        if last_child_output <= sent_at:  # agent has not responded yet
             return False
         if time.monotonic() - last_child_output < child_idle_seconds + 2:
             return False
@@ -377,40 +390,35 @@ class IntegrationService:
         """Attempt to finalize a pending agent merge.
 
         Returns ``(success, message)`` where ``message`` is a UI string to
-        display (or None on conflict-markers present).  On success the caller
+        display (or None when merge is not in progress).  On success the caller
         must clear ``session.merge_ctx`` and clear ``agent_in_flight``.
+
+        Raises on unexpected git errors so the caller can log and keep
+        ``merge_ctx`` intact (the user should still be able to retry).
         """
-        # Support both MergeContext objects and legacy plain dicts.
-        source_branch = (
-            merge_ctx["source_branch"] if isinstance(merge_ctx, dict) else merge_ctx.source_branch
-        )
-        ctx_context = (
-            merge_ctx.get("context") if isinstance(merge_ctx, dict) else merge_ctx.context
-        )
-        try:
-            if not repo.merge_in_progress():
-                return False, None  # already resolved/aborted elsewhere
-            repo.add_all()
-            if repo.has_conflict_markers() or repo.unmerged_paths():
-                return False, (
-                    "Conflict markers remain. Resolve them (or ask the agent again), "
-                    "then Ctrl-G → session → Complete merge."
-                )
-            repo.commit(
-                build_agent_merge_message(
-                    session_name=session_name,
-                    base_branch=self.base_branch,
-                    source_branch=source_branch,
-                    agit_session_id=agit_session_id,
-                    backend=backend_name,
-                    backend_session_id=backend_session_id,
-                    conflicting_commits=ctx_context,
-                )
+        source_branch = merge_ctx.source_branch
+        ctx_context = merge_ctx.context
+        if not repo.merge_in_progress():
+            return False, None  # already resolved/aborted elsewhere
+        repo.add_all()
+        if repo.has_conflict_markers() or repo.unmerged_paths():
+            return False, (
+                "Conflict markers remain. Resolve them (or ask the agent again), "
+                "then Ctrl-G → session → Complete merge."
             )
-            self._advance_base(repo, source_branch)
-            return True, f"Merge resolved and committed — integrated '{session_name}' into {self.base_branch}."
-        except Exception:
-            return False, None
+        repo.commit(
+            build_agent_merge_message(
+                session_name=session_name,
+                base_branch=self.base_branch,
+                source_branch=source_branch,
+                agit_session_id=agit_session_id,
+                backend=backend_name,
+                backend_session_id=backend_session_id,
+                conflicting_commits=ctx_context,
+            )
+        )
+        self._advance_base(repo, source_branch)
+        return True, f"Merge resolved and committed — integrated '{session_name}' into {self.base_branch}."
 
     def start_merge(
         self,
@@ -597,16 +605,18 @@ class IntegrationService:
         """Poll the base HEAD and detect out-of-band advances.
 
         Returns ``(new_head, new_poll_at, advanced)`` where ``advanced`` is True
-        when the base moved since the last poll.
+        when the base moved since the last poll.  Returns ``(None, last_poll_at,
+        False)`` when throttled, and ``(None, now, False)`` on failure (the
+        caller is responsible for catching exceptions and logging them).
         """
         if worktree is None or self.base_branch is None:
-            return last_base_head, last_poll_at, False
+            return None, last_poll_at, False
         now = time.monotonic()
         if now - last_poll_at < base_poll_seconds:
-            return last_base_head, last_poll_at, False
+            return None, last_poll_at, False
         try:
             head = self.base_repo.rev_parse(self.base_branch)
         except Exception:
-            return last_base_head, now, False
+            raise
         advanced = last_base_head is not None and head != last_base_head
         return head, now, advanced

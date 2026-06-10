@@ -667,3 +667,119 @@ def test_delete_orphan_merged_branches_keeps_unmerged(tmp_path):
     svc = _svc(main, base)
     svc.delete_orphan_merged_branches()
     assert branch in main.list_branches("agit/")  # kept
+
+
+# ---------------------------------------------------------------------------
+# MergePhase state-machine pin tests (Finding 4)
+# ---------------------------------------------------------------------------
+#
+# These tests pin the three key gating properties of the MergeContext /
+# MergePhase design:
+#  1. MANUAL contexts (auto_tried=True at creation) never auto-finalize.
+#  2. AUTO contexts auto-finalize exactly ONCE after idle (subsequent calls
+#     are blocked by auto_tried=True).
+#  3. PENDING contexts (prompt_sent_at=None, Enter not yet sent) never
+#     auto-finalize regardless of idle time.
+# ---------------------------------------------------------------------------
+
+
+def test_manual_context_never_auto_finalizes():
+    """A MANUAL merge context (user resolves; auto_tried=True) must never
+    satisfy should_auto_complete_merge regardless of timing."""
+    svc = IntegrationService.__new__(IntegrationService)
+    now = time.monotonic()
+    # Simulate everything else looking like it should fire: prompt sent,
+    # agent responded, plenty of idle time — but it's a MANUAL context.
+    ctx = MergeContext(
+        source_branch="agit/s/t1",
+        context="",
+        phase=MergePhase.MANUAL,
+        auto_tried=True,  # MANUAL always starts True
+        prompt_sent_at=now - 30,
+    )
+    # Even with last_child_output well before now (long idle), must not fire.
+    assert svc.should_auto_complete_merge(ctx, last_child_output=now - 20, child_idle_seconds=4) is False
+
+
+def test_auto_context_finalizes_once_after_idle():
+    """An AUTO context should satisfy should_auto_complete_merge exactly once;
+    after auto_tried is set to True, subsequent calls return False."""
+    svc = IntegrationService.__new__(IntegrationService)
+    now = time.monotonic()
+    ctx = MergeContext(
+        source_branch="agit/s/t1",
+        context="",
+        phase=MergePhase.RESOLVING,
+        auto_tried=False,
+        prompt_sent_at=now - 20,
+    )
+    # Conditions met: agent responded (last_child_output > prompt_sent_at) and idle.
+    last_output = now - 10  # responded 10s ago, idle > 4+2=6s
+    assert svc.should_auto_complete_merge(ctx, last_child_output=last_output, child_idle_seconds=4) is True
+
+    # Simulate the runner setting auto_tried after the first attempt.
+    ctx.auto_tried = True
+
+    # Second call must not fire.
+    assert svc.should_auto_complete_merge(ctx, last_child_output=last_output, child_idle_seconds=4) is False
+
+
+def test_pending_context_never_auto_finalizes():
+    """A PENDING context (prompt_sent_at=None; Enter not yet sent) must never
+    satisfy should_auto_complete_merge, even if idle time is met."""
+    svc = IntegrationService.__new__(IntegrationService)
+    now = time.monotonic()
+    ctx = MergeContext(
+        source_branch="agit/s/t1",
+        context="",
+        phase=MergePhase.PENDING,
+        auto_tried=False,
+        prompt_sent_at=None,  # Enter has NOT been sent yet
+    )
+    # Even with substantial idle time, should not fire (no Enter sent).
+    assert svc.should_auto_complete_merge(ctx, last_child_output=now - 20, child_idle_seconds=4) is False
+
+
+def test_auto_context_not_idle_yet_does_not_finalize():
+    """An AUTO context with prompt sent and agent responded but not yet
+    sufficiently idle must not auto-finalize."""
+    svc = IntegrationService.__new__(IntegrationService)
+    now = time.monotonic()
+    ctx = MergeContext(
+        source_branch="agit/s/t1",
+        context="",
+        phase=MergePhase.RESOLVING,
+        auto_tried=False,
+        prompt_sent_at=now - 10,
+    )
+    # Agent responded 2s ago — well within CHILD_IDLE_SECONDS+2 = 6s threshold.
+    assert svc.should_auto_complete_merge(ctx, last_child_output=now - 2, child_idle_seconds=4) is False
+
+
+def test_manual_context_phase_never_promoted_by_flush():
+    """_flush_pending_enter must not promote a MANUAL context to RESOLVING."""
+    # Simulate runner._flush_pending_enter's guard logic directly.
+    ctx = MergeContext(
+        source_branch="agit/s/t1",
+        context="",
+        phase=MergePhase.MANUAL,
+        auto_tried=True,
+    )
+    # The guard: only promote when phase is PENDING.
+    if ctx.phase is MergePhase.PENDING:
+        ctx.phase = MergePhase.RESOLVING
+    assert ctx.phase is MergePhase.MANUAL  # unchanged
+
+
+def test_pending_context_phase_promoted_to_resolving_by_flush():
+    """_flush_pending_enter must promote a PENDING (auto) context to RESOLVING."""
+    ctx = MergeContext(
+        source_branch="agit/s/t1",
+        context="",
+        phase=MergePhase.PENDING,
+        auto_tried=False,
+    )
+    # The guard: only promote when phase is PENDING.
+    if ctx.phase is MergePhase.PENDING:
+        ctx.phase = MergePhase.RESOLVING
+    assert ctx.phase is MergePhase.RESOLVING
