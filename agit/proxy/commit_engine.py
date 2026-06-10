@@ -162,6 +162,10 @@ class CommitEngine:
             # Actions / shell mode: do the staged check first, accumulate only
             # when we know the commit will happen.  Leaves state pristine on
             # a failed attempt (nothing staged → no trace, no tokens written).
+            # The pre-commit hook runs first either way (same ordering as the
+            # proxy branch) so the parameter contract is mode-independent.
+            if pre_commit_fn is not None:
+                pre_commit_fn()
             self.repo.add_tracked()
             stage_untracked_fn(self.repo, self.state)
             if not self.repo.has_staged_changes():

@@ -3,7 +3,6 @@ from __future__ import annotations
 from agit.commit_message import build_user_commit_message
 from agit.git import GitRepo
 from agit.opencode_session import SessionTurn
-from agit.proxy.commit_engine import CommitEngine
 from agit.state import AgitState
 
 
@@ -52,6 +51,11 @@ class AgitActions:
         def on_commit_fn(sha):
             if not quiet:
                 print("Created <agent> commit.")
+
+        # Imported lazily: agit.proxy's package __init__ imports runner, which
+        # imports this module — a top-level import here is circular and breaks
+        # any process importing agit.actions/agit.shell before agit.proxy.
+        from agit.proxy.commit_engine import CommitEngine
 
         return CommitEngine(self.repo, self.state).commit_turns(
             turns=turns,
