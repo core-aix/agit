@@ -59,12 +59,16 @@ def test_write_sends_bytes_to_fd():
         os.close(write_fd)
 
 
-def test_write_is_silent_on_closed_fd():
+def test_write_propagates_oserror_on_closed_fd():
+    # OSError must propagate: call sites have differing error policies (abort
+    # the operation, unwind the loop, or swallow) and implement them themselves,
+    # exactly as they did around the original bare os.write calls.
     read_fd, write_fd = os.pipe()
     os.close(read_fd)
     os.close(write_fd)
     proc = BackendProcess(master_fd=write_fd)
-    proc.write(b"should not raise")  # broken pipe — must not propagate
+    with pytest.raises(OSError):
+        proc.write(b"must raise")
 
 
 def test_write_is_noop_when_master_fd_is_none():
@@ -91,41 +95,52 @@ def test_spawn_trivial_child_and_terminate():
         # Cat echoes input (PTY mode), so we must have received something.
         assert output is not None and len(output) > 0
 
-        # Terminate and reap to avoid a zombie.
+        # terminate() signals and closes but does NOT reap (matching the
+        # original _terminate_child); reap here so the test leaves no zombie.
+        pid = proc.child_pid
         proc.terminate()
         assert proc.child_pid is None
         assert proc.master_fd is None
+        deadline = time.monotonic() + 3.0
+        done = 0
+        while time.monotonic() < deadline:
+            done, _ = os.waitpid(pid, os.WNOHANG)
+            if done:
+                break
+            time.sleep(0.05)
+        if not done:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
     finally:
         if proc.master_fd is not None:
             os.close(proc.master_fd)
-        if proc.child_pid is not None:
-            try:
-                os.kill(proc.child_pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            try:
-                os.waitpid(proc.child_pid, 0)
-            except ChildProcessError:
-                pass
 
 
-def test_spawn_reaps_child_via_cleanup():
+def test_cleanup_terminates_child_via_signal_escalation():
+    # Under a non-interactive shell the child inherits SIGINT=SIG_IGN (POSIX
+    # background-job semantics), so this exercises the SIGTERM escalation path.
+    # cleanup() preserves the original semantics verbatim: it reaps only a child
+    # that dies inside the 1s SIGINT window and does NOT waitpid after SIGTERM.
+    # The contract under test: after cleanup() returns, the child terminates on
+    # its own (the test sends no signal of its own).
     proc = BackendProcess.spawn(["/bin/cat"], cwd="/tmp")
     pid = proc.child_pid
     try:
         proc.cleanup()
-        # After cleanup the child should be dead; waitpid should either already
-        # have reaped it (returns 0) or raise ChildProcessError.
+        deadline = time.monotonic() + 3.0
+        done = 0
         try:
-            done, _ = os.waitpid(pid, os.WNOHANG)
+            while time.monotonic() < deadline:
+                done, _ = os.waitpid(pid, os.WNOHANG)
+                if done:
+                    break
+                time.sleep(0.05)
         except ChildProcessError:
-            done = 1  # already reaped — that's fine
-        # done == 0 would mean the child is still running; that should not happen
-        # within the 1-second SIGINT window (cat exits immediately on SIGINT).
-        # We tolerate done == 0 only if we manage to kill it ourselves.
+            done = pid  # cleanup reaped it inside the SIGINT window
         if not done:
-            os.kill(pid, signal.SIGKILL)
+            os.kill(pid, signal.SIGKILL)  # don't leave a stray cat behind
             os.waitpid(pid, 0)
+        assert done, "cleanup() did not terminate the child (escalation lost)"
     finally:
         if proc.master_fd is not None:
             os.close(proc.master_fd)

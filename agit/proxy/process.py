@@ -112,14 +112,14 @@ class BackendProcess:
     def write(self, data: bytes) -> None:
         """Write *data* to the child's PTY master fd.
 
-        Silently ignores ``OSError`` (e.g. the child already exited).
+        ``OSError`` propagates: call sites have different error semantics (some
+        abort the surrounding operation, some let it unwind the loop), so the
+        policy of swallowing or handling belongs to the caller, exactly as it
+        did when they called ``os.write`` directly.
         """
         if self.master_fd is None:
             return
-        try:
-            os.write(self.master_fd, data)
-        except OSError:
-            pass
+        os.write(self.master_fd, data)
 
     # ------------------------------------------------------------------
     # Resize (PTY ioctl only)
@@ -129,19 +129,18 @@ class BackendProcess:
         """Send ``TIOCSWINSZ`` to the child's PTY master fd.
 
         The caller is responsible for updating its own screen model; this method
-        only performs the kernel ioctl.  Silently ignores ``OSError``.
+        only performs the kernel ioctl. ``OSError`` propagates so the caller can
+        skip follow-up work (e.g. a repaint) when the ioctl failed, matching the
+        original inline behavior.
         """
         if self.master_fd is None:
             return
-        try:
-            import fcntl
-            import struct
-            import termios
+        import fcntl
+        import struct
+        import termios
 
-            winsize = struct.pack("HHHH", rows, cols, 0, 0)
-            fcntl.ioctl(self.master_fd, termios.TIOCSWINSZ, winsize)
-        except OSError:
-            pass
+        winsize = struct.pack("HHHH", rows, cols, 0, 0)
+        fcntl.ioctl(self.master_fd, termios.TIOCSWINSZ, winsize)
 
     # ------------------------------------------------------------------
     # Teardown

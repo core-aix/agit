@@ -756,11 +756,16 @@ class ProxyRunner:
         return self.backend.session_belongs_to_repo(self.repo.repo, session_id)
 
     def _teardown_child(self) -> None:
-        proc = BackendProcess(getattr(self, "master_fd", None), getattr(self, "child_pid", None))
-        proc.teardown()
-        # Sync the nulled fd/pid back to the runner attributes.
-        self.master_fd = proc.master_fd
-        self.child_pid = proc.child_pid
+        # Dispatch through the bound method (not BackendProcess.cleanup directly)
+        # so subclass/test overrides of _cleanup_child keep applying to teardown.
+        self._cleanup_child()
+        if self.master_fd is not None:
+            try:
+                os.close(self.master_fd)
+            except OSError:
+                pass
+            self.master_fd = None
+        self.child_pid = None
 
     def _reset_agent_tracking(self) -> None:
         self.agent_in_flight = False
@@ -1357,7 +1362,10 @@ class ProxyRunner:
             return
         payload = " ".join(text.split()).encode("utf-8", errors="replace")
         proc = BackendProcess(self.master_fd, getattr(self, "child_pid", None))
-        proc.write(payload)
+        try:
+            proc.write(payload)
+        except OSError:
+            return  # text never reached the backend; don't schedule its Enter
         self._pending_enter_at = time.monotonic() + 0.4
         self._pending_enter_fd = self.master_fd  # submit to THIS backend, not whatever is active later
 
@@ -1372,7 +1380,10 @@ class ProxyRunner:
         self._pending_enter_fd = None
         if fd is None:
             return
-        BackendProcess(fd).write(b"\r")
+        try:
+            BackendProcess(fd).write(b"\r")
+        except OSError:
+            return  # Enter never reached the backend; the merge gate stays closed
         if self.merge_ctx is not None and self.master_fd == fd:
             self.merge_ctx["prompt_sent_at"] = time.monotonic()
 
@@ -2647,7 +2658,10 @@ class ProxyRunner:
         if self.host_da and re.search(rb"\x1b\[(?:0)?c", output):
             response += self.host_da
         if response:
-            BackendProcess(self.master_fd, getattr(self, "child_pid", None)).write(bytes(response))
+            try:
+                BackendProcess(self.master_fd, getattr(self, "child_pid", None)).write(bytes(response))
+            except OSError:
+                pass
 
     def _track_sync_update(self, output: bytes) -> None:
         # Honor the synchronized-update mode (DECSET 2026): backends wrap a
