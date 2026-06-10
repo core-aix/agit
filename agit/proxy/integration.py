@@ -493,17 +493,19 @@ class IntegrationService:
         worktree_manager.remove(info.name)
         return True
 
-    def delete_orphan_merged_branches(self) -> None:
-        """Remove agit/* branches that no worktree checks out and are in the base."""
-        try:
-            checked_out = {entry.get("branch") for entry in self.base_repo.worktree_list()}
-            for branch in self.base_repo.list_branches("agit/"):
-                if branch in checked_out:
-                    continue
-                if not self.base_repo.log_range(self.base_branch, branch):
-                    self.base_repo.delete_branch(branch, force=True)
-        except Exception:
-            pass
+    def delete_orphan_merged_branches(self) -> list[str]:
+        """Remove agit/* branches that no worktree checks out and are in the
+        base. Returns the deleted branch names so the caller can log each one
+        (matching the old per-branch debug line)."""
+        deleted: list[str] = []
+        checked_out = {entry.get("branch") for entry in self.base_repo.worktree_list()}
+        for branch in self.base_repo.list_branches("agit/"):
+            if branch in checked_out:
+                continue
+            if not self.base_repo.log_range(self.base_branch, branch):
+                self.base_repo.delete_branch(branch, force=True)
+                deleted.append(branch)
+        return deleted
 
     # ------------------------------------------------------------------
     # Session / base predicates
@@ -543,16 +545,15 @@ class IntegrationService:
         return [b for b in branches if not b.startswith("agit/") and b != self.base_branch]
 
     def repoint_to_base(self, repo: GitRepo, worktree) -> int | None:
-        """Detach a session worktree at the new base; returns 0 (new turn counter) or None on skip."""
+        """Detach a session worktree at the new base; returns 0 (new turn counter),
+        or None for the silent dirty/mid-merge skip. Errors raise so the caller
+        can log them (the old code logged the error repr, not a generic skip)."""
         if worktree is None:
             return None
-        try:
-            if repo.has_changes() or repo.merge_in_progress():
-                return None
-            repo.switch_detach(self.base_branch)
-            return 0
-        except Exception:
+        if repo.has_changes() or repo.merge_in_progress():
             return None
+        repo.switch_detach(self.base_branch)
+        return 0
 
     # ------------------------------------------------------------------
     # Base-drift / poll helpers

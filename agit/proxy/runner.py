@@ -1133,7 +1133,8 @@ class ProxyRunner:
         # Remove agit/* branches that no worktree checks out and that are already
         # contained in the base branch (stale leftovers).
         try:
-            self._integration.delete_orphan_merged_branches()
+            for branch in self._integration.delete_orphan_merged_branches():
+                self._debug(f"deleted stale merged branch {branch}")
         except Exception as error:
             self._debug(f"orphan branch cleanup failed: {error!r}")
 
@@ -1512,11 +1513,13 @@ class ProxyRunner:
     def _repoint_current_to_base(self) -> None:
         # Detach the current session's worktree at the new base so its next turn
         # branches from there. The session and its conversation keep running.
-        new_turn = self._integration.repoint_to_base(self.repo, self.worktree)
+        try:
+            new_turn = self._integration.repoint_to_base(self.repo, self.worktree)
+        except Exception as error:
+            self._debug(f"re-point failed for '{self.name}': {error!r}")
+            return
         if new_turn is not None:
             self.turn = new_turn
-        elif self.worktree is not None:
-            self._debug(f"re-point skipped for '{self.name}' (dirty or error)")
 
     def _repoint_all_sessions_to_base(self) -> None:
         # Re-point every live session at the new base without stopping any of them.

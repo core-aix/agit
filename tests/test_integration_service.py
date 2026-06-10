@@ -756,30 +756,79 @@ def test_auto_context_not_idle_yet_does_not_finalize():
     assert svc.should_auto_complete_merge(ctx, last_child_output=now - 2, child_idle_seconds=4) is False
 
 
+def _flush_runner(ctx):
+    """Minimal runner whose _flush_pending_enter is exercised for real: the
+    pending Enter targets a live pipe fd so the write succeeds."""
+    import os
+    import time
+
+    from agit.proxy.runner import ProxyRunner
+
+    runner = ProxyRunner.__new__(ProxyRunner)
+    read_fd, write_fd = os.pipe()
+    runner.master_fd = write_fd
+    runner.merge_ctx = ctx
+    runner._pending_enter_at = time.monotonic() - 1.0  # due
+    runner._pending_enter_fd = write_fd
+    return runner, read_fd, write_fd
+
+
 def test_manual_context_phase_never_promoted_by_flush():
-    """_flush_pending_enter must not promote a MANUAL context to RESOLVING."""
-    # Simulate runner._flush_pending_enter's guard logic directly.
-    ctx = MergeContext(
-        source_branch="agit/s/t1",
-        context="",
-        phase=MergePhase.MANUAL,
-        auto_tried=True,
-    )
-    # The guard: only promote when phase is PENDING.
-    if ctx.phase is MergePhase.PENDING:
-        ctx.phase = MergePhase.RESOLVING
-    assert ctx.phase is MergePhase.MANUAL  # unchanged
+    """The real _flush_pending_enter must not promote a MANUAL context."""
+    import os
+
+    ctx = MergeContext(source_branch="agit/s/t1", context="", phase=MergePhase.MANUAL, auto_tried=True)
+    runner, read_fd, write_fd = _flush_runner(ctx)
+    try:
+        runner._flush_pending_enter()
+        assert ctx.phase is MergePhase.MANUAL  # unchanged by the flush
+        assert ctx.prompt_sent_at is not None  # the Enter itself was recorded
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
 
 
 def test_pending_context_phase_promoted_to_resolving_by_flush():
-    """_flush_pending_enter must promote a PENDING (auto) context to RESOLVING."""
+    """The real _flush_pending_enter promotes a PENDING (auto) context."""
+    import os
+
+    ctx = MergeContext(source_branch="agit/s/t1", context="", phase=MergePhase.PENDING, auto_tried=False)
+    runner, read_fd, write_fd = _flush_runner(ctx)
+    try:
+        runner._flush_pending_enter()
+        assert ctx.phase is MergePhase.RESOLVING
+        assert ctx.prompt_sent_at is not None
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+
+
+def test_maybe_complete_agent_merge_spends_the_auto_attempt():
+    """runner._maybe_complete_agent_merge must write auto_tried=True BEFORE
+    finalizing, so a failed finalize is not retried on every loop tick."""
+    import time
+
+    from agit.proxy.integration import IntegrationService
+    from agit.proxy.runner import ProxyRunner
+
+    now = time.monotonic()
     ctx = MergeContext(
         source_branch="agit/s/t1",
         context="",
-        phase=MergePhase.PENDING,
+        phase=MergePhase.RESOLVING,
         auto_tried=False,
+        prompt_sent_at=now - 20,
     )
-    # The guard: only promote when phase is PENDING.
-    if ctx.phase is MergePhase.PENDING:
-        ctx.phase = MergePhase.RESOLVING
-    assert ctx.phase is MergePhase.RESOLVING
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.merge_ctx = ctx
+    runner.last_child_output = now - 10  # responded after the prompt, then idle
+    runner._integration = IntegrationService.__new__(IntegrationService)
+    finalized = []
+    runner._finalize_agent_merge = lambda: finalized.append(1) and False
+
+    runner._maybe_complete_agent_merge()
+    assert finalized == [1]
+    assert ctx.auto_tried is True  # the attempt is spent even though finalize failed
+
+    runner._maybe_complete_agent_merge()
+    assert finalized == [1]  # never retried
