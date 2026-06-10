@@ -3077,7 +3077,7 @@ def test_popup_exit_flow_declined_keeps_working():
     runner = _popup_exit_runner()
     runner._confirm_exit = lambda: False
 
-    assert runner._request_exit_from_popup() is False
+    assert runner._run_exit_flow() is False
     assert runner.events == []  # neither finalized nor exited
 
 
@@ -3086,7 +3086,7 @@ def test_popup_exit_flow_confirmed_finalizes_then_exits():
     runner._confirm_exit = lambda: True
     runner._confirm_terminate_background_sessions = lambda: True
 
-    assert runner._request_exit_from_popup() is True
+    assert runner._run_exit_flow() is True
     assert runner.events == ["finalize", "exit"]  # commits before leaving
 
 
@@ -3095,7 +3095,7 @@ def test_popup_exit_flow_background_decline_keeps_working():
     runner._confirm_exit = lambda: True
     runner._confirm_terminate_background_sessions = lambda: False
 
-    assert runner._request_exit_from_popup() is False
+    assert runner._run_exit_flow() is False
     assert runner.events == []
 
 
@@ -3105,12 +3105,12 @@ def test_popup_exit_flow_double_ctrl_c_still_finalizes():
     def confirm_via_popup():
         # A second Ctrl-C arrives inside the confirmation popup itself: the
         # nested request flags force-exit and the popup returns None (-> False).
-        assert runner._request_exit_from_popup() is True
+        assert runner._run_exit_flow() is True
         return False
 
     runner._confirm_exit = confirm_via_popup
 
-    assert runner._request_exit_from_popup() is True
+    assert runner._run_exit_flow() is True
     # Even the emphatic double Ctrl-C exits gracefully: finalize, then exit.
     assert runner.events == ["finalize", "exit"]
 
@@ -3124,14 +3124,14 @@ def test_prompt_popup_ctrl_c_routes_through_exit_flow():
     # Exiting: Ctrl-C makes the popup return None once the exit flow ran.
     calls = []
     runner._popup_read_input = lambda: b"\x03"
-    runner._request_exit_from_popup = lambda: (calls.append("flow"), True)[1]
+    runner._run_exit_flow = lambda: (calls.append("flow"), True)[1]
     assert runner._prompt_popup("Title", "Prompt") is None
     assert calls == ["flow"]
 
     # Declined: the popup keeps running and still accepts input afterwards.
     feed = iter([b"\x03", b"o", b"k", b"\r"])
     runner._popup_read_input = lambda: next(feed)
-    runner._request_exit_from_popup = lambda: False
+    runner._run_exit_flow = lambda: False
     assert runner._prompt_popup("Title", "Prompt") == "ok"
 
 
@@ -3142,12 +3142,12 @@ def test_select_popup_ctrl_c_routes_through_exit_flow():
     runner._clear_message = lambda: None
 
     runner._popup_read_input = lambda: b"\x03"
-    runner._request_exit_from_popup = lambda: True
+    runner._run_exit_flow = lambda: True
     assert runner._select_popup("Pick", ["a", "b"]) is None
 
     feed = iter([b"\x03", b"\r"])
     runner._popup_read_input = lambda: next(feed)
-    runner._request_exit_from_popup = lambda: False
+    runner._run_exit_flow = lambda: False
     assert runner._select_popup("Pick", ["a", "b"]) == "a"
 
 
@@ -3344,3 +3344,41 @@ def test_sync_tracked_session_skips_empty_newest_session(tmp_path):
     runner._sync_tracked_session()
 
     assert runner.state.backend_session_id == "with-content"
+
+
+# --- issue #27: double Ctrl-C exits gracefully -----------------------------------
+
+
+def test_exit_command_routes_through_unified_exit_flow(tmp_path):
+    runner = ProxyRunner.__new__(ProxyRunner)
+    events = []
+    runner._confirm_exit = lambda: (events.append("confirm"), True)[1]
+    runner._confirm_terminate_background_sessions = lambda: True
+    runner._finalize_pending_work = lambda: events.append("finalize")
+    runner._exit_child = lambda: events.append("exit")
+
+    runner._run_command("exit")
+
+    assert events == ["confirm", "finalize", "exit"]
+
+
+def test_double_ctrl_c_finalizes_before_exiting():
+    # Issue #27: the second Ctrl-C lands inside the exit-confirmation popup; it
+    # must exit immediately but still gracefully — finalize runs, nothing is
+    # skipped. (The non-graceful path used to call _exit_child() directly.)
+    runner = ProxyRunner.__new__(ProxyRunner)
+    events = []
+    runner._finalize_pending_work = lambda: events.append("finalize")
+    runner._exit_child = lambda: events.append("exit")
+    runner._set_message = lambda *a, **k: None
+    runner._render = lambda: None
+    runner._clear_message = lambda: None
+    # The confirmation popup itself: the user answers with another Ctrl-C.
+    feed = iter([b"\x03"])
+    runner._popup_read_input = lambda: next(feed)
+    runner._confirm_terminate_background_sessions = lambda: (_ for _ in ()).throw(AssertionError("skipped on force"))
+
+    # First Ctrl-C: the loop starts the exit flow, which opens the real
+    # _confirm_exit popup; the second Ctrl-C arrives inside it.
+    assert runner._run_exit_flow() is True
+    assert events == ["finalize", "exit"]

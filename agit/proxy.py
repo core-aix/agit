@@ -2329,15 +2329,13 @@ class ProxyRunner:
                 was_capturing = self.input.capturing
                 forwarded, local_echo, command, should_exit = self.input.feed(data)
                 if should_exit:
-                    if not self._confirm_exit():
-                        self._render()
-                        continue
-                    if not self._confirm_terminate_background_sessions():
-                        self._render()
-                        continue
-                    self._finalize_pending_work()
-                    self._exit_child()
-                    break
+                    # One shared flow (also reachable from inside popups): a
+                    # second Ctrl-C during the confirmation popup exits
+                    # immediately but still finalizes pending work first.
+                    if self._run_exit_flow():
+                        break
+                    self._render()
+                    continue
                 if local_echo:
                     self._render_status(local_echo.decode(errors="ignore"))
                 if self.input.capturing:
@@ -3033,15 +3031,8 @@ class ProxyRunner:
         # backend like any other input).
         name, _, arg = command.partition(" ")
         if name in {"exit", "quit"}:
-            if not self._confirm_exit():
+            if not self._run_exit_flow():
                 self._render()
-                return
-            if not self._confirm_terminate_background_sessions():
-                self._render()
-                return
-            self._finalize_pending_work()
-            self.running = False
-            self._exit_child()
             return
 
         if name in {"git-stage", "git-user-commit"}:
@@ -3148,7 +3139,7 @@ class ProxyRunner:
                         escape_buffer = None
                     continue
                 if char == b"\x03":
-                    if self._request_exit_from_popup():
+                    if self._run_exit_flow():
                         return None
                     break  # exit declined: redraw the popup and keep listening
                 if char == b"\x1b":
@@ -3195,7 +3186,7 @@ class ProxyRunner:
                         escape_buffer = None
                     continue
                 if char == b"\x03":
-                    if self._request_exit_from_popup():
+                    if self._run_exit_flow():
                         return None
                     break  # exit declined: redraw the popup and keep listening
                 if char == b"\x1b":
@@ -3403,12 +3394,14 @@ class ProxyRunner:
         choice = self._select_popup("Exit aGiT?", ["No, keep working", "Yes, exit"])
         return choice == "Yes, exit"
 
-    def _request_exit_from_popup(self) -> bool:
-        # Ctrl-C inside a popup used to call _exit_child() directly, skipping
-        # both exit confirmations AND _finalize_pending_work() — quitting from a
-        # popup right after an agent turn lost the auto-commit the debounce had
-        # not made yet. Route it through the same flow as the main loop instead.
-        # Returns True when aGiT is exiting (the popup should return None).
+    def _run_exit_flow(self) -> bool:
+        # THE exit path: confirm, confirm terminating running background
+        # sessions, finalize pending work, then exit. Used by the main loop's
+        # Ctrl-C handling, the exit command, and Ctrl-C inside any popup — so
+        # no route out of aGiT can skip _finalize_pending_work(). A second
+        # Ctrl-C while the confirmation popup is open lands in the nested
+        # branch below and exits immediately BUT still gracefully (finalize
+        # included). Returns True when aGiT is exiting.
         if getattr(self, "_popup_exit_pending", False):
             # A second Ctrl-C, inside one of the exit-confirmation popups: take
             # it as an emphatic yes — skip the questions, keep the finalize.
