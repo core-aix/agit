@@ -992,7 +992,11 @@ class ProxyRunner:
         return f"session-{number}"
 
     def _prompt_startup_name(self, continuing: bool) -> str:
-        # Asked in cooked mode, before the alt-screen is entered.
+        # Pre-reactor, cooked mode: the alt-screen has not been entered yet so
+        # the terminal is still in line-buffered cooked mode.  Using input()
+        # here is intentional — the reactor loop is not running, so there are
+        # no PTY fds to drain, and the simple cooked readline is the right tool.
+        # Do NOT convert this to a modal; modals require the reactor to be live.
         default = self._first_free_session_name()
         print("Continuing a conversation that has no name yet."
               if continuing else "Starting a new session.")
@@ -2485,6 +2489,10 @@ class ProxyRunner:
             os.write(sys.stdout.fileno(), match.group(0))
 
     def _detect_host_terminal(self) -> None:
+        # Pre-reactor: called once during run() startup, before _loop() starts.
+        # The bounded 0.5 s select-and-read loop inside terminal.py is correct
+        # here because no PTY children are running yet and no reactor iteration
+        # is live.  Do NOT convert to a modal — there is nothing to drain yet.
         TerminalHost.detect_host_terminal(self, debug_fn=self._debug if self.debug_proxy else None)
     def _parse_host_terminal_responses(self, data: bytes) -> None:
         TerminalHost.parse_host_terminal_responses(self, data, debug_fn=self._debug if self.debug_proxy else None)
@@ -3058,13 +3066,20 @@ class ProxyRunner:
         return choice == "Yes, exit"
 
     def _run_exit_flow(self) -> bool:
-        # THE exit path: confirm, confirm terminating running background
-        # sessions, finalize pending work, then exit. Used by the main loop's
-        # Ctrl-C handling, the exit command, and Ctrl-C inside any popup — so
-        # no route out of aGiT can skip _finalize_pending_work(). A second
-        # Ctrl-C while the confirmation popup is open lands in the nested
-        # branch below and exits immediately BUT still gracefully (finalize
-        # included). Returns True when aGiT is exiting.
+        # THE single exit path (P6 Stage 3 — exit-path unification).
+        #
+        # Every interactive way out of aGiT goes through here:
+        #   * Main loop: Ctrl-C in _reactor_stdin_phase → _run_exit_flow()
+        #   * Modal: Ctrl-C inside any popup → _run_modal() → _run_exit_flow()
+        #   * "exit" command: _run_command("exit") → _run_exit_flow()
+        #
+        # This guarantees _finalize_pending_work() is never skipped for
+        # interactive exits.  Signal exits (SIGTERM/SIGHUP) go through
+        # _handle_exit_signal which does a fast non-interactive teardown.
+        #
+        # Double-Ctrl-C: a second Ctrl-C while the confirmation popup is open
+        # sets _popup_exit_force and exits immediately — but still gracefully
+        # (finalize included). Returns True when aGiT is exiting.
         if getattr(self, "_popup_exit_pending", False):
             # A second Ctrl-C, inside one of the exit-confirmation popups: take
             # it as an emphatic yes — skip the questions, keep the finalize.

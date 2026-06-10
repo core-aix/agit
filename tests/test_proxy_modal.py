@@ -340,3 +340,71 @@ def test_select_popup_empty_options_returns_empty_string():
     runner = ProxyRunner.__new__(ProxyRunner)
     runner._run_modal = lambda modal: (_ for _ in ()).throw(AssertionError("should not be called"))
     assert runner._select_popup("Title", []) == ""
+
+
+# ---------------------------------------------------------------------------
+# Stage 3 — exit-path unification: exit byte inside a modal reaches
+# _finalize_pending_work (the one required test from the spec).
+# ---------------------------------------------------------------------------
+
+
+def test_exit_byte_in_modal_reaches_finalize_pending_work():
+    """Ctrl-C inside an open modal calls _run_exit_flow → _finalize_pending_work.
+
+    This validates the exit-path unification guarantee: no interactive route
+    out of aGiT can bypass _finalize_pending_work().
+    """
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner._set_message = lambda *a, **k: None
+    runner._render = lambda: None
+    runner._clear_message = lambda: None
+
+    events = []
+    runner._finalize_pending_work = lambda: events.append("finalize")
+    runner._exit_child = lambda: events.append("exit")
+    # Stub the background-session check; no background sessions in this test.
+    runner._confirm_terminate_background_sessions = lambda: True
+
+    # First read: Ctrl-C from inside the modal → _run_exit_flow is called.
+    # _run_exit_flow opens _confirm_exit (which calls _select_popup/_run_modal).
+    # The second read below answers the confirmation popup with "Yes, exit".
+    reads = iter([
+        b"\x03",       # Ctrl-C inside the prompt modal → triggers exit flow
+        b"\x1b[B",     # Down arrow to select "Yes, exit" in confirmation popup
+        b"\r",         # Enter to confirm
+    ])
+    runner._popup_read_input = lambda: next(reads)
+
+    # A PromptModal open; user presses Ctrl-C.
+    result = runner._run_modal(PromptModal("Stage", "Some prompt:"))
+
+    assert result is None
+    assert "finalize" in events, "finalize must be called on confirmed exit"
+    assert "exit" in events, "exit must be called on confirmed exit"
+
+
+def test_exit_byte_in_modal_decline_continues_modal():
+    """Ctrl-C inside a modal with exit declined keeps the modal running."""
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner._set_message = lambda *a, **k: None
+    runner._render = lambda: None
+    runner._clear_message = lambda: None
+
+    finalized = []
+    runner._finalize_pending_work = lambda: finalized.append("finalize")
+    runner._exit_child = lambda: finalized.append("exit")
+
+    # Ctrl-C then exit declined (Esc on the confirmation popup → cancel → False),
+    # then the user types "ok" and confirms.
+    reads = iter([
+        b"\x03",   # Ctrl-C → _run_exit_flow → opens confirm popup
+        b"\x1b",   # Esc → cancel the confirm popup → exit flow returns False
+        b"o",      # back in original modal: typing 'o'
+        b"k",
+        b"\r",
+    ])
+    runner._popup_read_input = lambda: next(reads)
+
+    result = runner._run_modal(PromptModal("Stage", "Enter:"))
+    assert result == "ok"
+    assert finalized == [], "finalize must NOT be called when exit is declined"
