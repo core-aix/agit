@@ -3612,3 +3612,240 @@ def test_idle_integration_skips_active_agent_and_clean_branches():
     runner.base_repo = types.SimpleNamespace(log_range=lambda base, head: "")
     runner._integrate_agent_made_commits_if_idle(time.monotonic())
     assert integrations == []
+
+
+# ---------------------------------------------------------------------------
+# ScreenRenderer unit tests (P1 extraction; constructed directly, no
+# ProxyRunner.__new__)
+# ---------------------------------------------------------------------------
+
+from agit.proxy.renderer import ScreenRenderer, _BackgroundColorEraseScreen, detect_color_mode
+
+
+def _make_renderer(rows=24, cols=80, color_mode="truecolor"):
+    """Create a fresh ScreenRenderer with an initialized pyte screen."""
+    r = ScreenRenderer(rows, cols, color_mode=color_mode)
+    r.init_screen(rows, cols)
+    return r
+
+
+def test_screen_renderer_init_screen_creates_screen():
+    r = _make_renderer(10, 40)
+    assert r.screen is not None
+    assert r.stream is not None
+    assert r.scroll_back == 0
+    assert r._in_sync_update is False
+
+
+def test_screen_renderer_cell_sgr_bold_red():
+    r = ScreenRenderer(24, 80, color_mode="truecolor")
+    import pyte.screens
+    cell = pyte.screens.Char("X", fg="red", bg="default", bold=True,
+                              italics=False, underscore=False,
+                              strikethrough=False, reverse=False, blink=False)
+    result = r.cell_sgr(cell)
+    assert "1" in result.split(";")   # bold
+    assert "31" in result.split(";")  # fg red
+
+
+def test_screen_renderer_color_code_named():
+    r = ScreenRenderer(24, 80, color_mode="truecolor")
+    assert r.color_code("red", foreground=True) == "31"
+    assert r.color_code("blue", foreground=False) == "44"
+    assert r.color_code("default", foreground=True) is None
+
+
+def test_screen_renderer_hex_color_code_truecolor():
+    r = ScreenRenderer(24, 80, color_mode="truecolor")
+    result = r.hex_color_code("ff0000", foreground=True)
+    assert result == "38;2;255;0;0"
+
+
+def test_screen_renderer_hex_color_code_256():
+    r = ScreenRenderer(24, 80, color_mode="256")
+    result = r.hex_color_code("ff0000", foreground=True)
+    assert result.startswith("38;5;")
+
+
+def test_screen_renderer_visible_lines_live():
+    r = _make_renderer(5, 20)
+    r.stream.feed(b"Hello\r\n")
+    lines = r.visible_lines(5)
+    assert len(lines) == 4  # rows-1 = 4
+
+
+def test_screen_renderer_visible_lines_scroll_back():
+    r = _make_renderer(5, 10)
+    # Write enough to fill history
+    for i in range(20):
+        r.stream.feed(f"line{i:02d}\r\n".encode())
+    # History should have some lines
+    assert r.history_len() > 0
+    r.scroll_back = 2
+    lines = r.visible_lines(5)
+    # Must still return rows-1 lines
+    assert len(lines) == 4
+
+
+def test_screen_renderer_selection_ranges_empty():
+    r = _make_renderer()
+    assert r.selection_ranges(80) == {}
+
+
+def test_screen_renderer_selection_ranges_span():
+    r = _make_renderer()
+    r.sel_active = True
+    r.sel_anchor = (0, 2)
+    r.sel_point = (1, 5)
+    ranges = r.selection_ranges(80)
+    assert 0 in ranges
+    assert 1 in ranges
+    assert ranges[0] == (2, 79)  # start=2, end=cols-1 on first row
+    assert ranges[1] == (0, 5)   # start=0, end=5 on last row
+
+
+def test_screen_renderer_render_line_empty_cells():
+    r = ScreenRenderer(24, 10, color_mode="truecolor")
+    line = r.render_line({}, cols=10)
+    # Empty cells render as 10 spaces with no styling left active.
+    import re
+    plain = re.sub(r"\x1b\[[^m]*m", "", line)
+    assert plain == " " * 10
+
+
+def test_screen_renderer_track_sync_update_sets_flag():
+    r = _make_renderer()
+    assert r._in_sync_update is False
+    r.track_sync_update(b"\x1b[?2026h")
+    assert r._in_sync_update is True
+    r.track_sync_update(b"\x1b[?2026l")
+    assert r._in_sync_update is False
+
+
+def test_screen_renderer_sync_hold_bounded():
+    import time
+    r = _make_renderer()
+    r._in_sync_update = True
+    r._sync_since = time.monotonic()
+    assert r.sync_hold(time.monotonic(), 0.05) is True
+    # With a very old sync_since it should release
+    r._sync_since = time.monotonic() - 1.0
+    assert r.sync_hold(time.monotonic(), 0.05) is False
+
+
+def test_screen_renderer_cursor_sequence_hidden_when_scrolled():
+    r = _make_renderer(10, 40)
+    r.scroll_back = 3
+    result = r.cursor_sequence(10, 40, 3)
+    assert result == "\x1b[?25l"
+
+
+def test_screen_renderer_cursor_sequence_visible_when_live():
+    r = _make_renderer(10, 40)
+    result = r.cursor_sequence(10, 40, 0)
+    assert "\x1b[?25h" in result
+
+
+def test_screen_renderer_history_len():
+    r = _make_renderer(5, 10)
+    assert r.history_len() == 0
+    for i in range(20):
+        r.stream.feed(f"l{i}\r\n".encode())
+    assert r.history_len() > 0
+
+
+def test_screen_renderer_scroll_changes_scroll_back():
+    r = _make_renderer(5, 10)
+    for i in range(20):
+        r.stream.feed(f"l{i}\r\n".encode())
+    rendered = []
+    r.scroll(3, lambda: rendered.append(1))
+    assert r.scroll_back == 3
+    assert rendered == [1]
+
+
+def test_screen_renderer_scroll_clamps_at_zero():
+    r = _make_renderer(5, 10)
+    r.scroll_back = 2
+    r.stream.feed(b"hello\r\n" * 20)
+    rendered = []
+    r.scroll(-100, lambda: rendered.append(1))
+    assert r.scroll_back == 0
+
+
+def test_screen_renderer_status_line_basic():
+    r = ScreenRenderer(5, 40, color_mode="truecolor")
+    line = r.status_line(
+        cols=40,
+        name="main",
+        backend_name="claude",
+        session_id=None,
+        base_branch=None,
+        worktree=None,
+        scroll_back=0,
+        user_declined=[],
+        short_session_fn=lambda s: "(none)",
+    )
+    assert "aGiT" in line
+    assert "claude" in line
+
+
+def test_screen_renderer_status_line_scrollback():
+    r = ScreenRenderer(5, 60, color_mode="truecolor")
+    line = r.status_line(
+        cols=60,
+        name="s",
+        backend_name="claude",
+        session_id=None,
+        base_branch=None,
+        worktree=None,
+        scroll_back=5,
+        user_declined=[],
+        short_session_fn=lambda s: "(none)",
+    )
+    assert "SCROLLBACK" in line
+
+
+def test_screen_renderer_append_box():
+    r = ScreenRenderer(20, 60, color_mode="truecolor")
+    parts = []
+    r.append_box(parts, 2, 2, 20, ["Line one", "Line two"], rows=20)
+    combined = "".join(parts)
+    assert "Line one" in combined
+    assert "│" in combined  # │ border char
+
+
+def test_screen_renderer_feed_strips_hostile_csi():
+    import re
+    r = _make_renderer(5, 20)
+    hostile = re.compile(rb"\x1b\[[<>=][0-9;:]*[ -/]*[@-~]")
+    # Should not raise even with hostile CSI
+    r.feed(b"\x1b[>4mHello\x1b[>4m", pyte_hostile_csi_re=hostile)
+    lines = r.visible_lines(5)
+    # 'Hello' was written; check it survived
+    row0 = lines[0]
+    chars = [row0.get(c) for c in range(5)]
+    text = "".join((c.data if c else " ") for c in chars)
+    assert text == "Hello"
+
+
+def test_duck_type_aliases_cover_extracted_classes():
+    # ScreenRenderer and TerminalHost methods run with `self` being a
+    # ProxyRunner via unbound delegation. A `self.foo()` inside those classes
+    # therefore resolves on ProxyRunner, not on the class — so every method
+    # name the classes SELF-CALL must exist on ProxyRunner too. A missing
+    # alias crashes at runtime in paths the suite does not exercise (e.g.
+    # run() startup), so pin the contract here.
+    import inspect
+    import re as _re
+
+    from agit.proxy.renderer import ScreenRenderer
+    from agit.proxy.terminal import TerminalHost
+
+    for cls in (ScreenRenderer, TerminalHost):
+        own_methods = {n for n, _ in inspect.getmembers(cls, inspect.isfunction)}
+        self_calls = set(_re.findall(r"self\.([a-zA-Z_][a-zA-Z0-9_]*)\(", inspect.getsource(cls)))
+        for name in sorted(self_calls & own_methods):
+            assert hasattr(ProxyRunner, name), (
+                f"ProxyRunner is missing alias {name!r}, self-called inside {cls.__name__}"
+            )

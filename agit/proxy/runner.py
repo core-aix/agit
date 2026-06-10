@@ -39,67 +39,21 @@ from agit.worktree import WorktreeInfo, WorktreeManager, _sanitize_name
 from agit.proxy.process import BackendProcess
 
 
-# Map every xterm-256 palette colour back to its index so that colours pyte
-# collapsed to hex can be re-emitted in their original 256-colour encoding.
-# First occurrence wins, which keeps the ANSI palette indices (0-15) that
-# OpenCode's "system" theme relies on, so the host terminal's own palette is
-# respected instead of being frozen to fixed RGB values.
-_PALETTE_256: list[tuple[int, int, int]] = []
-_REVERSE_256: dict[str, int] = {}
-
-
-def _build_palette_256() -> None:
-    try:
-        import pyte.graphics as graphics
-    except Exception:  # pragma: no cover - pyte always present in practice
-        return
-    for index in range(256):
-        hex_value = graphics.FG_BG_256[index]
-        _REVERSE_256.setdefault(hex_value, index)
-        _PALETTE_256.append((int(hex_value[0:2], 16), int(hex_value[2:4], 16), int(hex_value[4:6], 16)))
-
-
-_build_palette_256()
-
-
-def _nearest_256(red: int, green: int, blue: int) -> int:
-    best_index = 0
-    best_distance = None
-    for index, (pr, pg, pb) in enumerate(_PALETTE_256):
-        distance = (pr - red) ** 2 + (pg - green) ** 2 + (pb - blue) ** 2
-        if best_distance is None or distance < best_distance:
-            best_distance = distance
-            best_index = index
-    return best_index
-
-
-def _nearest_ansi16(red: int, green: int, blue: int) -> int:
-    best_index = 0
-    best_distance = None
-    for index in range(16):
-        pr, pg, pb = _PALETTE_256[index]
-        distance = (pr - red) ** 2 + (pg - green) ** 2 + (pb - blue) ** 2
-        if best_distance is None or distance < best_distance:
-            best_distance = distance
-            best_index = index
-    return best_index
-
-
-def detect_color_mode(environ=None) -> str:
-    # Mirror the colour-depth detection OpenCode itself uses so that aGiT
-    # re-emits colours in the exact encoding OpenCode produced. aGiT and the
-    # backend share an environment, so the same depth applies to both.
-    env = os.environ if environ is None else environ
-    colorterm = (env.get("COLORTERM") or "").strip().lower()
-    if colorterm in {"truecolor", "24bit"}:
-        return "truecolor"
-    term = (env.get("TERM") or "").strip().lower()
-    if "256" in term:
-        return "256"
-    if colorterm or term:
-        return "16"
-    return "16"
-
+# Palette helpers, _BackgroundColorEraseScreen, and detect_color_mode live in
+# renderer.py (P1). Re-import them here so call sites in this file are unchanged
+# and the agit.proxy shim can export them under their original names.
+from agit.proxy.renderer import (
+    _PALETTE_256,
+    _REVERSE_256,
+    _build_palette_256,
+    _nearest_256,
+    _nearest_ansi16,
+    detect_color_mode,
+    _BackgroundColorEraseScreen,
+    ScreenRenderer,
+)
+# TerminalHost lives in terminal.py (P1).
+from agit.proxy.terminal import TerminalHost
 
 _SGR_MOUSE_RE = re.compile(rb"\x1b\[<\d+;\d+;\d+[Mm]")
 _SGR_MOUSE_EVENT_RE = re.compile(rb"\x1b\[<(\d+);(\d+);(\d+)([Mm])")
@@ -134,61 +88,6 @@ def _short_session(session_id: str | None) -> str:
     if not session_id:
         return "(none)"
     return session_id[:8]
-
-
-class _BackgroundColorEraseScreen(pyte.HistoryScreen):
-    # pyte erases cells using the cursor's *full* SGR attributes, so a backend
-    # that clears the screen (or a line) while underline — or any glyph
-    # attribute — is still active leaves the blanked cells carrying that
-    # attribute. The host terminal then renders those underlined blanks as stray
-    # horizontal lines that linger after the view is dismissed (seen on Claude's
-    # session-choice picker). Real terminals do background-colour-erase: erased
-    # cells keep only the background colour, not glyph attributes. Mirror that by
-    # blanking everything except the background on the cursor attrs we erase with.
-    def _erase_attrs(self):
-        return self.cursor.attrs._replace(
-            data=" ",
-            fg="default",
-            bold=False,
-            italics=False,
-            underscore=False,
-            strikethrough=False,
-            reverse=False,
-            blink=False,
-        )
-
-    def erase_in_line(self, how: int = 0, private: bool = False) -> None:
-        saved = self.cursor.attrs
-        self.cursor.attrs = self._erase_attrs()
-        try:
-            super().erase_in_line(how, private)
-        finally:
-            self.cursor.attrs = saved
-
-    def erase_in_display(self, how: int = 0, *args, **kwargs) -> None:
-        saved = self.cursor.attrs
-        self.cursor.attrs = self._erase_attrs()
-        try:
-            super().erase_in_display(how, *args, **kwargs)
-        finally:
-            self.cursor.attrs = saved
-
-    def report_device_status(self, mode: int = 0, private: bool = False, **kwargs) -> None:
-        # pyte's stream invokes report_device_status(mode, private=True) for
-        # DEC-private DSR queries — notably ``\x1b[?6n`` (cursor-position request),
-        # which Claude/Ink emits while redrawing — but pyte's own
-        # Screen.report_device_status() doesn't accept ``private`` and raises
-        # TypeError mid-parse. aGiT swallows feed errors to stay alive, but that
-        # drops the rest of the output chunk: it truncated Claude's option-menu
-        # collapse redraw, leaving stale menu rows on screen. aGiT answers terminal
-        # queries itself (_answer_terminal_queries), so pyte's report is unused —
-        # just accept ``private`` and never raise so the feed completes.
-        if private:
-            return
-        try:
-            super().report_device_status(mode)
-        except TypeError:
-            pass
 
 
 class RepoChangeHandler(FileSystemEventHandler):
@@ -2555,12 +2454,7 @@ class ProxyRunner:
         self._in_sync_update = False
 
     def _feed_child_output(self, output: bytes) -> None:
-        if self.stream is not None:
-            try:
-                self.stream.feed(_PYTE_HOSTILE_CSI_RE.sub(b"", output))
-            except Exception as error:  # never let a parse hiccup kill the session
-                self._debug(f"pyte feed error: {error!r}")
-
+        ScreenRenderer.feed(self, output, pyte_hostile_csi_re=_PYTE_HOSTILE_CSI_RE)
     def _sync_terminal_modes(self, output: bytes) -> None:
         # OpenCode enables mouse reporting on its PTY. Because aGiT renders the
         # screen itself, the host terminal never sees those mode switches unless
@@ -2585,52 +2479,9 @@ class ProxyRunner:
             os.write(sys.stdout.fileno(), match.group(0))
 
     def _detect_host_terminal(self) -> None:
-        # Ask the host terminal the same questions OpenCode asks on startup and
-        # cache the raw answers. OpenCode adapts its entire theme to the
-        # reported foreground/background, so relaying the real values is what
-        # makes its colors match a native session.
-        queries = bytearray(b"\x1b]10;?\x07\x1b]11;?\x07")
-        for index in range(16):
-            queries += b"\x1b]4;%d;?\x07" % index
-        queries += b"\x1b[c"  # primary device attributes; also a response sentinel
-        try:
-            os.write(sys.stdout.fileno(), bytes(queries))
-        except OSError:
-            return
-        buffer = bytearray()
-        deadline = time.monotonic() + 0.5
-        stdin_fd = sys.stdin.fileno()
-        while time.monotonic() < deadline:
-            readable, _, _ = select.select([stdin_fd], [], [], deadline - time.monotonic())
-            if stdin_fd not in readable:
-                break
-            try:
-                chunk = os.read(stdin_fd, 4096)
-            except OSError:
-                break
-            if not chunk:
-                break
-            buffer += chunk
-            if re.search(rb"\x1b\[\?[0-9;]*c", bytes(buffer)):
-                break
-        self._parse_host_terminal_responses(bytes(buffer))
-
+        TerminalHost.detect_host_terminal(self, debug_fn=self._debug if self.debug_proxy else None)
     def _parse_host_terminal_responses(self, data: bytes) -> None:
-        if not data:
-            return
-        fg = re.search(rb"\x1b\]10;([^\x07\x1b]*)(?:\x07|\x1b\\)", data)
-        if fg:
-            self.host_fg_value = fg.group(1)
-        bg = re.search(rb"\x1b\]11;([^\x07\x1b]*)(?:\x07|\x1b\\)", data)
-        if bg:
-            self.host_bg_value = bg.group(1)
-        for match in re.finditer(rb"\x1b\]4;(\d+);([^\x07\x1b]*)(?:\x07|\x1b\\)", data):
-            self.host_palette[match.group(1)] = match.group(2)
-        da = re.search(rb"\x1b\[\?[0-9;]*c", data)
-        if da:
-            self.host_da = da.group(0)
-        self._debug(f"host terminal fg={self.host_fg_value!r} bg={self.host_bg_value!r} palette={len(self.host_palette)} da={self.host_da!r}")
-
+        TerminalHost.parse_host_terminal_responses(self, data, debug_fn=self._debug if self.debug_proxy else None)
     def _answer_terminal_queries(self, output: bytes) -> None:
         if self.master_fd is None:
             return
@@ -2664,147 +2515,47 @@ class ProxyRunner:
                 pass
 
     def _track_sync_update(self, output: bytes) -> None:
-        # Honor the synchronized-update mode (DECSET 2026): backends wrap a
-        # multi-write repaint in BSU (?2026h) / ESU (?2026l) so consumers can
-        # apply it atomically. While inside such an update aGiT defers its own
-        # repaint, so it never paints a half-drawn frame (the cause of tearing).
-        # Only the last marker in the chunk decides the resulting state; a
-        # stuck-open update is bounded by SYNC_MAX_HOLD in the paint deciders.
-        begin = output.rfind(b"\x1b[?2026h")
-        end = output.rfind(b"\x1b[?2026l")
-        if begin == -1 and end == -1:
-            return
-        in_update = begin > end
-        if in_update and not self._in_sync_update:
-            self._sync_since = time.monotonic()
-        self._in_sync_update = in_update
-
+        ScreenRenderer.track_sync_update(self, output)
     def _sync_hold(self, now: float) -> bool:
-        # True while a backend synchronized-update should still defer the paint.
-        return self._in_sync_update and now - self._sync_since < self.SYNC_MAX_HOLD
-
+        return ScreenRenderer.sync_hold(self, now, self.SYNC_MAX_HOLD)
     def _render_output(self) -> None:
-        # Coalesce repaints driven by a flood of backend output (e.g. fast
-        # scrolling) to ~30fps so aGiT does not overwhelm the host terminal's
-        # stdout, which would block the loop and back up the backend's PTY.
-        now = time.monotonic()
-        if self._sync_hold(now):
-            self._render_pending = True
-            return
-        if now - self._last_render >= self.RENDER_MIN_INTERVAL:
-            self._last_render = now
-            self._render_pending = False
-            self._render()
-        else:
-            self._render_pending = True
-
+        ScreenRenderer.render_output(self, self._render, self.RENDER_MIN_INTERVAL, self.SYNC_MAX_HOLD)
     def _flush_pending_render(self) -> None:
-        if not self._render_pending:
-            return
-        now = time.monotonic()
-        if self._sync_hold(now):
-            return
-        if now - self._last_render >= self.RENDER_MIN_INTERVAL:
-            self._last_render = now
-            self._render_pending = False
-            self._render()
-
+        ScreenRenderer.flush_pending_render(self, self._render, self.RENDER_MIN_INTERVAL, self.SYNC_MAX_HOLD)
     def _cursor_sequence(self) -> str:
-        # The trailing sequence that positions (and shows) or hides the cursor.
-        assert self.screen is not None
-        if self.scroll_back > 0:
-            # While scrolled into history, keep the cursor hidden (its live
-            # position is not meaningful for the displayed lines).
-            return "\x1b[?25l"
-        cursor = self.screen.cursor
-        cursor_row = min(cursor.y + 1, max(self.rows - 1, 1))
-        cursor_col = min(cursor.x + 1, self.cols)
-        return f"\x1b[{cursor_row};{cursor_col}H\x1b[?25h"
-
+        return ScreenRenderer.cursor_sequence(self, self.rows, self.cols, self.scroll_back)
     def _render(self) -> None:
         if self.screen is None:
             return
-        # Paint the whole screen inside one synchronized update (DECSET 2026) so
-        # the host terminal applies the frame atomically and never shows it
-        # half-drawn. Terminals that don't support 2026 ignore the markers and
-        # fall back to the previous (unwrapped) full-repaint behaviour.
-        parts = ["\x1b[?2026h\x1b[0m\x1b[?25l\x1b[H"]
-        selection = self._selection_ranges()
-        for index, cells in enumerate(self._visible_lines()):
-            parts.append("\x1b[0m" + self._render_line(cells, selection.get(index)))
-            parts.append("\r\n")
-        parts.append(self._status_line())
-        if self.input.capturing:
-            self._append_command_palette(parts)
-        elif self.message and (getattr(self, "_message_sticky", False) or time.monotonic() < self.message_until):
-            self._append_message_popup(parts, self.message)
-        parts.append(self._cursor_sequence())
-        parts.append("\x1b[?2026l")
-        os.write(sys.stdout.fileno(), "".join(parts).encode())
-
+        capturing = self.input.capturing
+        ScreenRenderer.render(
+            self,
+            rows=self.rows,
+            cols=self.cols,
+            scroll_back=self.scroll_back,
+            status_line_str=self._status_line(),
+            input_capturing=capturing,
+            input_text=self.input.text() if capturing else "",
+            input_matches=self.input.matches() if capturing else [],
+            input_selected=self.input.selected() if capturing else None,
+            message=self.message,
+            message_sticky=getattr(self, "_message_sticky", False),
+            message_until=self.message_until,
+        )
     def _append_command_palette(self, parts: list[str]) -> None:
-        width = min(max(52, self.cols // 2), self.cols - 4)
-        row = 2
-        col = max(2, (self.cols - width) // 2)
-        text = self.input.text()
-        matches = self.input.matches()
-        selected = self.input.selected()
-        lines = [
-            "aGiT commands",
-            f"> {text}",
-            "Up/Down selects. Tab completes. Enter runs. Esc/Ctrl-C cancels.",
-            "",
-        ]
-        lines.extend(matches[:8])
-        self._append_box(parts, row, col, width, lines, highlight=selected)
-
+        ScreenRenderer.append_command_palette(
+            self, parts,
+            rows=self.rows, cols=self.cols,
+            input_text=self.input.text(),
+            input_matches=self.input.matches(),
+            input_selected=self.input.selected(),
+        )
     def _append_message_popup(self, parts: list[str], message: str) -> None:
-        width = min(max(52, self.cols // 2), self.cols - 4)
-        row = 2
-        col = max(2, (self.cols - width) // 2)
-        self._append_box(parts, row, col, width, message.splitlines() or [message])
-
+        ScreenRenderer.append_message_popup(self, parts, message, rows=self.rows, cols=self.cols)
     def _append_box(self, parts: list[str], row: int, col: int, width: int, lines: list[str], highlight: str | None = None) -> None:
-        inner = max(width - 2, 1)
-        border_top = "┌" + "─" * inner + "┐"
-        border_bottom = "└" + "─" * inner + "┘"
-        box_lines = [border_top]
-        wrapped_lines: list[str] = []
-        for line in lines:
-            wrapped_lines.extend(textwrap.wrap(line, width=inner) or [""])
-        max_body = max(self.rows - row - 2, 1)
-        for line in wrapped_lines[:max_body]:
-            content = line[:inner].ljust(inner)
-            if highlight and line == highlight:
-                box_lines.append("│" + "\x1b[7m" + content + "\x1b[0m" + "│")
-            else:
-                box_lines.append("│" + content + "│")
-        box_lines.append(border_bottom)
-        for offset, line in enumerate(box_lines):
-            if row + offset >= self.rows:
-                break
-            parts.append(f"\x1b[{row + offset};{col}H\x1b[0m{line}")
-
+        ScreenRenderer.append_box(self, parts, row, col, width, lines, highlight, rows=self.rows)
     def _render_line(self, cells, sel: tuple[int, int] | None = None) -> str:
-        rendered = []
-        current = ""  # SGR body currently applied on the host terminal ("" == default)
-        sel_start, sel_end = sel if sel else (-1, -1)
-        for col in range(self.cols):
-            cell = cells.get(col)
-            base = "" if cell is None else self._cell_sgr(cell)
-            char = (cell.data or " ") if cell is not None else " "
-            if sel is not None and sel_start <= col <= sel_end:
-                style = (base + ";7") if base else "7"  # reverse-video the selection
-            else:
-                style = base
-            if style != current:
-                rendered.append("\x1b[" + (style or "0") + "m")
-                current = style
-            rendered.append(char)
-        if current:
-            rendered.append("\x1b[0m")
-        return "".join(rendered)
-
+        return ScreenRenderer.render_line(self, cells, sel, cols=self.cols)
     def _hold_incomplete_tail(self, data: bytes) -> tuple[bytes, bytes]:
         # If the read ends mid escape-sequence (e.g. a mouse report split across
         # reads), hold the trailing partial so it is completed on the next read
@@ -2855,30 +2606,9 @@ class ProxyRunner:
             self._render()
 
     def _selection_ranges(self) -> dict[int, tuple[int, int]]:
-        # Map each selected display row to its inclusive (start_col, end_col).
-        if not (self.sel_active and self.sel_anchor and self.sel_point):
-            return {}
-        (r1, c1), (r2, c2) = sorted([self.sel_anchor, self.sel_point])
-        ranges: dict[int, tuple[int, int]] = {}
-        for row in range(r1, r2 + 1):
-            start = c1 if row == r1 else 0
-            end = c2 if row == r2 else self.cols - 1
-            ranges[row] = (start, end)
-        return ranges
-
+        return ScreenRenderer.selection_ranges(self, self.cols)
     def _copy_selection(self) -> None:
-        lines = self._visible_lines()
-        text_lines = []
-        for row, (start, end) in sorted(self._selection_ranges().items()):
-            cells = lines[row] if row < len(lines) else {}
-            text = "".join((cells.get(x).data if cells.get(x) else " ") for x in range(start, end + 1))
-            text_lines.append(text.rstrip())
-        text = "\n".join(text_lines).strip("\n")
-        if not text.strip():
-            return
-        self._copy_to_clipboard(text)
-        self._set_message(f"Copied {len(text)} char(s) to clipboard.", seconds=2.0)
-
+        ScreenRenderer.copy_selection(self, self.rows, self.cols, self._copy_to_clipboard, lambda msg, **kw: self._set_message(msg, **kw))
     def _copy_to_clipboard(self, text: str) -> None:
         payload = text.encode("utf-8", errors="replace")
         if shutil.which("pbcopy"):
@@ -2895,139 +2625,116 @@ class ProxyRunner:
             pass
 
     def _history_len(self) -> int:
-        history = getattr(getattr(self, "screen", None), "history", None)
-        return len(history.top) if history is not None else 0
-
+        return ScreenRenderer.history_len(self)
     def _scroll(self, delta: int) -> None:
-        new_back = max(0, min(self.scroll_back + delta, self._history_len()))
-        if new_back != self.scroll_back:
-            self.scroll_back = new_back
-            # Selection coordinates refer to the displayed view, which just
-            # shifted; drop any in-progress selection.
-            self.sel_active = False
-            self.sel_anchor = self.sel_point = None
-            self._render()
-
+        ScreenRenderer.scroll(self, delta, self._render)
     def _visible_lines(self) -> list:
-        # The (rows-1) lines to draw. When scrolled back, splice in history lines
-        # that scrolled off the top so the user can read earlier messages.
-        assert self.screen is not None
-        rows = max(self.rows - 1, 1)
-        live = [self.screen.buffer.get(row, {}) for row in range(rows)]
-        if self.scroll_back <= 0 or not self._history_len():
-            return live
-        history = list(self.screen.history.top)
-        combined = history + live
-        end = len(combined) - self.scroll_back
-        end = max(rows, min(end, len(combined)))
-        return combined[end - rows:end]
-
+        return ScreenRenderer.visible_lines(self, self.rows)
     def _cell_sgr(self, cell) -> str:
-        # Reproduce exactly what OpenCode rendered into this cell, including the
-        # original colour encoding (see _hex_color_code), so the cell is
-        # byte-equivalent in colour to a native session on the same terminal.
-        codes = []
-        if getattr(cell, "bold", False):
-            codes.append("1")
-        if getattr(cell, "italics", False):
-            codes.append("3")
-        if getattr(cell, "underscore", False):
-            codes.append("4")
-        if getattr(cell, "blink", False):
-            codes.append("5")
-        if getattr(cell, "reverse", False):
-            codes.append("7")
-        if getattr(cell, "strikethrough", False):
-            codes.append("9")
-        fg = self._color_code(getattr(cell, "fg", "default"), foreground=True)
-        bg = self._color_code(getattr(cell, "bg", "default"), foreground=False)
-        if fg:
-            codes.append(fg)
-        if bg:
-            codes.append(bg)
-        return ";".join(codes)
-
+        return ScreenRenderer.cell_sgr(self, cell)
     def _color_code(self, color: str, *, foreground: bool) -> str | None:
-        if color in {"default", ""}:
-            return None
-        base = 30 if foreground else 40
-        bright_base = 90 if foreground else 100
-        colors = {
-            "black": 0,
-            "red": 1,
-            "green": 2,
-            "brown": 3,
-            "yellow": 3,
-            "blue": 4,
-            "magenta": 5,
-            "cyan": 6,
-            "white": 7,
-            "grey": 7,
-            "gray": 7,
-        }
-        if len(color) == 6 and all(char in "0123456789abcdefABCDEF" for char in color):
-            return self._hex_color_code(color.lower(), foreground=foreground)
-        if color.startswith("bright"):
-            key = color.removeprefix("bright")
-            return str(bright_base + colors[key]) if key in colors else None
-        return str(base + colors[color]) if color in colors else None
-
+        return ScreenRenderer.color_code(self, color, foreground=foreground)
     def _hex_color_code(self, color: str, *, foreground: bool) -> str:
-        # Re-emit a hex colour in the same encoding OpenCode used, decided by the
-        # shared terminal colour depth. Truecolor terminals get 24-bit colour;
-        # 256-colour terminals (e.g. Apple Terminal) get the original palette
-        # index so their own palette renders it, exactly like a native session.
-        red = int(color[0:2], 16)
-        green = int(color[2:4], 16)
-        blue = int(color[4:6], 16)
-        prefix = "38" if foreground else "48"
-        mode = getattr(self, "color_mode", "truecolor")
-        if mode == "truecolor":
-            return f"{prefix};2;{red};{green};{blue}"
-        index = _REVERSE_256.get(color)
-        if index is None:
-            index = _nearest_256(red, green, blue)
-        if mode == "256":
-            return f"{prefix};5;{index}"
-        # 16-colour terminals: fall back to the nearest ANSI base/bright code.
-        ansi = index if index < 16 else _nearest_ansi16(red, green, blue)
-        base = 30 if foreground else 40
-        bright_base = 90 if foreground else 100
-        return str(base + ansi) if ansi < 8 else str(bright_base + ansi - 8)
+        return ScreenRenderer.hex_color_code(self, color, foreground=foreground)
+
+    # Public aliases used by ScreenRenderer's internal self-calls when 'self'
+    # is a ProxyRunner (duck-typing delegation; no underscore prefix).
+    def cell_sgr(self, cell) -> str:
+        return ScreenRenderer.cell_sgr(self, cell)
+
+    def color_code(self, color: str, *, foreground: bool) -> str | None:
+        return ScreenRenderer.color_code(self, color, foreground=foreground)
+
+    def hex_color_code(self, color: str, *, foreground: bool) -> str:
+        return ScreenRenderer.hex_color_code(self, color, foreground=foreground)
+
+    def history_len(self) -> int:
+        return ScreenRenderer.history_len(self)
+
+    def scroll(self, delta: int, render_fn) -> None:
+        ScreenRenderer.scroll(self, delta, render_fn)
+
+    def visible_lines(self, rows: int) -> list:
+        return ScreenRenderer.visible_lines(self, rows)
+
+    def selection_ranges(self, cols: int) -> dict:
+        return ScreenRenderer.selection_ranges(self, cols)
+
+    def copy_selection(self, rows: int, cols: int, copy_fn, set_msg_fn) -> None:
+        ScreenRenderer.copy_selection(self, rows, cols, copy_fn, set_msg_fn)
+
+    def render_line(self, cells, sel=None, *, cols: int) -> str:
+        return ScreenRenderer.render_line(self, cells, sel, cols=cols)
+
+    def append_box(self, parts, row, col, width, lines, highlight=None, *, rows: int) -> None:
+        ScreenRenderer.append_box(self, parts, row, col, width, lines, highlight, rows=rows)
+
+    def append_command_palette(self, parts, *, rows: int, cols: int, input_text: str, input_matches, input_selected) -> None:
+        ScreenRenderer.append_command_palette(self, parts, rows=rows, cols=cols, input_text=input_text, input_matches=input_matches, input_selected=input_selected)
+
+    def append_message_popup(self, parts, message: str, *, rows: int, cols: int) -> None:
+        ScreenRenderer.append_message_popup(self, parts, message, rows=rows, cols=cols)
+
+    def cursor_sequence(self, rows: int, cols: int, scroll_back: int) -> str:
+        return ScreenRenderer.cursor_sequence(self, rows, cols, scroll_back)
+
+    def sync_hold(self, now: float, sync_max_hold: float) -> bool:
+        return ScreenRenderer.sync_hold(self, now, sync_max_hold)
+
+    def render_output(self, render_fn, render_min_interval: float, sync_max_hold: float) -> None:
+        ScreenRenderer.render_output(self, render_fn, render_min_interval, sync_max_hold)
+
+    def flush_pending_render(self, render_fn, render_min_interval: float, sync_max_hold: float) -> None:
+        ScreenRenderer.flush_pending_render(self, render_fn, render_min_interval, sync_max_hold)
+
+    def track_sync_update(self, output: bytes) -> None:
+        ScreenRenderer.track_sync_update(self, output)
+
+    def feed(self, output: bytes, *, pyte_hostile_csi_re) -> None:
+        ScreenRenderer.feed(self, output, pyte_hostile_csi_re=pyte_hostile_csi_re)
+
+    def init_screen(self, rows: int, cols: int) -> None:
+        ScreenRenderer.init_screen(self, rows, cols)
+
+    # Public aliases used by TerminalHost's internal self-calls when 'self' is a
+    # ProxyRunner (same duck-typing contract as the ScreenRenderer aliases).
+    def set_raw(self) -> None:
+        TerminalHost.set_raw(self)
+
+    def set_cooked(self) -> None:
+        TerminalHost.set_cooked(self)
+
+    def enable_host_mouse(self) -> None:
+        TerminalHost.enable_host_mouse(self)
+
+    def disable_host_terminal_modes(self) -> None:
+        TerminalHost.disable_host_terminal_modes(self)
+
+    def parse_host_terminal_responses(self, data: bytes, *, debug_fn=None) -> None:
+        TerminalHost.parse_host_terminal_responses(self, data, debug_fn=debug_fn or self._debug)
 
     def _status_line(self) -> str:
-        declined = len(getattr(self, "_user_declined", []))
-        session_id = self.state.backend_session_id
-        session = f"{self.name or 'session'}" + (f" [{_short_session(session_id)}]" if session_id else "")
-        base = getattr(self, "_base_branch", None)
-        if base and getattr(self, "worktree", None) is not None:
-            session += f" → {base}"  # the branch this session's work merges into
-        left = f" aGiT Ctrl-G | {session} | {self.backend.name} "
-        if getattr(self, "scroll_back", 0) > 0:
-            right = f" SCROLLBACK -{self.scroll_back} (scroll down to resume) "
-        else:
-            right = f" unstaged:{declined} " if declined else ""
-        padding = " " * max(self.cols - len(left) - len(right), 0)
-        return f"\x1b[7m{left}{padding}{right}\x1b[0m"
-
+        return ScreenRenderer.status_line(
+            self,
+            cols=self.cols,
+            name=self.name,
+            backend_name=self.backend.name,
+            session_id=self.state.backend_session_id,
+            base_branch=getattr(self, "_base_branch", None),
+            worktree=getattr(self, "worktree", None),
+            scroll_back=getattr(self, "scroll_back", 0),
+            user_declined=getattr(self, "_user_declined", []),
+            short_session_fn=_short_session,
+        )
     def _render_status(self, text: str) -> None:
         prompt = text.replace("\r", "").replace("\n", "")
         line = f" aGiT> {prompt}"[: self.cols].ljust(self.cols)
         os.write(sys.stdout.fileno(), f"\x1b[{self.rows};1H\x1b[7m{line}\x1b[0m".encode())
 
     def _enter_host_screen(self) -> None:
-        os.write(sys.stdout.fileno(), b"\x1b[?1049h\x1b[2J\x1b[H")
-        self._enable_host_mouse()
-
+        TerminalHost.enter_host_screen(self)
     def _enable_host_mouse(self) -> None:
-        # Enable SGR mouse reporting on the host (1000 = button press/release +
-        # wheel) so aGiT receives wheel events for scrollback and press/release
-        # for its own copy. This is the minimal mode that reliably reports the
-        # wheel; richer motion tracking (1002/1003) changes wheel reporting on
-        # some terminals and is avoided. Backends that manage the mouse
-        # themselves (OpenCode) re-assert their own modes afterwards.
-        os.write(sys.stdout.fileno(), b"\x1b[?1000h\x1b[?1006h")
-
+        TerminalHost.enable_host_mouse(self)
     def _run_command(self, command: str) -> None:
         # aGiT commands in proxy mode are triggered via Ctrl-G and are plain
         # names; ":" is not a command trigger here (it is forwarded to the
@@ -4125,47 +3832,17 @@ class ProxyRunner:
         self._integrate_session_turn()
 
     def _pause_child_ui(self) -> None:
-        self._set_cooked()
-        os.write(sys.stdout.fileno(), b"\x1b[0m\r\n")
-
+        TerminalHost.pause_child_ui(self)
     def _resume_child_ui(self) -> None:
-        self._set_raw()
-        self._render()
-
+        TerminalHost.resume_child_ui(self, self._render)
     def _set_raw(self) -> None:
-        tty.setraw(sys.stdin.fileno())
-
+        TerminalHost.set_raw(self)
     def _set_cooked(self) -> None:
-        if self.old_attrs is not None:
-            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, self.old_attrs)
-
+        TerminalHost.set_cooked(self)
     def _restore_terminal(self) -> None:
-        # Disable mouse reporting *before* handing the terminal back, then drop any
-        # mouse reports the terminal already queued — otherwise those buffered SGR
-        # sequences (e.g. "\x1b[<35;..M") leak to the shell as stray hex after exit.
-        self._disable_host_terminal_modes()
-        try:
-            termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
-        except (termios.error, OSError, ValueError):
-            pass
-        self._set_cooked()
-        os.write(sys.stdout.fileno(), b"\x1b[?1049l\x1b[0m\r\n")
-
+        TerminalHost.restore_terminal(self)
     def _disable_host_terminal_modes(self) -> None:
-        # Reset modes commonly enabled by full-screen TUIs: mouse tracking,
-        # focus reporting, bracketed paste, alternate-scroll, cursor visibility,
-        # and styling. Emit this independently from cooked-mode restoration so it
-        # can also run from signal handlers before Python exits.
-        os.write(
-            sys.stdout.fileno(),
-            b"\x1b[?9l\x1b[?1000l\x1b[?1001l\x1b[?1002l\x1b[?1003l\x1b[?1004l"
-            b"\x1b[?1005l\x1b[?1006l\x1b[?1007l\x1b[?1015l\x1b[?1016l\x1b[?2004l"
-            # Undo any keyboard-protocol state mirrored for the backend: pop the
-            # kitty flags and switch modifyOtherKeys off.
-            b"\x1b[<u\x1b[>4;0m"
-            b"\x1b[?25h\x1b[0m",
-        )
-
+        TerminalHost.disable_host_terminal_modes(self)
     def _resize_child(self) -> None:
         if self.master_fd is None:
             return
@@ -4181,8 +3858,4 @@ class ProxyRunner:
             pass
 
     def _terminal_size(self) -> tuple[int, int]:
-        try:
-            size = os.get_terminal_size(sys.stdout.fileno())
-            return size.lines, size.columns
-        except OSError:
-            return 24, 80
+        return TerminalHost.terminal_size(self)
