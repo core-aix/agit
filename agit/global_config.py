@@ -18,6 +18,7 @@ DEFAULT_TIMINGS: dict[str, float] = {
     "parse_cooldown_seconds": 10.0,  # minimum gap between agent-turn parses
     "base_edit_check_seconds": 3.0,  # how often to warn about un-sandboxed base-repo edits
     "cwd_check_seconds": 3.0,  # how often to check for the resume-cwd drift bug
+    "base_drift_check_seconds": 2.0,  # how often to check the base repo's checked-out branch
 }
 
 

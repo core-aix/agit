@@ -99,7 +99,19 @@ class AgitState:
 
     def _ensure_repo_local_ignore(self) -> None:
         exclude = self._exclude_path()
-        if exclude is None or not exclude.exists():
+        if exclude is None:
+            return
+        if not exclude.exists():
+            # Repos created without the default template have no info/exclude;
+            # create it (only in an actual git repo) so .agit/ stays unignored
+            # nowhere. The worktree case resolves to the shared git dir via git.
+            if not (self.repo / ".git").exists():
+                return
+            try:
+                exclude.parent.mkdir(parents=True, exist_ok=True)
+                exclude.write_text(".agit/\n", encoding="utf-8")
+            except OSError:
+                pass
             return
         content = exclude.read_text(encoding="utf-8")
         if ".agit/" in content.splitlines():

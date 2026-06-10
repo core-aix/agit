@@ -851,7 +851,6 @@ def test_ensure_worktree_alive_recreates_worktree(tmp_path):
     runner.name = "session-1"
     runner._base_branch = main.current_branch()
     runner.worktree_manager = wm
-    runner.tracking_enabled = True
     runner.global_config = type("G", (), {"default_backend": "opencode"})()
     runner.state = AgitState(info.path, default_backend="opencode")
     runner.backend = make_proxy_agent("opencode")
@@ -866,7 +865,6 @@ def test_ensure_worktree_alive_recreates_worktree(tmp_path):
     runner.sessions = [None]
     runner.active_index = 0
     runner.merge_ctx = None
-    runner.tracking_enabled = True
 
     messages = []
     runner._set_message = lambda msg, **kw: messages.append(msg)
@@ -910,7 +908,6 @@ def test_ensure_worktree_alive_falls_back_on_open_session_failure(tmp_path):
     runner.name = "session-1"
     runner._base_branch = main.current_branch()
     runner.worktree_manager = wm
-    runner.tracking_enabled = True
     runner.global_config = type("G", (), {"default_backend": "opencode"})()
     runner.state = AgitState(info.path, default_backend="opencode")
     runner.backend = make_proxy_agent("opencode")
@@ -925,7 +922,6 @@ def test_ensure_worktree_alive_falls_back_on_open_session_failure(tmp_path):
     runner.sessions = [None]
     runner.active_index = 0
     runner.merge_ctx = None
-    runner.tracking_enabled = True
 
     messages = []
     runner._set_message = lambda msg, **kw: messages.append(msg)

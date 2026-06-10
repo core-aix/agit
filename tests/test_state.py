@@ -175,3 +175,27 @@ def test_save_is_atomic_and_leaves_no_temp_file(tmp_path):
 
     with (state_dir / "state.json").open(encoding="utf-8") as handle:
         assert json.load(handle)["agit_session_id"] == state.session_id
+
+
+def test_missing_info_exclude_is_created_with_agit_ignore(tmp_path):
+    # Issue #26: repos created without the default template have no
+    # info/exclude; saving state must create it rather than leave .agit/
+    # unignored.
+    import subprocess
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    exclude = tmp_path / ".git" / "info" / "exclude"
+    if exclude.exists():
+        exclude.unlink()
+
+    state = AgitState(tmp_path)
+    state.save()
+
+    assert exclude.exists()
+    assert ".agit/" in exclude.read_text(encoding="utf-8").splitlines()
+
+
+def test_no_exclude_created_outside_a_git_repo(tmp_path):
+    state = AgitState(tmp_path)  # tmp_path is not a git repo
+    state.save()
+    assert not (tmp_path / ".git").exists()

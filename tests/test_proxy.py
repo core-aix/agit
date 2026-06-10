@@ -9,7 +9,7 @@ import types
 from agit.backends.base import TokenUsage
 from agit.opencode_session import SessionTurn
 from agit.backends.proxy_agents import make_proxy_agent
-from agit.proxy import ProxyInput, ProxyRunner, _escape_sequence_complete, _humanize_age, _short_session, detect_color_mode
+from agit.proxy import ProxyInput, ProxyRunner, _escape_sequence_complete, _short_session, detect_color_mode
 from agit.session import ExportedSession, SessionRef
 from agit.state import AgitState
 
@@ -52,23 +52,9 @@ def test_discover_spawned_session_without_snapshot_uses_newest():
     assert runner._discover_spawned_session() == "b"
 
 
-def test_resolve_session_id_matches_exact_and_unique_prefix():
-    refs = [SessionRef("abc123", 1.0), SessionRef("abd999", 2.0)]
-    runner = _runner_with_sessions(refs)
-    assert runner._resolve_session_id("abc123") == "abc123"
-    assert runner._resolve_session_id("abc") == "abc123"
-    assert runner._resolve_session_id("ab") is None  # ambiguous prefix
-    assert runner._resolve_session_id("zzz") is None
-
-
-def test_short_session_and_humanize_age():
+def test_short_session():
     assert _short_session("35e076c5-8653-439c") == "35e076c5"
     assert _short_session(None) == "(none)"
-    import time
-
-    assert _humanize_age(time.time() - 30).endswith("s ago")
-    assert _humanize_age(time.time() - 3700).endswith("h ago")
-    assert _humanize_age(0) == ""
 
 
 class FakeCommitRepo:
@@ -465,21 +451,6 @@ def test_agent_commit_popup_includes_commit_id(tmp_path):
     assert runner.message == "Created <agent> commit abc1234."
 
 
-def test_proxy_plain_row_handles_empty_pyte_cell_data():
-    runner = ProxyRunner.__new__(ProxyRunner)
-    runner.cols = 2
-
-    class Cell:
-        data = ""
-
-    class Screen:
-        buffer = {0: {0: Cell()}}
-
-    runner.screen = Screen()
-
-    assert runner._plain_row(0) == "  "
-
-
 def _make_cell(data=" ", **attrs):
     class Cell:
         pass
@@ -508,7 +479,7 @@ def test_proxy_cell_sgr_reproduces_attributes():
     assert runner._cell_sgr(_make_cell(italics=True, fg="brightcyan")) == "3;96"
 
 
-def test_proxy_render_row_preserves_colors():
+def test_proxy_render_line_preserves_colors():
     runner = ProxyRunner.__new__(ProxyRunner)
     runner.cols = 3
 
@@ -525,7 +496,16 @@ def test_proxy_render_row_preserves_colors():
 
     # The style is emitted once for the run of matching cells and reset before
     # the default-styled cell, so OpenCode's colors survive the round-trip.
-    assert runner._render_row(0) == "\x1b[38;2;255;128;0mab\x1b[0mc"
+    assert runner._render_line(runner.screen.buffer[0]) == "\x1b[38;2;255;128;0mab\x1b[0mc"
+
+
+def test_proxy_render_line_handles_empty_pyte_cell_data():
+    runner = ProxyRunner.__new__(ProxyRunner)
+    runner.cols = 2
+
+    cells = {0: _make_cell("")}  # pyte can leave a cell with empty data
+
+    assert runner._render_line(cells) == "  "
 
 
 def test_detect_color_mode_from_environment():
@@ -557,7 +537,7 @@ def test_proxy_hex_color_preserves_truecolor_encoding():
     assert runner._hex_color_code("0a0a0a", foreground=False) == "48;2;10;10;10"
 
 
-def test_proxy_render_row_emits_256_colors_in_256_mode():
+def test_proxy_render_line_emits_256_colors_in_256_mode():
     runner = ProxyRunner.__new__(ProxyRunner)
     runner.color_mode = "256"
     runner.cols = 3
@@ -573,12 +553,12 @@ def test_proxy_render_row_emits_256_colors_in_256_mode():
 
     runner.screen = Screen()
 
-    out = runner._render_row(0)
+    out = runner._render_line(runner.screen.buffer[0])
     assert "38;5;255" in out and "48;5;232" in out
     assert "38;2;" not in out and "48;2;" not in out  # no truecolor leakage
 
 
-def test_proxy_render_row_emits_reverse_video():
+def test_proxy_render_line_emits_reverse_video():
     runner = ProxyRunner.__new__(ProxyRunner)
     runner.cols = 3
 
@@ -593,7 +573,7 @@ def test_proxy_render_row_emits_reverse_video():
 
     runner.screen = Screen()
 
-    assert runner._render_row(0) == "a\x1b[7mb\x1b[0mc"
+    assert runner._render_line(runner.screen.buffer[0]) == "a\x1b[7mb\x1b[0mc"
 
 
 def test_screen_erase_does_not_carry_glyph_attributes():
@@ -2118,7 +2098,6 @@ def _base_drift_runner(current_branch):
 
     runner = ProxyRunner.__new__(ProxyRunner)
     runner._base_branch = "dev"
-    runner.tracking_enabled = True
     runner._integration_paused = False
     runner._base_drift_check_at = 0.0
     runner.base_repo = types.SimpleNamespace(current_branch=lambda: current_branch)
@@ -2304,7 +2283,6 @@ def test_cleanup_stale_state_removes_orphaned_worktree_dirs(tmp_path):
     (root / "stray-file").write_text("x")           # a file, not a dir → ignored
 
     runner = ProxyRunner.__new__(ProxyRunner)
-    runner.tracking_enabled = True
     runner._debug = lambda *a, **k: None
     prunes = []
     runner.base_repo = types.SimpleNamespace(worktree_prune=lambda: prunes.append(1))
@@ -2320,17 +2298,6 @@ def test_cleanup_stale_state_removes_orphaned_worktree_dirs(tmp_path):
     assert not orphan.exists()         # the orphaned .agit/-only dir is swept
     assert (root / "stray-file").exists()
     assert prunes                      # pruned stale git registrations
-
-
-def test_cleanup_stale_state_noop_when_read_only():
-    import types
-
-    runner = ProxyRunner.__new__(ProxyRunner)
-    runner.tracking_enabled = False
-    pruned = []
-    runner.base_repo = types.SimpleNamespace(worktree_prune=lambda: pruned.append(1))
-    runner._cleanup_stale_state_on_startup()
-    assert pruned == []  # a read-only observer touches nothing
 
 
 def test_is_valid_worktree_rejects_leftover_without_git(tmp_path):
@@ -3358,3 +3325,22 @@ def test_readme_proxy_command_list_matches_implementation():
     documented = {line.split()[0] for line in block.strip().splitlines()}
 
     assert documented == set(ProxyInput.COMMANDS)
+
+
+def test_sync_tracked_session_skips_empty_newest_session(tmp_path):
+    # Issue #26: syncing must not adopt Claude's freshly-minted EMPTY session
+    # (newest by mtime, no content) — the same blank-resume trap
+    # claude_session.latest_session_id avoids.
+    refs = [
+        SessionRef("with-content", 100.0, label="fix the parser"),
+        SessionRef("empty-newest", 200.0, label=None),
+    ]
+    runner = _runner_with_sessions(refs)
+    runner.state = AgitState(tmp_path)
+    runner._initialize_session_baseline = lambda: None
+    runner._set_message = lambda *a, **k: None
+    runner._render = lambda: None
+
+    runner._sync_tracked_session()
+
+    assert runner.state.backend_session_id == "with-content"

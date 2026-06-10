@@ -82,27 +82,6 @@ class OpenCodeBackend:
             return None, []
         return parts[0], parts[1:]
 
-    def _parse_output(self, output: str) -> tuple[str, str | None, str | None]:
-        final_response = ""
-        session_id = None
-        model = None
-
-        for line in output.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            parsed = self._parse_event_line(line)
-            if parsed is None:
-                continue
-
-            _display_text, final_text, parsed_session_id, parsed_model, _tokens = parsed
-            session_id = session_id or parsed_session_id
-            model = model or parsed_model
-            if final_text:
-                final_response += final_text
-
-        return final_response.strip(), session_id, model
-
     def _parse_event_line(self, line: str) -> tuple[str | None, str | None, str | None, str | None, TokenUsage] | None:
         line = line.strip()
         if not line:
@@ -129,21 +108,6 @@ class OpenCodeBackend:
 
         status = self._event_status(event, part)
         return status, None, session_id, model, tokens
-
-    def _extract_final_text(self, event: dict) -> str | None:
-        event_type = str(event.get("type", "")).lower()
-        if any(marker in event_type for marker in ("final", "complete", "done", "message")):
-            for key in ("text", "content", "message", "response"):
-                value = event.get(key)
-                if isinstance(value, str) and value.strip():
-                    return value.strip()
-            data = event.get("data")
-            if isinstance(data, dict):
-                for key in ("text", "content", "message", "response"):
-                    value = data.get(key)
-                    if isinstance(value, str) and value.strip():
-                        return value.strip()
-        return None
 
     def _event_text(self, event: dict) -> str | None:
         part = event.get("part")

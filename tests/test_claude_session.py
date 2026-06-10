@@ -341,3 +341,26 @@ def test_encode_repo_matches_claude_naming():
     from pathlib import Path
 
     assert claude_session._encode_repo(Path("/a.b/c_d")) == "-a-b-c-d"
+
+
+def test_parse_rows_records_session_updated_from_row_timestamps():
+    # Issue #26 cleanup: `updated` was declared but never assigned, so every
+    # Claude ExportedSession reported None. It now reflects the newest row.
+    rows = [
+        _user("u1", "first prompt"),
+        _assistant("m1", "answer", usage={"input_tokens": 1, "output_tokens": 1}),
+    ]
+    rows[0]["timestamp"] = "2026-06-10T10:00:00.000Z"
+    rows[1]["timestamp"] = "2026-06-10T10:05:30.000Z"
+
+    session = parse_rows("sess-1", rows)
+
+    from datetime import datetime, timezone
+
+    expected = int(datetime(2026, 6, 10, 10, 5, 30, tzinfo=timezone.utc).timestamp())
+    assert session.updated == expected
+
+
+def test_parse_rows_updated_none_without_timestamps():
+    rows = [_user("u1", "p"), _assistant("m1", "a", usage={})]
+    assert parse_rows("sess-1", rows).updated is None

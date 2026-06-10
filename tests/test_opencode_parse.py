@@ -1,3 +1,4 @@
+import io
 from pathlib import Path
 
 from agit.backends.opencode import OpenCodeBackend
@@ -11,7 +12,7 @@ def test_opencode_parse_prefers_final_response():
         '{"type":"final","content":"done","sessionID":"ses-1","model":"m"}',
     ])
 
-    final, session_id, model = backend._parse_output(output)
+    final, session_id, model, _tokens = backend._read_events(io.StringIO(output))
 
     assert final == "done"
     assert session_id == "ses-1"
@@ -26,7 +27,7 @@ def test_opencode_parse_nested_text_part():
         '{"type":"step_finish","sessionID":"ses-1","part":{"type":"step-finish"}}',
     ])
 
-    final, session_id, model = backend._parse_output(output)
+    final, session_id, model, _tokens = backend._read_events(io.StringIO(output))
 
     assert final == "Hi. What would you like to work on?"
     assert session_id == "ses-1"

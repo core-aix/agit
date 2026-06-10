@@ -183,3 +183,4 @@ User-wide settings live in `~/.agit/config.json` (override the directory with `A
 | `parse_cooldown_seconds` | `10.0` | Minimum gap between agent-turn parses. |
 | `base_edit_check_seconds` | `3.0` | How often aGiT warns about edits to the base repo when the sandbox is unavailable. |
 | `cwd_check_seconds` | `3.0` | How often aGiT checks for the Claude resume-cwd drift bug. |
+| `base_drift_check_seconds` | `2.0` | How often aGiT checks whether the base repo was switched to another branch outside aGiT. |

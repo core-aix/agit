@@ -4,6 +4,7 @@ import json
 import os
 import re
 import shutil
+from datetime import datetime
 from pathlib import Path
 
 from agit.backends.base import TokenUsage
@@ -294,6 +295,9 @@ def parse_rows(session_id: str, rows: list[dict]) -> ExportedSession:
             current = None
 
     for row in rows:
+        stamp = _row_timestamp(row)
+        if stamp is not None:
+            updated = stamp if updated is None else max(updated, stamp)
         row_type = row.get("type")
         if row_type == "user":
             prompt = _user_prompt(row)
@@ -333,6 +337,18 @@ def parse_rows(session_id: str, rows: list[dict]) -> ExportedSession:
                 current["assistant_id"] = str(message.get("id") or "")
     flush()
     return ExportedSession(session_id=session_id, model=model, updated=updated, turns=turns)
+
+
+def _row_timestamp(row: dict) -> int | None:
+    # Transcript rows carry an ISO-8601 `timestamp`; the newest one is the
+    # session's last-updated time.
+    value = row.get("timestamp")
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp())
+    except ValueError:
+        return None
 
 
 def _finalize_turn(turn: dict) -> SessionTurn:

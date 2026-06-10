@@ -125,19 +125,6 @@ def _short_session(session_id: str | None) -> str:
     return session_id[:8]
 
 
-def _humanize_age(updated: float) -> str:
-    if not updated:
-        return ""
-    delta = max(time.time() - float(updated), 0.0)
-    if delta < 60:
-        return f"{int(delta)}s ago"
-    if delta < 3600:
-        return f"{int(delta // 60)}m ago"
-    if delta < 86400:
-        return f"{int(delta // 3600)}h ago"
-    return f"{int(delta // 86400)}d ago"
-
-
 class _BackgroundColorEraseScreen(pyte.HistoryScreen):
     # pyte erases cells using the cursor's *full* SGR attributes, so a backend
     # that clears the screen (or a line) while underline — or any glyph
@@ -310,9 +297,6 @@ class ProxyInput:
         if matches:
             self.selected_index = (self.selected_index + delta) % len(matches)
 
-    def best_match(self) -> str | None:
-        return next(iter(self.matches()), None)
-
 
 class ProxyRunner:
     # Defaults for the tunable timings; overridden per-instance from the global
@@ -325,6 +309,7 @@ class ProxyRunner:
     BASE_POLL_SECONDS = 3.0
     BASE_EDIT_CHECK_SECONDS = 3.0
     CWD_CHECK_SECONDS = 3.0
+    BASE_DRIFT_CHECK_SECONDS = 2.0
     RENDER_MIN_INTERVAL = 0.033  # coalesce output-driven repaints to ~30fps
     SYNC_MAX_HOLD = 0.05  # cap how long a backend synchronized-update may defer a paint
 
@@ -472,6 +457,7 @@ class ProxyRunner:
         self.BASE_POLL_SECONDS = timings["base_poll_seconds"]
         self.BASE_EDIT_CHECK_SECONDS = timings["base_edit_check_seconds"]
         self.CWD_CHECK_SECONDS = timings["cwd_check_seconds"]
+        self.BASE_DRIFT_CHECK_SECONDS = timings["base_drift_check_seconds"]
 
     def run(self) -> int:
         if not sys.stdin.isatty() or not sys.stdout.isatty():
@@ -606,10 +592,10 @@ class ProxyRunner:
         # switch would target the wrong branch. Detect it, PAUSE worktree merging,
         # and tell the user; resume automatically when they switch back. (Sessions
         # keep running and committing to their own branches throughout.)
-        if self._base_branch is None or not getattr(self, "tracking_enabled", True):
+        if self._base_branch is None:
             return
         now = time.monotonic()
-        if now - getattr(self, "_base_drift_check_at", 0.0) < 2.0:
+        if now - getattr(self, "_base_drift_check_at", 0.0) < self.BASE_DRIFT_CHECK_SECONDS:
             return
         self._base_drift_check_at = now
         try:
@@ -1091,8 +1077,6 @@ class ProxyRunner:
         # registered worktree. Valid dormant worktrees (kept for resume) are
         # registered, so they're left untouched. Runs before the primary session is
         # set up so startup is clean from the first launch, not the second.
-        if not getattr(self, "tracking_enabled", True):
-            return
         try:
             self.base_repo.worktree_prune()
         except Exception as error:
@@ -1756,8 +1740,7 @@ class ProxyRunner:
             return
         # Both merge paths relaunch the session, then start the merge in it.
         self._new_session(name)
-        self.merge_auto_resolve = choice.startswith("Merge automatically")
-        self._start_merge_for_active(auto=self.merge_auto_resolve)
+        self._start_merge_for_active(auto=choice.startswith("Merge automatically"))
 
     def _start_merge_for_active(self, *, auto: bool) -> None:
         # Begin merging base into the (now active) session's branch.
@@ -2258,7 +2241,12 @@ class ProxyRunner:
             self._set_message("No sessions found to sync.")
             self._render()
             return
-        newest = max(refs, key=lambda ref: ref.updated)
+        # Prefer sessions with content (a label is the first real user prompt):
+        # Claude mints a fresh EMPTY session id on resume/picker actions, which
+        # is newest by mtime but has nothing to track — adopting it blanks the
+        # next restart (same trap claude_session.latest_session_id avoids).
+        resumable = [ref for ref in refs if ref.label]
+        newest = max(resumable or refs, key=lambda ref: ref.updated)
         if newest.id == self.state.backend_session_id:
             self._set_message(f"Already tracking the most recent session ({_short_session(newest.id)}).")
             self._render()
@@ -2268,13 +2256,6 @@ class ProxyRunner:
         self._initialize_session_baseline()
         self._set_message(f"Now tracking session {_short_session(newest.id)}")
         self._render()
-
-    def _resolve_session_id(self, arg: str) -> str | None:
-        ids = [ref.id for ref in self.backend.list_sessions(self.repo.repo)]
-        if arg in ids:
-            return arg
-        matches = [session_id for session_id in ids if session_id.startswith(arg)]
-        return matches[0] if len(matches) == 1 else None
 
     def _start_file_watcher(self) -> None:
         if Observer is None:
@@ -2802,19 +2783,6 @@ class ProxyRunner:
             if row + offset >= self.rows:
                 break
             parts.append(f"\x1b[{row + offset};{col}H\x1b[0m{line}")
-
-    def _plain_row(self, row: int) -> str:
-        assert self.screen is not None
-        cells = self.screen.buffer.get(row, {})
-        chars = []
-        for col in range(self.cols):
-            cell = cells.get(col)
-            chars.append((getattr(cell, "data", None) or " ")[:1] if cell is not None else " ")
-        return "".join(chars)
-
-    def _render_row(self, row: int) -> str:
-        assert self.screen is not None
-        return self._render_line(self.screen.buffer.get(row, {}))
 
     def _render_line(self, cells, sel: tuple[int, int] | None = None) -> str:
         rendered = []
