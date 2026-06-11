@@ -242,9 +242,10 @@ class ProxyRunner:
         verbose: bool = False,
         backend: str | None = None,
         new_session: bool = False,
+        backend_args: list[str] | None = None,
         # Optional injected collaborators (default to production construction).
         # These keyword arguments are for testing and advanced use; the CLI call
-        # site passes only the first four parameters and is unaffected.
+        # site passes only the first five parameters and is unaffected.
         _global_config: "GlobalConfig | None" = None,
         _state: "AgitState | None" = None,
         _integration: "IntegrationService | None" = None,
@@ -253,6 +254,8 @@ class ProxyRunner:
         # Attach the initial session; per-session state lives on it.
         self.active = Session.bare()
         self.repo = repo
+        # Extra CLI args forwarded verbatim to every backend spawn (#32).
+        self._backend_args = list(backend_args or [])
         self._force_new_session = new_session  # start a fresh conversation, do not resume
         self.name = "main"  # session label (multiplexer assigns names to others)
         self._primary_worktree_name: str | None = None  # session kept across exits for auto-resume
@@ -682,6 +685,9 @@ class ProxyRunner:
                 # the one it creates can be identified on the first parse.
                 self._pre_spawn_session_ids = {ref.id for ref in self.backend.list_sessions(self.repo.repo)}
         command = self.backend.spawn_command(self.repo.repo, session_id=session_id, resume=resume)
+        # Forward any backend-specific args the user passed through aGiT (#32),
+        # before the sandbox wrapper so they reach the backend, not sandbox-exec.
+        command = command + getattr(self, "_backend_args", [])
         command = self._confine_to_worktree(command)
         # Fork/exec mechanics delegated to BackendProcess; policy (command
         # construction, sandbox wrapping) stays here in the runner. The session

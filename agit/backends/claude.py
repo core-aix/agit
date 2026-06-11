@@ -10,9 +10,10 @@ from agit.backends.base import AgentResult, TokenUsage
 class ClaudeBackend:
     name = "claude"
 
-    def __init__(self, repo: Path, *, verbose: bool = False) -> None:
+    def __init__(self, repo: Path, *, verbose: bool = False, backend_args: list[str] | None = None) -> None:
         self.repo = repo
         self.verbose = verbose
+        self.backend_args = list(backend_args or [])  # forwarded verbatim to the backend CLI (#32)
 
     def run(self, prompt: str, *, model: str | None, session_id: str | None) -> AgentResult:
         command = ["claude", "-p", prompt, "--output-format", "json"]
@@ -20,6 +21,7 @@ class ClaudeBackend:
             command.extend(["--model", model])
         if session_id:
             command.extend(["--resume", session_id])
+        command.extend(self.backend_args)
 
         process = subprocess.run(
             command,

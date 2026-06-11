@@ -28,25 +28,69 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="start a fresh backend conversation instead of resuming the last one",
     )
-    args = parser.parse_args(argv)
+    parser.epilog = (
+        "Unrecognized arguments are forwarded verbatim to the backend CLI "
+        "(claude / opencode), e.g. `agit --backend opencode --port 12345`. Use "
+        "`--` to forward arguments that aGiT also defines or a bare prompt, e.g. "
+        '`agit -- --verbose "fix the bug"`.'
+    )
+    # parse_known_args so backend-specific flags pass through instead of erroring.
+    args, backend_args = parser.parse_known_args(argv)
+    # argparse leaves a single leading "--" separator in the remainder; drop it.
+    if backend_args and backend_args[0] == "--":
+        backend_args = backend_args[1:]
 
     # First run: ask the user to choose a default backend before launching.
     config = GlobalConfig()
     if args.backend is None and not config.has_default_backend() and sys.stdin.isatty() and sys.stdout.isatty():
         select_default_backend(config)
 
+    if backend_args:
+        _warn_reserved_passthrough(args.backend or config.default_backend, backend_args)
+
     try:
         repo = _discover_or_init(Path(args.repo).expanduser())
         if repo is None:
             return 1
         if args.mode == "json":
-            AgitShell(repo, verbose=args.verbose, backend=args.backend, new_session=args.new_session).run()
+            AgitShell(
+                repo,
+                verbose=args.verbose,
+                backend=args.backend,
+                new_session=args.new_session,
+                backend_args=backend_args,
+            ).run()
         else:
-            return ProxyRunner(repo, verbose=args.verbose, backend=args.backend, new_session=args.new_session).run()
+            return ProxyRunner(
+                repo,
+                verbose=args.verbose,
+                backend=args.backend,
+                new_session=args.new_session,
+                backend_args=backend_args,
+            ).run()
     except (GitError, RuntimeError) as error:
         print(error)
         return 1
     return 0
+
+
+# Flags aGiT injects itself to manage session tracking; forwarding a duplicate
+# can fight aGiT's own session handling. We warn but still forward — aGiT never
+# silently swallows the user's intent.
+_RESERVED_PASSTHROUGH = {
+    "claude": {"--session-id", "--resume", "-r", "--continue", "-c"},
+    "opencode": {"--session", "-s", "--continue", "-c"},
+}
+
+
+def _warn_reserved_passthrough(backend: str, backend_args: list[str]) -> None:
+    reserved = _RESERVED_PASSTHROUGH.get(backend, set())
+    hit = sorted({arg for arg in backend_args if arg in reserved})
+    if hit:
+        print(
+            f"Warning: forwarding {', '.join(hit)} to {backend}; aGiT manages "
+            "session selection itself, so this may interfere with its session tracking."
+        )
 
 
 def _discover_or_init(path: Path) -> GitRepo | None:
