@@ -12,7 +12,6 @@ agit/proxy/runner.py:0: error: Argument 1 to "_set_message" of "ProxyRunner" has
 agit/proxy/runner.py:0: error: Argument 1 to "_set_message" of "ProxyRunner" has incompatible type "str | None"; expected "str"  [arg-type]
 agit/proxy/runner.py:0: error: Item "None" of "MergeContext | None" has no attribute "source_branch"  [union-attr]
 agit/proxy/runner.py:0: error: Argument 1 to "_set_message" of "ProxyRunner" has incompatible type "str | None"; expected "str"  [arg-type]
-agit/proxy/runner.py:0: error: Attribute "file_observer" already defined on line 0  [no-redef]
 agit/proxy/runner.py:0: error: Incompatible types in assignment (expression has type "str | int | None", variable has type "str | None")  [assignment]
 agit/proxy/runner.py:0: error: Argument 1 to "feed" of "ScreenRenderer" has incompatible type "ProxyRunner"; expected "ScreenRenderer"  [arg-type]
 agit/proxy/runner.py:0: error: Argument 1 to "detect_host_terminal" of "TerminalHost" has incompatible type "ProxyRunner"; expected "TerminalHost"  [arg-type]

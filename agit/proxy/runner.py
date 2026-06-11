@@ -2304,7 +2304,7 @@ class ProxyRunner:
             return
         observer.stop()
         observer.join(timeout=2.0)
-        self.file_observer: Any = None
+        self.file_observer = None
 
     def _background_fds(self) -> dict:
         # master_fd -> session object, for every session that is not the active
