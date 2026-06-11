@@ -263,10 +263,73 @@ def test_help_no_backend_selected(monkeypatch, capsys):
     assert "No backend selected yet" in out
 
 
-def test_help_double_dash_does_not_trigger_combined(monkeypatch, capsys):
-    captured = _stub_launch(monkeypatch)
+def test_backend_help_via_double_dash_runs_directly(monkeypatch):
+    """Test that --backend X -- --help runs backend help directly, not combined help."""
+    monkeypatch.setattr(cli, "_discover_or_init", lambda p: (_ for _ in ()).throw(AssertionError("TUI should not launch")))
+
+    class Config:
+        def has_default_backend(self):
+            return True
+
+        default_backend = "opencode"
+
+    monkeypatch.setattr(cli, "GlobalConfig", lambda: Config())
+
+    class FakeResult:
+        returncode = 0
+
+    run_calls = []
+
+    def fake_run(*args, **kwargs):
+        run_calls.append(args[0])
+        return FakeResult()
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
     rc = cli.main(["--backend", "opencode", "--", "--help"])
     assert rc == 0
-    assert captured["backend_args"] == ["--help"]
+    assert run_calls == [["opencode", "--help"]]
+
+
+def test_backend_help_runs_directly_without_tui(monkeypatch):
+    monkeypatch.setattr(cli, "_discover_or_init", lambda p: (_ for _ in ()).throw(AssertionError("TUI should not launch")))
+
+    class Config:
+        def has_default_backend(self):
+            return True
+
+        default_backend = "opencode"
+
+    monkeypatch.setattr(cli, "GlobalConfig", lambda: Config())
+
+    class FakeResult:
+        returncode = 0
+
+    monkeypatch.setattr(cli.subprocess, "run", lambda *args, **kwargs: FakeResult())
+
+    rc = cli.main(["--backend", "opencode", "--", "--help"])
+    assert rc == 0
+
+
+def test_backend_help_no_backend_selected(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_discover_or_init", lambda p: object())
+
+    class Config:
+        def has_default_backend(self):
+            return False
+
+        default_backend = None
+
+    monkeypatch.setattr(cli, "GlobalConfig", lambda: Config())
+
+    rc = cli.main(["--", "--help"])
+    assert rc == 1
     out = capsys.readouterr().out
-    assert "Backend help" not in out
+    assert "No backend selected" in out
+
+
+def test_backend_other_args_still_launch_tui(monkeypatch):
+    captured = _stub_launch(monkeypatch)
+    rc = cli.main(["--backend", "opencode", "--", "--port", "12345"])
+    assert rc == 0
+    assert captured["backend_args"] == ["--port", "12345"]

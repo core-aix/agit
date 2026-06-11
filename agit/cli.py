@@ -63,6 +63,22 @@ def main(argv: list[str] | None = None) -> int:
         _show_combined_help(parser, args.backend, config)
         return 0
 
+    # If backend is asked for help, run it directly without TUI.
+    if backend_args and any(arg in ("--help", "-h") for arg in backend_args):
+        backend = args.backend or config.default_backend
+        if not backend:
+            print("Error: No backend selected. Use --backend to specify one.")
+            return 1
+        backend_cmd = _BACKEND_COMMANDS.get(backend)
+        if not backend_cmd:
+            print(f"Error: Unknown backend '{backend}'.")
+            return 1
+        if not shutil.which(backend_cmd):
+            print(f"Error: Backend '{backend}' not found on PATH.")
+            return 1
+        result = subprocess.run([backend_cmd] + backend_args, check=False)
+        return result.returncode
+
     if args.backend is None and not config.has_default_backend() and sys.stdin.isatty() and sys.stdout.isatty():
         select_default_backend(config)
 
