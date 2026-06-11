@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -11,9 +13,22 @@ from agit.config import GlobalConfig
 from agit.proxy import ProxyRunner
 from agit.shell import AgitShell
 
+_BACKEND_COMMANDS = {
+    "claude": "claude",
+    "opencode": "opencode",
+}
+
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Interactive agent + git commit orchestration.")
+    parser = argparse.ArgumentParser(
+        description="Interactive agent + git commit orchestration.",
+        add_help=False,
+    )
+    parser.add_argument(
+        "-h", "--help",
+        action="store_true",
+        help="show aGiT help and backend help",
+    )
     parser.add_argument("--repo", default=".", help="target Git repository path")
     parser.add_argument("--verbose", action="store_true", help="show aGiT diagnostic messages")
     parser.add_argument("--mode", choices=["proxy", "json"], default="proxy", help="interactive mode")
@@ -42,6 +57,12 @@ def main(argv: list[str] | None = None) -> int:
 
     # First run: ask the user to choose a default backend before launching.
     config = GlobalConfig()
+
+    # Handle help request before any other processing.
+    if args.help:
+        _show_combined_help(parser, args.backend, config)
+        return 0
+
     if args.backend is None and not config.has_default_backend() and sys.stdin.isatty() and sys.stdout.isatty():
         select_default_backend(config)
 
@@ -91,6 +112,46 @@ def _warn_reserved_passthrough(backend: str, backend_args: list[str]) -> None:
             f"Warning: forwarding {', '.join(hit)} to {backend}; aGiT manages "
             "session selection itself, so this may interfere with its session tracking."
         )
+
+
+def _terminal_width() -> int:
+    try:
+        return shutil.get_terminal_size().columns
+    except (AttributeError, ValueError):
+        return 80
+
+
+def _show_combined_help(
+    parser: argparse.ArgumentParser,
+    backend_arg: str | None,
+    config: GlobalConfig,
+) -> None:
+    parser.print_help()
+    backend = backend_arg or config.default_backend
+    if not backend:
+        print("\n(No backend selected yet. Run `agit` to choose one.)")
+        return
+    backend_cmd = _BACKEND_COMMANDS.get(backend)
+    if not backend_cmd:
+        print(f"\n(Unknown backend '{backend}'. Cannot show backend help.)")
+        return
+    if not shutil.which(backend_cmd):
+        print(f"\n(Backend '{backend}' not found on PATH. Install it to see its help.)")
+        return
+    width = _terminal_width()
+    print("\n" + "=" * width)
+    print(f"Backend help ({backend})")
+    print("=" * width + "\n")
+    try:
+        result = subprocess.run(
+            [backend_cmd, "--help"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        print(result.stdout or result.stderr)
+    except Exception as error:
+        print(f"(Could not run '{backend_cmd} --help': {error})")
 
 
 def _discover_or_init(path: Path) -> GitRepo | None:

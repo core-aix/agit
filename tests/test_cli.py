@@ -184,3 +184,89 @@ def test_json_backends_append_backend_args():
 
     oc = OpenCodeBackend("/repo", backend_args=["--port", "0"])
     assert oc.backend_args == ["--port", "0"]
+
+
+# --- combined help (#32) ----------------------------------------------------
+
+
+def test_help_shows_combined_help(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_discover_or_init", lambda p: object())
+
+    class Config:
+        def has_default_backend(self):
+            return True
+
+        default_backend = "opencode"
+
+    monkeypatch.setattr(cli, "GlobalConfig", lambda: Config())
+
+    rc = cli.main(["--help"])
+    assert rc == 0
+
+    out = capsys.readouterr().out
+    assert "Interactive agent + git commit orchestration" in out
+    assert "--backend" in out
+    assert "Backend help (opencode)" in out
+
+
+def test_help_short_flag(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_discover_or_init", lambda p: object())
+
+    class Config:
+        def has_default_backend(self):
+            return True
+
+        default_backend = "claude"
+
+    monkeypatch.setattr(cli, "GlobalConfig", lambda: Config())
+
+    rc = cli.main(["-h"])
+    assert rc == 0
+
+    out = capsys.readouterr().out
+    assert "Backend help (claude)" in out
+
+
+def test_help_with_explicit_backend(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_discover_or_init", lambda p: object())
+
+    class Config:
+        def has_default_backend(self):
+            return False
+
+        default_backend = None
+
+    monkeypatch.setattr(cli, "GlobalConfig", lambda: Config())
+
+    rc = cli.main(["--backend", "opencode", "--help"])
+    assert rc == 0
+
+    out = capsys.readouterr().out
+    assert "Backend help (opencode)" in out
+
+
+def test_help_no_backend_selected(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_discover_or_init", lambda p: object())
+
+    class Config:
+        def has_default_backend(self):
+            return False
+
+        default_backend = None
+
+    monkeypatch.setattr(cli, "GlobalConfig", lambda: Config())
+
+    rc = cli.main(["--help"])
+    assert rc == 0
+
+    out = capsys.readouterr().out
+    assert "No backend selected yet" in out
+
+
+def test_help_double_dash_does_not_trigger_combined(monkeypatch, capsys):
+    captured = _stub_launch(monkeypatch)
+    rc = cli.main(["--backend", "opencode", "--", "--help"])
+    assert rc == 0
+    assert captured["backend_args"] == ["--help"]
+    out = capsys.readouterr().out
+    assert "Backend help" not in out
