@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>aGiT — every agent turn, committed with its story</title>
+<meta name="description" content="aGiT wraps Claude Code and OpenCode with Git: every agent turn becomes a traceable commit with the full interaction trace, model, and token usage.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=VT323&family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
+<style>
+:root{
+  --ink:#070b09;
+  --panel:#0c120e;
+  --panel-2:#101813;
+  --line:#1d2a21;
+  --phosphor:#3dffa0;
+  --phosphor-dim:#1f7a52;
+  --amber:#ffb454;
+  --amber-dim:#8a5e2a;
+  --fg:#cfe7d8;
+  --fg-dim:#7e998a;
+  --red:#ff6b6b;
+  --mono:"IBM Plex Mono",ui-monospace,monospace;
+  --display:"VT323",var(--mono);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{
+  background:var(--ink);
+  color:var(--fg);
+  font-family:var(--mono);
+  font-size:15px;
+  line-height:1.6;
+  overflow-x:hidden;
+}
+/* CRT atmosphere: scanlines + vignette + grain, all subtle */
+body::before{
+  content:"";position:fixed;inset:0;pointer-events:none;z-index:3;
+  background:repeating-linear-gradient(0deg,rgba(0,0,0,.22) 0 1px,transparent 1px 3px);
+  opacity:.35;
+}
+body::after{
+  content:"";position:fixed;inset:0;pointer-events:none;z-index:4;
+  background:radial-gradient(ellipse at 50% 18%,transparent 55%,rgba(0,0,0,.55) 100%);
+}
+::selection{background:var(--phosphor);color:var(--ink)}
+a{color:var(--phosphor);text-decoration:none;border-bottom:1px solid var(--phosphor-dim)}
+a:hover{color:var(--ink);background:var(--phosphor);border-bottom-color:var(--phosphor)}
+
+.wrap{max-width:980px;margin:0 auto;padding:0 24px}
+
+/* ---- the git-graph rail: the page is a commit log ---- */
+.log{position:relative;padding-left:56px}
+.log::before{
+  content:"";position:absolute;left:18px;top:0;bottom:0;width:2px;
+  background:linear-gradient(var(--phosphor-dim),var(--line) 85%,transparent);
+}
+.commit{position:relative;margin:0 0 72px}
+.commit::before{
+  content:"";position:absolute;left:-44px;top:10px;width:12px;height:12px;
+  border-radius:50%;background:var(--ink);border:2px solid var(--phosphor);
+  box-shadow:0 0 12px rgba(61,255,160,.55);
+}
+.commit.agent::before{border-color:var(--amber);box-shadow:0 0 12px rgba(255,180,84,.5)}
+.commit-head{display:flex;flex-wrap:wrap;gap:10px;align-items:baseline;margin-bottom:14px}
+.sha{color:var(--amber);font-size:13px;letter-spacing:.5px}
+.commit.agent .sha{color:var(--phosphor)}
+.subject{font-size:17px;font-weight:600;color:var(--fg)}
+.tag{color:var(--amber)}
+.commit h2{font-family:var(--display);font-size:34px;font-weight:400;color:var(--phosphor);letter-spacing:1px;margin-bottom:10px;text-shadow:0 0 18px rgba(61,255,160,.35)}
+.commit p{max-width:64ch;color:var(--fg-dim);margin-bottom:12px}
+.commit p strong{color:var(--fg);font-weight:600}
+
+/* ---- hero ---- */
+header{padding:72px 0 40px;position:relative}
+.brand{
+  font-family:var(--display);font-weight:400;
+  font-size:clamp(84px,16vw,168px);line-height:.85;color:var(--phosphor);
+  text-shadow:0 0 14px rgba(61,255,160,.5),0 0 60px rgba(61,255,160,.22);
+  letter-spacing:2px;
+}
+.brand .a{color:var(--amber);text-shadow:0 0 14px rgba(255,180,84,.5),0 0 60px rgba(255,180,84,.2)}
+.tagline{margin-top:18px;font-size:clamp(16px,2.6vw,21px);color:var(--fg)}
+.tagline .tag{color:var(--amber)}
+.cursor{display:inline-block;width:.55em;height:1.05em;background:var(--phosphor);vertical-align:text-bottom;margin-left:4px;animation:blink 1.1s steps(1) infinite}
+@keyframes blink{50%{opacity:0}}
+.sub{margin-top:14px;color:var(--fg-dim);max-width:62ch}
+.hero-actions{margin-top:26px;display:flex;gap:14px;flex-wrap:wrap}
+.btn{
+  display:inline-block;padding:10px 18px;border:1px solid var(--phosphor);
+  color:var(--phosphor);font-family:var(--mono);font-size:14px;font-weight:600;
+  background:transparent;letter-spacing:.4px;border-bottom-width:3px;
+  transition:transform .08s ease;
+}
+.btn:hover{background:var(--phosphor);color:var(--ink);transform:translateY(-2px)}
+.btn.alt{border-color:var(--amber);color:var(--amber)}
+.btn.alt:hover{background:var(--amber);color:var(--ink)}
+
+/* staggered page-load reveal */
+.reveal{opacity:0;transform:translateY(14px);animation:rise .6s ease forwards}
+@keyframes rise{to{opacity:1;transform:none}}
+.r1{animation-delay:.05s}.r2{animation-delay:.18s}.r3{animation-delay:.32s}.r4{animation-delay:.46s}.r5{animation-delay:.62s}
+
+/* ---- terminal window chrome ---- */
+.term{
+  background:var(--panel);border:1px solid var(--line);border-radius:8px;
+  box-shadow:0 24px 60px rgba(0,0,0,.55),0 0 0 1px rgba(61,255,160,.06);
+  overflow:hidden;
+}
+.term-bar{
+  display:flex;align-items:center;gap:8px;padding:9px 14px;
+  background:var(--panel-2);border-bottom:1px solid var(--line);
+  font-size:12px;color:var(--fg-dim);
+}
+.dot{width:11px;height:11px;border-radius:50%;background:var(--line)}
+.dot.r{background:#3d2626}.dot.y{background:#3d3526}.dot.g{background:#263d2e}
+.term-bar .title{margin-left:8px}
+.term-body{padding:18px 20px;font-size:14px;overflow-x:auto}
+pre{font-family:var(--mono);white-space:pre;line-height:1.55}
+.p{color:var(--phosphor)} .o{color:var(--amber)} .d{color:var(--fg-dim)} .w{color:var(--fg)} .e{color:var(--red)}
+
+/* ---- feature grid as a 3-way branch ---- */
+.branches{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:16px;margin-top:8px}
+.branch{
+  background:var(--panel);border:1px solid var(--line);padding:18px;
+  position:relative;transition:border-color .15s ease,transform .15s ease;
+}
+.branch:hover{border-color:var(--phosphor-dim);transform:translateY(-3px)}
+.branch::before{content:attr(data-ref);display:block;font-size:12px;color:var(--amber);margin-bottom:10px;letter-spacing:.4px}
+.branch h3{font-family:var(--display);font-size:24px;font-weight:400;color:var(--phosphor);margin-bottom:8px;letter-spacing:.5px}
+.branch p{font-size:13.5px;color:var(--fg-dim)}
+
+/* ---- commit-message specimen ---- */
+.specimen{font-size:13.5px}
+.specimen .h{color:var(--amber);font-weight:600}
+.specimen .k{color:var(--phosphor)}
+
+/* ---- install steps ---- */
+.steps{counter-reset:step;display:flex;flex-direction:column;gap:14px}
+.step{display:flex;gap:16px;align-items:flex-start}
+.step::before{
+  counter-increment:step;content:counter(step,decimal-leading-zero);
+  font-family:var(--display);font-size:30px;color:var(--amber);line-height:1.1;
+  text-shadow:0 0 10px rgba(255,180,84,.4);
+}
+.step code{
+  display:block;background:var(--panel);border:1px solid var(--line);
+  padding:9px 13px;font-size:13.5px;color:var(--phosphor);
+}
+.step .note{font-size:12.5px;color:var(--fg-dim);margin-top:5px}
+
+footer{
+  padding:34px 0 60px;color:var(--fg-dim);font-size:13px;
+  border-top:1px dashed var(--line);margin-top:24px;
+  display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;
+}
+footer .sha{font-size:12px}
+@media (max-width:640px){
+  .log{padding-left:34px}
+  .log::before{left:8px}
+  .commit::before{left:-32px;width:10px;height:10px}
+}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header>
+    <div class="brand reveal r1"><span class="a">a</span>GiT</div>
+    <p class="tagline reveal r2"><span class="tag">&lt;agent&gt;</span> every agent turn, committed with its story<span class="cursor"></span></p>
+    <p class="sub reveal r3">aGiT wraps <strong>Claude Code</strong> and <strong>OpenCode</strong> with Git. You use the agent's own
+    TUI exactly as before — aGiT watches the session and turns every completed turn into a commit
+    carrying the full interaction trace, the model, and the token bill.</p>
+    <div class="hero-actions reveal r4">
+      <a class="btn" href="https://github.com/core-aix/agit">git clone the repo</a>
+      <a class="btn alt" href="#install">install &amp; run</a>
+    </div>
+  </header>
+
+  <main class="log">
+
+    <section class="commit agent reveal r5">
+      <div class="commit-head">
+        <span class="sha">f3a9c2e</span>
+        <span class="subject"><span class="tag">&lt;agent&gt;</span> show, don't tell</span>
+      </div>
+      <div class="term" id="demo">
+        <div class="term-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">agit — claude · session-1 → main</span></div>
+        <div class="term-body"><pre><span class="d">$</span> <span class="p">agit</span>
+<span class="d">┌ claude · session-1 ──────────────────────────────────┐</span>
+<span class="w">&gt; add a --version flag to the cli</span>
+<span class="d">  · editing agit/cli.py …</span>
+<span class="d">  · added --version using importlib.metadata</span>
+<span class="d">└──────────────────────────────────────────────────────┘</span>
+<span class="o">✓ Created &lt;agent&gt; commit 4b2f31a.</span>            <span class="d">aGiT · Ctrl-G</span>
+<span class="d">$</span> <span class="p">git log --oneline -2</span>
+<span class="o">4b2f31a</span> <span class="w">&lt;agent&gt; add a --version flag to the cli</span>
+<span class="d">a91c07e</span> <span class="w">Initial commit</span>
+<span class="d">$</span> <span class="p">git show 4b2f31a --stat</span>
+<span class="o">&lt;agent&gt;</span> <span class="w">add a --version flag to the cli</span>
+<span class="d"> agit/cli.py | 6 ++++++</span>  <span class="d">— trace + model + token cost in the body ↓</span></pre>
+        </div>
+      </div>
+    </section>
+
+    <section class="commit">
+      <div class="commit-head">
+        <span class="sha">9d04e17</span>
+        <span class="subject">why this exists</span>
+      </div>
+      <h2>Agent code without provenance is unreviewable.</h2>
+      <p>A coding agent edits twelve files while you get coffee. A week later nobody can say which
+      prompt produced which change, what the model was told, or what it cost. <strong>aGiT makes the unit
+      of agent work a commit</strong> — so review, blame, bisect, and revert work on agent output the same
+      way they work on yours.</p>
+      <div class="term specimen">
+        <div class="term-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">git show — an aGiT commit message</span></div>
+        <div class="term-body"><pre><span class="o">&lt;agent&gt;</span> <span class="w">add a --version flag to the cli</span>
+
+<span class="h"># Interaction Trace</span>
+
+<span class="h">## User</span>
+add a --version flag to the cli
+
+<span class="h">## Agent</span>
+Added --version using the package metadata; prints and exits.
+
+<span class="h"># aGiT Metadata</span>
+<span class="k">commit_type:</span> agent
+<span class="k">backend:</span> claude
+<span class="k">model:</span> claude-opus-4-8
+<span class="k">session_name:</span> session-1
+<span class="k">context_tokens:</span> 18204
+<span class="k">tokens_since_last_commit_input:</span> 411
+<span class="k">tokens_since_last_commit_output:</span> 2390</pre></div>
+      </div>
+    </section>
+
+    <section class="commit">
+      <div class="commit-head">
+        <span class="sha">71c5b9a</span>
+        <span class="subject">how it works</span>
+      </div>
+      <h2>Your branch only ever moves by merge.</h2>
+      <p>Each session runs in its own <strong>git worktree</strong> on its own branch, so concurrent sessions never
+      stomp each other — or your working tree. Finished turns integrate back into the branch you
+      launched from; conflicts are handed to the agent to resolve, and the resolution is itself a
+      traceable <span class="tag">&lt;agent-merge&gt;</span> commit.</p>
+      <div class="branches">
+        <div class="branch" data-ref="agit/claude/session-1/t3">
+          <h3>Isolated sessions</h3>
+          <p>One worktree per session, per-turn branches, automatic recovery of anything a crash
+          leaves behind. Run several agents side by side.</p>
+        </div>
+        <div class="branch" data-ref="~/.claude/projects/…jsonl">
+          <h3>Backend-native</h3>
+          <p>No model API keys, no proxy of your tokens. aGiT drives the real Claude Code / OpenCode
+          TUI and reads the session's own transcript for the facts.</p>
+        </div>
+        <div class="branch" data-ref="tokens_since_last_commit">
+          <h3>Costs on the record</h3>
+          <p>Input, output, and cache token counts per commit, straight from the backend's session
+          record — a price tag on every change.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="commit" id="install">
+      <div class="commit-head">
+        <span class="sha">e8d2fa0</span>
+        <span class="subject">install &amp; run</span>
+      </div>
+      <h2>Three commands to the first traced commit.</h2>
+      <div class="steps">
+        <div class="step"><div>
+          <code>uv tool install git+https://github.com/core-aix/agit</code>
+          <div class="note">or: <span class="p">pip install -e .</span> from a clone — Python ≥ 3.10</div>
+        </div></div>
+        <div class="step"><div>
+          <code>cd your-repo && agit</code>
+          <div class="note">launches your default backend's TUI (Claude Code or OpenCode) under aGiT's watch</div>
+        </div></div>
+        <div class="step"><div>
+          <code>Ctrl-G</code>
+          <div class="note">opens the aGiT menu: sessions, backends, staging, user commits, base branch</div>
+        </div></div>
+      </div>
+      <p style="margin-top:18px">Prompt the agent as usual. When the turn settles, the commit is already there —
+      <span class="p">git log</span> tells the rest.</p>
+    </section>
+
+    <section class="commit agent">
+      <div class="commit-head">
+        <span class="sha">HEAD</span>
+        <span class="subject"><span class="tag">&lt;agent&gt;</span> your move</span>
+      </div>
+      <h2>Put your agents on the record.</h2>
+      <p>Apache-2.0. Issues, ideas, and first contributions welcome — the
+      <a href="https://github.com/core-aix/agit/issues">issue tracker</a> has
+      <strong>good first issue</strong> tags waiting.</p>
+      <div class="hero-actions">
+        <a class="btn" href="https://github.com/core-aix/agit">github.com/core-aix/agit</a>
+        <a class="btn alt" href="https://github.com/core-aix/agit#readme">read the manual</a>
+      </div>
+    </section>
+
+  </main>
+
+  <footer>
+    <span><span class="sha">aGiT</span> — agent + git · Apache-2.0</span>
+    <span>this page is a git log · <a href="https://github.com/core-aix/agit/tree/main/docs">view source</a></span>
+  </footer>
+</div>
+
+</body>
+</html>
