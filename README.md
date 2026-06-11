@@ -16,14 +16,25 @@ This installs the `agit` command and the terminal UI dependency used for status 
 
 ### Contributing
 
-Install the optional pre-commit hooks for fast local lint/format on every commit (same checks as CI):
+Install dependencies and the optional git hooks:
 
 ```bash
 uv sync --group dev
-uv run pre-commit install
+make install-hooks
 ```
 
-The hooks run `ruff` (lint + format) and basic file hygiene. Tests, coverage, and type checks run in CI.
+This installs two hooks:
+
+- **commit** — `ruff` (lint + format) and basic file hygiene, so commits stay fast.
+- **push** — the full CI-equivalent gate (`ruff`, `mypy` vs the baseline, tests + coverage), so a push that would break CI fails locally first.
+
+Run the same full gate by hand at any time:
+
+```bash
+make check        # or: ./scripts/check.sh
+```
+
+This is the definition of "done" for a change — it mirrors CI exactly (`.github/workflows/ci.yml`).
 
 ## Usage
 
