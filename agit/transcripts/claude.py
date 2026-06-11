@@ -324,10 +324,10 @@ def parse_rows(session_id: str, rows: list[dict]) -> ExportedSession:
             # Sub-agent (sidechain) turns are not part of the main interaction
             # trace, but their tokens are still consumed — record them under the
             # turn's sub-agent buckets instead of dropping them.
-            message = row.get("message") if isinstance(row.get("message"), dict) else {}
+            message = _as_dict(row.get("message"))
             current["tokens"].add(_message_tokens(message.get("usage"), sidechain=True))
         elif row_type == "assistant" and current is not None:
-            message = row.get("message") if isinstance(row.get("message"), dict) else {}
+            message = _as_dict(row.get("message"))
             current["tokens"].add(_message_tokens(message.get("usage")))
             message_model = message.get("model")
             if isinstance(message_model, str) and message_model:
@@ -385,7 +385,7 @@ _INTERRUPT_MARKER = "[Request interrupted by user"
 def _is_interrupt_marker(row: dict) -> bool:
     # Esc leaves a user row whose text is "[Request interrupted by user]" (or
     # the "... for tool use" variant); it marks the abort, it is not a prompt.
-    message = row.get("message") if isinstance(row.get("message"), dict) else {}
+    message = _as_dict(row.get("message"))
     content = message.get("content")
     if isinstance(content, str):
         text = content.strip()
@@ -404,7 +404,7 @@ def _user_prompt(row: dict) -> str | None:
     # is not a real prompt, so keep it out of the interaction trace and subject.
     if row.get("isMeta") or row.get("isSidechain") or row.get("isCompactSummary"):
         return None
-    message = row.get("message") if isinstance(row.get("message"), dict) else {}
+    message = _as_dict(row.get("message"))
     content = message.get("content")
     if isinstance(content, str):
         text = content.strip()
@@ -460,6 +460,13 @@ def _message_tokens(usage: object, *, sidechain: bool = False) -> TokenUsage:
         cache_read=cache_read,
         cache_write=cache_write,
     )
+
+
+def _as_dict(value: object) -> dict:
+    """Narrow an arbitrary JSON value to a dict (empty if it isn't one). Using a
+    single call keeps mypy's isinstance-narrowing intact, unlike the inline
+    `x.get(k) if isinstance(x.get(k), dict) else {}` idiom."""
+    return value if isinstance(value, dict) else {}
 
 
 def _int(value: object) -> int:

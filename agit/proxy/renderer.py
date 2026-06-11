@@ -172,7 +172,7 @@ class ScreenRenderer:
         self.color_mode = color_mode
 
         # Per-session display state (owned by Session; mirrored here)
-        self.screen: pyte.Screen | None = None
+        self.screen: _BackgroundColorEraseScreen | None = None
         self.stream: pyte.ByteStream | None = None
         self.scroll_back: int = 0
         self.child_mouse: bool = False
@@ -304,7 +304,7 @@ class ScreenRenderer:
         """The (rows-1) lines to draw. Splices in history when scrolled back."""
         assert self.screen is not None
         num_rows = max(rows - 1, 1)
-        live = [self.screen.buffer.get(row, {}) for row in range(num_rows)]
+        live: list = [self.screen.buffer.get(row, {}) for row in range(num_rows)]
         if self.scroll_back <= 0 or not self.history_len():
             return live
         history = list(self.screen.history.top)
@@ -334,7 +334,7 @@ class ScreenRenderer:
         text_lines = []
         for row, (start, end) in sorted(self.selection_ranges(cols).items()):
             cells = lines[row] if row < len(lines) else {}
-            text = "".join((cells.get(x).data if cells.get(x) else " ") for x in range(start, end + 1))
+            text = "".join(((cell := cells.get(x)) and cell.data or " ") for x in range(start, end + 1))
             text_lines.append(text.rstrip())
         text = "\n".join(text_lines).strip("\n")
         if not text.strip():

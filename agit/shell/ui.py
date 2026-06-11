@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from typing import Any
 from shutil import get_terminal_size
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,7 +43,7 @@ class PromptState:
 class AgitPrompt:
     def __init__(self, state_provider) -> None:
         self.state_provider = state_provider
-        self.session = None
+        self.session: Any = None
         if sys.stdin.isatty() and sys.stdout.isatty():
             try:
                 from prompt_toolkit import PromptSession
@@ -88,7 +89,7 @@ class AgitPrompt:
 try:
     from prompt_toolkit.completion import Completer
 except ImportError:  # pragma: no cover - fallback is used when prompt_toolkit is absent
-    Completer = object
+    Completer = object  # type: ignore[misc, assignment]
 
 
 class _AgitCompleter(Completer):

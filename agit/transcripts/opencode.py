@@ -217,11 +217,11 @@ def _run_export_pty(repo: Path, session_id: str) -> tuple[str, int]:
 
 
 def parse_exported_session(data: dict) -> ExportedSession:
-    info = data.get("info") if isinstance(data.get("info"), dict) else {}
+    info = _as_dict(data.get("info"))
     session_id = str(info.get("id") or "")
     updated = (info.get("time") or {}).get("updated") if isinstance(info.get("time"), dict) else None
     model = _model_name(info)
-    messages = data.get("messages") if isinstance(data.get("messages"), list) else []
+    messages = _as_list(data.get("messages"))
     current_user: dict | None = None
     assistant_group: list[dict] = []
     turns: list[SessionTurn] = []
@@ -234,7 +234,7 @@ def parse_exported_session(data: dict) -> ExportedSession:
             turns.append(turn)
 
     for message in messages:
-        msg_info = message.get("info") if isinstance(message.get("info"), dict) else {}
+        msg_info = _as_dict(message.get("info"))
         role = msg_info.get("role")
         if role == "user":
             flush()
@@ -254,7 +254,7 @@ def parse_exported_session(data: dict) -> ExportedSession:
 
 
 def _build_turn(user_message: dict, assistants: list[dict], session_model: str | None) -> SessionTurn | None:
-    user_info = user_message.get("info") if isinstance(user_message.get("info"), dict) else {}
+    user_info = _as_dict(user_message.get("info"))
     user_id = str(user_info.get("id") or "")
     if not user_id:
         return None
@@ -265,7 +265,7 @@ def _build_turn(user_message: dict, assistants: list[dict], session_model: str |
     model = session_model
     last_assistant = assistants[-1] if assistants else None
     for assistant in assistants:
-        assistant_info = assistant.get("info") if isinstance(assistant.get("info"), dict) else {}
+        assistant_info = _as_dict(assistant.get("info"))
         tokens.add(_tokens(assistant_info, assistant.get("parts")))
         model = _model_name(assistant_info) or model
         response = _final_response(assistant.get("parts"), finish=assistant_info.get("finish"))
@@ -346,7 +346,7 @@ def _final_text_from_event_blob(text: str) -> str:
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
-        part = event.get("part") if isinstance(event.get("part"), dict) else {}
+        part = _as_dict(event.get("part"))
         part_text = part.get("text") if isinstance(part.get("text"), str) else event.get("text")
         if not isinstance(part_text, str) or not part_text.strip():
             continue
@@ -371,7 +371,7 @@ def _tokens(info: dict, parts: object) -> TokenUsage:
 def _token_usage(tokens: object) -> TokenUsage:
     if not isinstance(tokens, dict):
         return TokenUsage()
-    cache = tokens.get("cache") if isinstance(tokens.get("cache"), dict) else {}
+    cache = _as_dict(tokens.get("cache"))
     input_tokens = _int(tokens.get("input"))
     output_tokens = _int(tokens.get("output"))
     reasoning_tokens = _int(tokens.get("reasoning"))
@@ -415,6 +415,17 @@ def _find_value(value: object, keys: set[str]) -> str | None:
             if found:
                 return found
     return None
+
+
+def _as_dict(value: object) -> dict:
+    """Narrow an arbitrary JSON value to a dict (empty if it isn't one). Using a
+    single call keeps mypy's isinstance-narrowing intact, unlike the inline
+    `x.get(k) if isinstance(x.get(k), dict) else {}` idiom."""
+    return value if isinstance(value, dict) else {}
+
+
+def _as_list(value: object) -> list:
+    return value if isinstance(value, list) else []
 
 
 def _int(value: object) -> int:
