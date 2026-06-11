@@ -5,7 +5,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from agit.git import GitRepo
+from agit.git.repo import GitRepo
 
 # All aGiT-managed branches live under this prefix so they can be recognised
 # (for cleanup / stale recovery) and never collide with the user's branches.

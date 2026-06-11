@@ -1,7 +1,7 @@
 import json
 
-from agit import claude_session
-from agit.claude_session import export_session, latest_session_id, list_sessions, parse_rows, session_belongs_to_repo
+from agit.transcripts import claude as claude_session
+from agit.transcripts.claude import export_session, latest_session_id, list_sessions, parse_rows, session_belongs_to_repo
 
 
 def test_session_cwd_reads_last_recorded_cwd(monkeypatch, tmp_path):

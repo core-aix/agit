@@ -4,8 +4,8 @@ import uuid
 from pathlib import Path
 from typing import Protocol
 
-from agit import claude_session, opencode_session
-from agit.session import ExportedSession, SessionRef
+from agit.transcripts import claude as claude_session, opencode as opencode_session
+from agit.transcripts import ExportedSession, SessionRef
 
 
 class ProxyAgent(Protocol):

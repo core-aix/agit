@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from agit.backends.base import TokenUsage
-from agit.session import ExportedSession, SessionRef, SessionTurn, turns_after
+from agit.transcripts.types import ExportedSession, SessionRef, SessionTurn, turns_after
 
 __all__ = [
     "ExportedSession",

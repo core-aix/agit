@@ -4,10 +4,10 @@ import argparse
 import sys
 from pathlib import Path
 
-from agit.backend_setup import select_default_backend
+from agit.backends.setup import select_default_backend
 from agit.backends.proxy_agents import available_backends
 from agit.git import GitError, GitRepo
-from agit.global_config import GlobalConfig
+from agit.config import GlobalConfig
 from agit.proxy import ProxyRunner
 from agit.shell import AgitShell
 

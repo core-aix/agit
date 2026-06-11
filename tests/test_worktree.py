@@ -3,10 +3,10 @@ import subprocess
 
 import pytest
 
-from agit.actions import AgitActions
+from agit.commits import AgitActions
 from agit.git import GitRepo
-from agit.state import AgitState
-from agit.worktree import WorktreeManager, _sanitize_name
+from agit.config import AgitState
+from agit.git import WorktreeManager, _sanitize_name
 from proxy_helpers import make_runner
 
 

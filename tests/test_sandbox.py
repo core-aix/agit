@@ -5,7 +5,7 @@ import sys
 
 import pytest
 
-from agit import sandbox
+from agit.proxy import sandbox
 
 
 def test_wrap_command_disabled_via_env(monkeypatch):

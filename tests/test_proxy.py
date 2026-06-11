@@ -7,13 +7,13 @@ import pytest
 import types
 
 from agit.backends.base import TokenUsage
-from agit.opencode_session import SessionTurn
+from agit.transcripts.opencode import SessionTurn
 from agit.backends.proxy_agents import make_proxy_agent
 from agit.proxy import ProxyInput, ProxyRunner, _escape_sequence_complete, _short_session, detect_color_mode
 from agit.proxy.integration import MergeContext, MergePhase
 from agit.proxy.session import Session
-from agit.session import ExportedSession, SessionRef
-from agit.state import AgitState
+from agit.transcripts import ExportedSession, SessionRef
+from agit.config import AgitState
 from proxy_helpers import make_runner
 
 
@@ -1010,7 +1010,7 @@ def test_wheel_forwarded_when_backend_manages_mouse():
 
 
 def test_apply_timings_overrides_constants():
-    from agit.global_config import DEFAULT_TIMINGS
+    from agit.config import DEFAULT_TIMINGS
 
     runner = make_runner()
     # Defaults are the class constants until config is applied.
@@ -1114,7 +1114,7 @@ def test_pump_background_feeds_screen_without_disturbing_active():
 def test_baseline_drops_session_with_no_conversation(tmp_path):
     from types import SimpleNamespace
 
-    from agit.session import ExportedSession
+    from agit.transcripts import ExportedSession
 
     runner = make_runner(
         state=AgitState(tmp_path),
@@ -1149,7 +1149,7 @@ def test_status_line_shows_base_branch(tmp_path):
     import subprocess
 
     from agit.git import GitRepo
-    from agit.state import AgitState
+    from agit.config import AgitState
 
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     state = AgitState(tmp_path)
@@ -2498,7 +2498,7 @@ def test_cwd_drift_waits_when_no_cwd_recorded_yet():
 
 def test_confine_to_worktree_wraps_when_enabled(monkeypatch):
     import types
-    from agit import sandbox
+    from agit.proxy import sandbox
 
     monkeypatch.setattr(sandbox, "is_available", lambda: True)
     monkeypatch.delenv("AGIT_SANDBOX", raising=False)
@@ -2516,7 +2516,7 @@ def test_confine_to_worktree_wraps_when_enabled(monkeypatch):
 
 def test_confine_to_worktree_noop_without_worktree_or_when_disabled(monkeypatch):
     import types
-    from agit import sandbox
+    from agit.proxy import sandbox
 
     monkeypatch.setattr(sandbox, "is_available", lambda: True)
     runner = make_runner(worktree=None)
@@ -3025,7 +3025,7 @@ def test_agent_commit_failed_attempt_does_not_double_count_tokens(tmp_path):
 
 
 def test_actions_agent_commit_failed_attempt_does_not_double_count(tmp_path):
-    from agit.actions import AgitActions
+    from agit.commits import AgitActions
 
     class Repo:
         def __init__(self):

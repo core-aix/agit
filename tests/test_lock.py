@@ -3,7 +3,7 @@ import os
 import subprocess
 import sys
 
-from agit.lock import RepoLock, already_running_message
+from agit.git import RepoLock, already_running_message
 
 
 def test_already_running_message_names_the_pid():
@@ -114,7 +114,7 @@ def test_lock_released_by_os_when_owner_dies(tmp_path):
             "-c",
             (
                 "import pathlib, sys, time\n"
-                "from agit.lock import RepoLock\n"
+                "from agit.git import RepoLock\n"
                 "lock = RepoLock(pathlib.Path(sys.argv[1]))\n"
                 "assert lock.acquire()\n"
                 "print('held', flush=True)\n"

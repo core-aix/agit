@@ -1,9 +1,9 @@
 import pytest
 
-import agit.backend_setup as bs
-from agit.backend_setup import BackendUnavailable, ensure_installed_backend, select_default_backend
+import agit.backends.setup as bs
+from agit.backends.setup import BackendUnavailable, ensure_installed_backend, select_default_backend
 from agit.backends.proxy_agents import available_backends
-from agit.global_config import GlobalConfig
+from agit.config import GlobalConfig
 
 
 class FakeConfig:

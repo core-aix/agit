@@ -13,11 +13,11 @@ import types
 import pytest
 
 from agit.backends.base import TokenUsage
-from agit.opencode_session import SessionTurn
+from agit.transcripts.opencode import SessionTurn
 from agit.proxy.commit_engine import CommitEngine
 from agit.proxy.session import Session
-from agit.session import ExportedSession
-from agit.state import AgitState
+from agit.transcripts import ExportedSession
+from agit.config import AgitState
 
 
 # ---------------------------------------------------------------------------

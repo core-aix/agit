@@ -20,7 +20,7 @@ from agit.proxy.integration import (
     MergeContext,
     MergePhase,
 )
-from agit.worktree import WorktreeManager
+from agit.git import WorktreeManager
 from proxy_helpers import make_runner
 
 

@@ -1,11 +1,11 @@
 import os
 import subprocess
 
-import agit.shell as shell_mod
+import agit.shell.runner as shell_mod
 from agit.git import GitRepo
-from agit.lock import RepoLock
+from agit.git import RepoLock
 from agit.shell import AgitShell
-from agit.state import AgitState
+from agit.config import AgitState
 
 
 def test_declined_untracked_files_do_not_count_as_pre_agent_changes(tmp_path):

@@ -24,16 +24,16 @@ except ImportError:  # pragma: no cover - exercised only without optional depend
     FileSystemEventHandler = object
     Observer = None
 
-from agit.actions import AgitActions
-from agit.backend_setup import BackendUnavailable, backend_installed, ensure_installed_backend, install_hint
+from agit.commits import AgitActions
+from agit.backends.setup import BackendUnavailable, backend_installed, ensure_installed_backend, install_hint
 from agit.backends.proxy_agents import available_backends, make_proxy_agent
-from agit.commit_message import build_agent_merge_message, build_user_commit_message
+from agit.commits import build_agent_merge_message, build_user_commit_message
 from agit.git import GitRepo
-from agit.global_config import GlobalConfig
-from agit.lock import RepoLock, already_running_message
-from agit import sandbox
-from agit.state import AgitState
-from agit.worktree import WorktreeInfo, WorktreeManager, _sanitize_name
+from agit.config import GlobalConfig
+from agit.git import RepoLock, already_running_message
+from agit.proxy import sandbox
+from agit.config import AgitState
+from agit.git import WorktreeInfo, WorktreeManager, _sanitize_name
 from agit.proxy.commit_engine import CommitEngine
 from agit.proxy.integration import IntegrationService, MergeContext, MergePhase
 from agit.proxy.process import BackendProcess

@@ -1,7 +1,7 @@
 import json
 import subprocess
 
-from agit.opencode_session import latest_session_id, parse_exported_session, session_belongs_to_repo, turns_after
+from agit.transcripts.opencode import latest_session_id, parse_exported_session, session_belongs_to_repo, turns_after
 
 
 def test_parse_exported_session_turns_model_and_tokens():
@@ -196,7 +196,7 @@ def test_session_belongs_to_repo(monkeypatch, tmp_path):
 
 
 def test_list_worktree_sessions_filters_to_worktrees_newest_first(monkeypatch, tmp_path):
-    from agit.opencode_session import list_worktree_sessions
+    from agit.transcripts.opencode import list_worktree_sessions
 
     worktrees_root = tmp_path / ".agit" / "worktrees"
     (worktrees_root / "session-1").mkdir(parents=True)
@@ -241,7 +241,7 @@ def test_no_matching_directory_returns_no_sessions(monkeypatch, tmp_path):
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    from agit.opencode_session import list_sessions
+    from agit.transcripts.opencode import list_sessions
 
     assert list_sessions(tmp_path) == []
     assert latest_session_id(tmp_path) is None
@@ -284,7 +284,7 @@ def test_mixed_output_with_any_directory_field_does_not_fall_back(monkeypatch, t
 def test_run_export_pty_failed_exec_exits_child(tmp_path):
     # Issue #20: a failed chdir/exec in the forked export child must terminate
     # it (127), not let it keep executing the test suite as a duplicate process.
-    from agit.opencode_session import _run_export_pty
+    from agit.transcripts.opencode import _run_export_pty
 
     output, exit_code = _run_export_pty(tmp_path / "missing-dir", "ses-x")
 

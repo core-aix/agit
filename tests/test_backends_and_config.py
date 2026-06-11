@@ -5,8 +5,8 @@ import pytest
 
 from agit.backends.claude import ClaudeBackend
 from agit.backends.proxy_agents import available_backends, make_proxy_agent
-from agit.global_config import GlobalConfig
-from agit.state import AgitState
+from agit.config import GlobalConfig
+from agit.config import AgitState
 
 
 def test_available_backends_includes_opencode_and_claude():
@@ -48,7 +48,7 @@ def test_global_config_default_backend_persists(tmp_path):
 
 
 def test_timings_default_when_unset(tmp_path):
-    from agit.global_config import DEFAULT_TIMINGS
+    from agit.config import DEFAULT_TIMINGS
 
     config = GlobalConfig(tmp_path / "config.json")
     assert config.timings == DEFAULT_TIMINGS
@@ -198,7 +198,7 @@ def test_claude_backend_model_falls_back_to_total_volume():
 
 
 def test_menu_key_defaults_and_validation(tmp_path):
-    from agit.global_config import GlobalConfig
+    from agit.config import GlobalConfig
 
     config = GlobalConfig(tmp_path / "config.json")
     assert config.menu_key == "ctrl-g"

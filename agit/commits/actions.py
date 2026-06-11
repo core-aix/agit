@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from agit.commit_message import build_user_commit_message
+from agit.commits.message import build_user_commit_message
 from agit.git import GitRepo
-from agit.opencode_session import SessionTurn
-from agit.state import AgitState
+from agit.transcripts.opencode import SessionTurn
+from agit.config import AgitState
 
 
 class AgitActions:

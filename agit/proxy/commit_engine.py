@@ -68,11 +68,11 @@ import threading
 import time
 from typing import Callable
 
-from agit.commit_message import build_agent_commit_message
+from agit.commits import build_agent_commit_message
 from agit.git import GitRepo
-from agit.opencode_session import SessionTurn
-from agit.session import turns_after
-from agit.state import AgitState
+from agit.transcripts.opencode import SessionTurn
+from agit.transcripts import turns_after
+from agit.config import AgitState
 
 
 # ---------------------------------------------------------------------------

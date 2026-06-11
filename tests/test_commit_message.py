@@ -1,6 +1,6 @@
 import pytest
 
-from agit.commit_message import build_agent_commit_message, build_user_commit_message
+from agit.commits import build_agent_commit_message, build_user_commit_message
 
 
 def test_agent_commit_message_contains_trace_and_metadata():
@@ -277,7 +277,7 @@ def test_legitimate_bracketed_text_is_preserved():
 
 
 def test_agent_merge_message_format():
-    from agit.commit_message import build_agent_merge_message
+    from agit.commits import build_agent_merge_message
 
     message = build_agent_merge_message(
         session_name="feature-x",

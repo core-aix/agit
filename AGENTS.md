@@ -92,13 +92,13 @@ aGiT stands for agent + git. It is a Python library and interactive CLI that com
 
 ## Concurrency and Locking
 
-- Only one aGiT process may auto-commit/merge in a given working tree at a time. A process acquires a single-writer lock at `<tree>/.agit/lock` (PID-based, with stale-owner reclaim). A second aGiT process on the same repo runs **read-only**: it renders the backend TUI but makes no commits, and shows a banner that another aGiT process is managing the repo. (Implemented in `agit/lock.py`, wired into both proxy and JSON modes.)
+- Only one aGiT process may auto-commit/merge in a given working tree at a time. A process acquires a single-writer lock at `<tree>/.agit/lock` (PID-based, with stale-owner reclaim). A second aGiT process on the same repo runs **read-only**: it renders the backend TUI but makes no commits, and shows a banner that another aGiT process is managing the repo. (Implemented in `agit/git/lock.py`, wired into both proxy and JSON modes.)
 - Quitting a managing (non-read-only) proxy instance asks for confirmation before exiting.
 - Concurrent sessions are isolated with git worktrees so changes are never attributed to the wrong session; see Concurrent Sessions below.
 
 ## Concurrent Sessions (worktrees + auto-integration)
 
-This is the design aGiT targets for running several sessions at once. Foundations (`agit/lock.py`, `agit/worktree.py`, the worktree/branch/merge helpers in `agit/git.py`, and the `agit/merge_queue.py` coordinator) are implemented and unit-tested; the multiplexer wiring in `agit/proxy/runner.py` is the remaining integration.
+This is the design aGiT targets for running several sessions at once. Foundations (`agit/git/lock.py`, `agit/git/worktree.py`, and the worktree/branch/merge helpers in `agit/git/repo.py`) are implemented and unit-tested; the multiplexer wiring in `agit/proxy/runner.py` is the remaining integration.
 
 - A single aGiT process multiplexes several live sessions; one is displayed, the others keep running and integrating in the background.
 - The main working tree / base branch is mutated only by the serialized merge coordinator; every session runs in its own worktree under `.agit/worktrees/<name>`.

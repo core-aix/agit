@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import sys
 
-from agit.actions import AgitActions
-from agit.backend_setup import BackendUnavailable, backend_installed, ensure_installed_backend, install_hint
+from agit.commits import AgitActions
+from agit.backends.setup import BackendUnavailable, backend_installed, ensure_installed_backend, install_hint
 from agit.backends.claude import ClaudeBackend
 from agit.backends.opencode import OpenCodeBackend
 from agit.git import GitRepo
-from agit.global_config import GlobalConfig
-from agit.lock import RepoLock, already_running_message
-from agit.state import AgitState
-from agit.ui import AgitPrompt, PromptState
+from agit.config import GlobalConfig
+from agit.git import RepoLock, already_running_message
+from agit.config import AgitState
+from agit.shell.ui import AgitPrompt, PromptState
 
 
 AGIT_PREFIX = ":"
@@ -137,7 +137,7 @@ class AgitShell:
         self.repo.add_tracked()
         self.actions.review_untracked(include_declined=False)
         if self.repo.has_staged_changes():
-            from agit.commit_message import build_agent_commit_message
+            from agit.commits import build_agent_commit_message
 
             self.repo.commit(
                 build_agent_commit_message(

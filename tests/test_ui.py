@@ -1,6 +1,6 @@
 from prompt_toolkit.document import Document
 
-from agit.ui import _AgitCompleter
+from agit.shell.ui import _AgitCompleter
 
 
 def test_agit_completer_provides_async_interface():

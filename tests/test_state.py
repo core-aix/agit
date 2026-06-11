@@ -1,5 +1,5 @@
 from agit.backends.base import TokenUsage
-from agit.state import AgitState
+from agit.config import AgitState
 
 
 def test_state_is_repository_local(tmp_path):

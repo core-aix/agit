@@ -43,9 +43,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING
 
-from agit.commit_message import build_agent_merge_message
+from agit.commits import build_agent_merge_message
 from agit.git import GitRepo
-from agit.worktree import WorktreeManager
+from agit.git import WorktreeManager
 
 if TYPE_CHECKING:
     pass
