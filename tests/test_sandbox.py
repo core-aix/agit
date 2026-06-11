@@ -1,4 +1,3 @@
-import os
 import shutil
 import subprocess
 import sys
@@ -32,7 +31,7 @@ def test_wrap_command_wraps_when_available(monkeypatch, tmp_path):
     assert wrapped[-3:] == ["claude", "-r", "x"]
     profile = wrapped[2]
     assert "(allow default)" in profile
-    assert '(deny file-write*' in profile and str(wt.resolve()) in profile
+    assert "(deny file-write*" in profile and str(wt.resolve()) in profile
 
 
 def test_build_profile_denies_siblings_allows_this_worktree(tmp_path):
@@ -49,8 +48,7 @@ def test_build_profile_denies_siblings_allows_this_worktree(tmp_path):
     assert allow_wt > deny_root  # later rule wins
 
 
-@pytest.mark.skipif(sys.platform != "darwin" or not shutil.which("sandbox-exec"),
-                    reason="sandbox-exec is macOS-only")
+@pytest.mark.skipif(sys.platform != "darwin" or not shutil.which("sandbox-exec"), reason="sandbox-exec is macOS-only")
 def test_sandbox_exec_blocks_base_and_siblings_allows_self(tmp_path):
     base = tmp_path / "repo"
     (base / ".git").mkdir(parents=True)
@@ -64,9 +62,13 @@ def test_sandbox_exec_blocks_base_and_siblings_allows_self(tmp_path):
     # inside agit's own confinement — macOS forbids nesting, so even an allow-all
     # profile fails). That's an environment limit, not a behaviour under test.
     probe = base / "probe"
-    if subprocess.run(["sandbox-exec", "-p", "(version 1)(allow default)",
-                       "/bin/sh", "-c", f"echo ok > {probe}"],
-                      capture_output=True).returncode != 0:
+    if (
+        subprocess.run(
+            ["sandbox-exec", "-p", "(version 1)(allow default)", "/bin/sh", "-c", f"echo ok > {probe}"],
+            capture_output=True,
+        ).returncode
+        != 0
+    ):
         pytest.skip("nested sandbox-exec unavailable (already sandboxed)")
 
     def write(path) -> int:
@@ -75,7 +77,7 @@ def test_sandbox_exec_blocks_base_and_siblings_allows_self(tmp_path):
             capture_output=True,
         ).returncode
 
-    assert write(base / "proxy.py") != 0          # base source: denied
-    assert write(s2 / "edit.py") != 0             # another session's worktree: denied
-    assert write(s1 / "edit.py") == 0             # this session's worktree: allowed
-    assert write(base / ".git" / "x") == 0        # git internals: allowed
+    assert write(base / "proxy.py") != 0  # base source: denied
+    assert write(s2 / "edit.py") != 0  # another session's worktree: denied
+    assert write(s1 / "edit.py") == 0  # this session's worktree: allowed
+    assert write(base / ".git" / "x") == 0  # git internals: allowed

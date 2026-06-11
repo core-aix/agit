@@ -35,7 +35,10 @@ def _fetch_sessions(repo: Path, max_count: int) -> list[dict]:
         stderr=subprocess.PIPE,
         check=False,
     )
-    _debug(repo, f"opencode session list finished returncode={process.returncode} stdout_bytes={len(process.stdout)} stderr_bytes={len(process.stderr)}")
+    _debug(
+        repo,
+        f"opencode session list finished returncode={process.returncode} stdout_bytes={len(process.stdout)} stderr_bytes={len(process.stderr)}",
+    )
     if process.returncode != 0:
         return []
     try:
@@ -69,7 +72,11 @@ def list_sessions(repo: Path) -> list[SessionRef]:
     for session in _fetch_sessions(repo, 50):
         updated = session.get("updated") or session.get("created") or 0
         title = session.get("title")
-        refs.append(SessionRef(id=str(session["id"]), updated=_to_seconds(updated), label=title if isinstance(title, str) else None))
+        refs.append(
+            SessionRef(
+                id=str(session["id"]), updated=_to_seconds(updated), label=title if isinstance(title, str) else None
+            )
+        )
     return refs
 
 
@@ -139,7 +146,9 @@ def session_belongs_to_repo(repo: Path, session_id: str) -> bool:
     except json.JSONDecodeError:
         return False
     resolved = repo.resolve()
-    return any(session.get("id") == session_id and _same_repo(session.get("directory"), resolved) for session in sessions)
+    return any(
+        session.get("id") == session_id and _same_repo(session.get("directory"), resolved) for session in sessions
+    )
 
 
 def _same_repo(directory: object, repo: Path) -> bool:
@@ -154,7 +163,10 @@ def _same_repo(directory: object, repo: Path) -> bool:
 def export_session(repo: Path, session_id: str) -> ExportedSession | None:
     _debug(repo, f"opencode export starting session_id={session_id}")
     output, returncode = _run_export_pty(repo, session_id)
-    _debug(repo, f"opencode export finished session_id={session_id} returncode={returncode} output_bytes={len(output.encode(errors='replace'))}")
+    _debug(
+        repo,
+        f"opencode export finished session_id={session_id} returncode={returncode} output_bytes={len(output.encode(errors='replace'))}",
+    )
     if returncode != 0:
         return None
     json_text = _extract_json_object(output)

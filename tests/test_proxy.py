@@ -355,7 +355,11 @@ def test_finish_agent_parse_defers_commit_while_turn_in_progress(tmp_path):
         session_id="ses-9",
         model="claude-opus-4-8",
         updated=None,
-        turns=[SessionTurn("u1", "a1", "fix it and add tests", "Let me add a sanitizer.", TokenUsage(), None, complete=False)],
+        turns=[
+            SessionTurn(
+                "u1", "a1", "fix it and add tests", "Let me add a sanitizer.", TokenUsage(), None, complete=False
+            )
+        ],
     )
     runner = _parse_ready_runner(tmp_path, in_progress)
 
@@ -372,7 +376,17 @@ def test_finish_agent_parse_commits_once_turn_is_complete(tmp_path):
         session_id="ses-9",
         model="claude-opus-4-8",
         updated=None,
-        turns=[SessionTurn("u1", "a1", "fix it and add tests", "Done — code and tests are in.", TokenUsage(total=1, output=1), None, complete=True)],
+        turns=[
+            SessionTurn(
+                "u1",
+                "a1",
+                "fix it and add tests",
+                "Done — code and tests are in.",
+                TokenUsage(total=1, output=1),
+                None,
+                complete=True,
+            )
+        ],
     )
     runner = _parse_ready_runner(tmp_path, finished)
 
@@ -387,7 +401,17 @@ def test_finish_agent_parse_forces_in_progress_commit_on_exit(tmp_path):
         session_id="ses-9",
         model="claude-opus-4-8",
         updated=None,
-        turns=[SessionTurn("u1", "a1", "fix it and add tests", "Let me add a sanitizer.", TokenUsage(total=1, output=1), None, complete=False)],
+        turns=[
+            SessionTurn(
+                "u1",
+                "a1",
+                "fix it and add tests",
+                "Let me add a sanitizer.",
+                TokenUsage(total=1, output=1),
+                None,
+                complete=False,
+            )
+        ],
     )
     runner = _parse_ready_runner(tmp_path, in_progress)
 
@@ -402,9 +426,14 @@ def test_finish_agent_parse_defers_for_queued_followup_not_in_transcript(tmp_pat
     # hasn't processed yet (absent from the transcript). While the agent is still
     # active, the commit must wait so the follow-up shares this commit — otherwise
     # it would land as a separate second commit.
-    session = ExportedSession("ses-1", "m", None, [
-        SessionTurn("u1", "a1", "first prompt", "done one", TokenUsage(total=1, output=1), None, complete=True),
-    ])
+    session = ExportedSession(
+        "ses-1",
+        "m",
+        None,
+        [
+            SessionTurn("u1", "a1", "first prompt", "done one", TokenUsage(total=1, output=1), None, complete=True),
+        ],
+    )
     runner = _parse_ready_runner(tmp_path, session)
     runner._awaited_followups = ["second prompt"]
     runner._agent_is_active = lambda: True
@@ -414,10 +443,15 @@ def test_finish_agent_parse_defers_for_queued_followup_not_in_transcript(tmp_pat
 
 
 def test_finish_agent_parse_commits_both_turns_once_followup_lands(tmp_path):
-    session = ExportedSession("ses-1", "m", None, [
-        SessionTurn("u1", "a1", "first prompt", "done one", TokenUsage(total=1, output=1), None, complete=True),
-        SessionTurn("u2", "a2", "second prompt", "done two", TokenUsage(total=1, output=1), None, complete=True),
-    ])
+    session = ExportedSession(
+        "ses-1",
+        "m",
+        None,
+        [
+            SessionTurn("u1", "a1", "first prompt", "done one", TokenUsage(total=1, output=1), None, complete=True),
+            SessionTurn("u2", "a2", "second prompt", "done two", TokenUsage(total=1, output=1), None, complete=True),
+        ],
+    )
     runner = _parse_ready_runner(tmp_path, session)
     runner._awaited_followups = ["second prompt"]
     runner._agent_is_active = lambda: True
@@ -432,9 +466,14 @@ def test_finish_agent_parse_commits_both_turns_once_followup_lands(tmp_path):
 def test_finish_agent_parse_does_not_block_on_cancelled_followup(tmp_path):
     # The queued prompt never landed and the agent has gone idle (user cancelled
     # it): commit turn 1 rather than block commits forever.
-    session = ExportedSession("ses-1", "m", None, [
-        SessionTurn("u1", "a1", "first prompt", "done one", TokenUsage(total=1, output=1), None, complete=True),
-    ])
+    session = ExportedSession(
+        "ses-1",
+        "m",
+        None,
+        [
+            SessionTurn("u1", "a1", "first prompt", "done one", TokenUsage(total=1, output=1), None, complete=True),
+        ],
+    )
     runner = _parse_ready_runner(tmp_path, session)
     runner._awaited_followups = ["cancelled prompt"]
     runner._agent_is_active = lambda: False
@@ -688,7 +727,6 @@ def test_feed_child_output_strips_xtmodkeys_mistaken_for_underline():
 
     from agit.proxy import _BackgroundColorEraseScreen
 
-    import pyte
     runner = make_runner(
         screen=_BackgroundColorEraseScreen(10, 2, history=10, ratio=0.5),
     )
@@ -709,7 +747,6 @@ def test_feed_child_output_preserves_dec_private_modes_and_real_sgr():
 
     from agit.proxy import _BackgroundColorEraseScreen
 
-    import pyte
     runner = make_runner(
         screen=_BackgroundColorEraseScreen(10, 2, history=10, ratio=0.5),
     )
@@ -949,10 +986,10 @@ def test_mouse_drag_selects_and_copies():
     runner._copy_to_clipboard = lambda text: copied.append(text)
     runner._set_message = lambda *a, **k: None
 
-    runner._intercept_scroll(b"\x1b[<0;1;1M")   # press at col 1, row 1
+    runner._intercept_scroll(b"\x1b[<0;1;1M")  # press at col 1, row 1
     runner._intercept_scroll(b"\x1b[<32;5;1M")  # drag to col 5
     assert runner._selection_ranges() == {0: (0, 4)}
-    runner._intercept_scroll(b"\x1b[<0;5;1m")   # release
+    runner._intercept_scroll(b"\x1b[<0;5;1m")  # release
     assert copied == ["hello"]
     assert runner.sel_active is False
 
@@ -1061,10 +1098,17 @@ def _mux_runner():
 
 
 def _bg_session(name):
-    from agit.proxy.session import Session
 
-    return Session(**{**Session.runtime_defaults(), "name": name, "repo": f"repo{name}",
-                      "state": f"state{name}", "backend": f"b{name}", "actions": f"act{name}"})
+    return Session(
+        **{
+            **Session.runtime_defaults(),
+            "name": name,
+            "repo": f"repo{name}",
+            "state": f"state{name}",
+            "backend": f"b{name}",
+            "actions": f"act{name}",
+        }
+    )
 
 
 def test_switch_active_swaps_session_state():
@@ -1299,10 +1343,7 @@ def test_proxy_parses_host_terminal_responses():
     )
 
     runner._parse_host_terminal_responses(
-        b"\x1b]10;rgb:1a1a/1a1a/1a1a\x07"
-        b"\x1b]11;rgb:fafa/fafa/fafa\x07"
-        b"\x1b]4;1;rgb:cccc/0000/0000\x07"
-        b"\x1b[?62;c"
+        b"\x1b]10;rgb:1a1a/1a1a/1a1a\x07\x1b]11;rgb:fafa/fafa/fafa\x07\x1b]4;1;rgb:cccc/0000/0000\x07\x1b[?62;c"
     )
 
     assert runner.host_fg_value == b"rgb:1a1a/1a1a/1a1a"
@@ -1341,9 +1382,7 @@ def test_proxy_answers_terminal_queries_from_host_cache(monkeypatch):
         return real_write(fd, data)
 
     monkeypatch.setattr(os, "write", fake_write)
-    runner._answer_terminal_queries(
-        b"\x1b]10;?\x07\x1b]11;?\x07\x1b]4;1;?\x07\x1b[6n\x1b[0c"
-    )
+    runner._answer_terminal_queries(b"\x1b]10;?\x07\x1b]11;?\x07\x1b]4;1;?\x07\x1b[6n\x1b[0c")
 
     reply = b"".join(written)
     # OpenCode learns the real terminal colors, so it picks the matching theme.
@@ -1415,7 +1454,13 @@ def test_proxy_status_check_runs_after_file_event_only():
     assert runner.repo.calls == 1
 
 
-def test_proxy_parse_starts_only_after_cooldown_between_file_events():
+def test_proxy_parse_starts_only_after_cooldown_between_file_events(monkeypatch):
+    # Pin the clock: the cooldown is measured as now - last_parse_finish, and
+    # last_parse_finish starts at 0.0. With the real monotonic clock this test
+    # only passes when uptime exceeds the 60s cooldown (true on a dev box, false
+    # on a freshly-booted CI runner) — so drive a fixed clock instead.
+    clock = [10_000.0]
+    monkeypatch.setattr("agit.proxy.runner.time.monotonic", lambda: clock[0])
     runner = make_runner(
         file_change_event=threading.Event(),
         status_check_pending=False,
@@ -1446,8 +1491,8 @@ def test_proxy_parse_starts_only_after_cooldown_between_file_events():
     runner.repo = Repo()
 
     def start_parse():
-        runner.last_parse_start = time.monotonic()
-        runner.last_parse_finish = time.monotonic()
+        runner.last_parse_start = clock[0]
+        runner.last_parse_finish = clock[0]  # use the pinned clock, not real time
         starts.append(True)
         return True
 
@@ -1792,6 +1837,7 @@ def test_prompt_resolve_conflict_leave_does_not_merge():
 
 # --- cross-backend sessions (Part B) ---
 
+
 def test_live_session_for_backend_finds_active_and_background():
     import types
 
@@ -2028,6 +2074,7 @@ def test_next_session_name_skips_existing_worktrees_and_sessions():
 
 # --- injected-prompt targeting (cross-backend safety) ---
 
+
 def test_inject_prompt_records_target_fd(monkeypatch):
     runner = make_runner(master_fd=5)
     writes = []
@@ -2084,6 +2131,7 @@ def test_flush_pending_enter_marks_sent_only_when_still_active(monkeypatch):
 
 
 # --- session name uniqueness + per-backend resume ---
+
 
 def test_state_remember_and_recall_session(tmp_path):
     s = AgitState(tmp_path)
@@ -2142,6 +2190,7 @@ def test_switch_backend_resumes_stored_session(monkeypatch):
 
 # --- resume-past-conversation naming ---
 
+
 def _resume_runner():
     import types
 
@@ -2186,6 +2235,7 @@ def test_resume_switches_to_already_live_conversation():
 
 # --- base branch switched out-of-band ---
 
+
 def _base_drift_runner(current_branch):
     import types
 
@@ -2209,7 +2259,7 @@ def test_base_branch_drift_pauses_then_resumes():
     assert any("PAUSED" in m and "feature-x" in m for m in runner.messages)
 
     runner.base_repo.current_branch = lambda: "dev"  # user switches back
-    runner._base_drift_check_at = 0.0                 # bypass the 2s throttle
+    runner._base_drift_check_at = 0.0  # bypass the 2s throttle
     runner.messages.clear()
     runner._check_base_branch_drift()
     assert runner._integration_paused is False
@@ -2312,7 +2362,7 @@ def test_exit_persists_resume_pointer_even_when_worktree_kept():
     runner._remove_worktree_on_exit()
 
     assert runner.removed == []  # unintegrated → worktree still kept
-    assert persisted == [True]   # ...but the resume pointer was persisted anyway
+    assert persisted == [True]  # ...but the resume pointer was persisted anyway
 
 
 def test_exit_does_not_persist_resume_pointer_for_background_session():
@@ -2373,6 +2423,7 @@ def test_sync_idle_worktrees_skipped_while_paused():
 
 # --- corrupted-worktree reuse / diagnostics ---
 
+
 def test_cleanup_stale_state_removes_orphaned_worktree_dirs(tmp_path):
     import types
 
@@ -2380,8 +2431,8 @@ def test_cleanup_stale_state_removes_orphaned_worktree_dirs(tmp_path):
     registered = root / "session-1"
     registered.mkdir(parents=True)
     orphan = root / "session-2"
-    (orphan / ".agit").mkdir(parents=True)         # only .agit/ → not a valid worktree
-    (root / "stray-file").write_text("x")           # a file, not a dir → ignored
+    (orphan / ".agit").mkdir(parents=True)  # only .agit/ → not a valid worktree
+    (root / "stray-file").write_text("x")  # a file, not a dir → ignored
 
     runner = make_runner()
     runner._debug = lambda *a, **k: None
@@ -2395,10 +2446,10 @@ def test_cleanup_stale_state_removes_orphaned_worktree_dirs(tmp_path):
 
     runner._cleanup_stale_state_on_startup()
 
-    assert registered.exists()         # a real registered worktree is kept
-    assert not orphan.exists()         # the orphaned .agit/-only dir is swept
+    assert registered.exists()  # a real registered worktree is kept
+    assert not orphan.exists()  # the orphaned .agit/-only dir is swept
     assert (root / "stray-file").exists()
-    assert prunes                      # pruned stale git registrations
+    assert prunes  # pruned stale git registrations
 
 
 def test_is_valid_worktree_rejects_leftover_without_git(tmp_path):
@@ -2422,10 +2473,10 @@ def test_open_session_worktree_recreates_corrupted_leftover(tmp_path):
         (tmp_path / name / ".git").parent.mkdir(parents=True, exist_ok=True)
         return types.SimpleNamespace(name=name, path=tmp_path / name, branch="")
 
-    runner.worktree_manager = types.SimpleNamespace(
-        worktree_path=lambda name: tmp_path / name, create=_create)
+    runner.worktree_manager = types.SimpleNamespace(worktree_path=lambda name: tmp_path / name, create=_create)
     runner._worktrees = lambda: runner.worktree_manager
     import agit.proxy.runner as proxymod
+
     orig = proxymod.GitRepo
     proxymod.GitRepo = lambda path: types.SimpleNamespace(current_branch=lambda: "")
     try:
@@ -2434,7 +2485,7 @@ def test_open_session_worktree_recreates_corrupted_leftover(tmp_path):
         proxymod.GitRepo = orig
 
     assert created["called"] == ("session-1", "dev")  # recreated, not reused
-    assert not (leftover / ".agit").exists()           # corrupted leftover was cleared first
+    assert not (leftover / ".agit").exists()  # corrupted leftover was cleared first
 
 
 def test_diag_path_uses_base_repo(tmp_path):
@@ -2451,6 +2502,7 @@ def test_diag_path_uses_base_repo(tmp_path):
 
 
 # --- resume cwd drift guard ---
+
 
 def _drift_runner(recorded_cwd, worktree_path):
     import types
@@ -2496,6 +2548,7 @@ def test_cwd_drift_waits_when_no_cwd_recorded_yet():
 
 # --- worktree confinement ---
 
+
 def test_confine_to_worktree_wraps_when_enabled(monkeypatch):
     import types
     from agit.proxy import sandbox
@@ -2533,6 +2586,7 @@ def test_confine_to_worktree_noop_without_worktree_or_when_disabled(monkeypatch)
 
 
 # --- backend-exit / native session switch ---
+
 
 def test_adopt_latest_backend_session_repoints_after_native_switch():
     import types
@@ -2663,12 +2717,16 @@ def test_finalize_on_backend_exit_finalizes_once_and_clears_pid():
 
 # --- startup resume + naming ---
 
+
 def test_resumable_sessions_come_from_backend_repo_record():
     import types
 
-    refs = [SessionRef(id="a", updated=1.0, label="old"),
-            SessionRef(id="b", updated=3.0, label="new"),
-            SessionRef(id="c", updated=2.0, label="mid")]
+    refs = [
+        SessionRef(id="a", updated=1.0, label="old"),
+        SessionRef(id="b", updated=3.0, label="new"),
+        SessionRef(id="c", updated=2.0, label="mid"),
+    ]
+
     def _list(repo):
         asked["repo"] = repo
         return list(refs)
@@ -2724,6 +2782,7 @@ def test_startup_name_prompts_when_unnamed_and_records_it():
 
 # --- idle worktree base-sync ---
 
+
 def test_sync_idle_worktrees_aligns_idle_skips_in_flight():
     import types
 
@@ -2731,7 +2790,7 @@ def test_sync_idle_worktrees_aligns_idle_skips_in_flight():
         repo="repoA",
         agent_in_flight=False,
     )
-    busy = types.SimpleNamespace(repo="repoB", agent_in_flight=True)   # working -> skip
+    busy = types.SimpleNamespace(repo="repoB", agent_in_flight=True)  # working -> skip
     idle = types.SimpleNamespace(repo="repoC", agent_in_flight=False)  # idle -> sync
     runner.sessions = [types.SimpleNamespace(repo="repoA", agent_in_flight=False), busy, idle]
     aligned = []
@@ -3007,18 +3066,32 @@ def test_agent_commit_failed_attempt_does_not_double_count_tokens(tmp_path):
     # First attempt: the turn left nothing staged (e.g. the agent reverted its
     # edit) — no commit, and crucially no token accumulation.
     repo.has_staged_changes = lambda: False
-    assert runner._create_agent_commit_from_turns_popup(
-        turns=[first_turn], backend="claude", backend_session_id="ses-1", model="m", quiet=True,
-    ) is False
+    assert (
+        runner._create_agent_commit_from_turns_popup(
+            turns=[first_turn],
+            backend="claude",
+            backend_session_id="ses-1",
+            model="m",
+            quiet=True,
+        )
+        is False
+    )
     assert runner.state.pending_token_usage()["input"] == 0
 
     # Next parse returns the same turn again plus a new one; this time changes
     # are staged and the commit happens. Each turn must be counted exactly once.
     repo.has_staged_changes = lambda: True
     second_turn = SessionTurn("u2", "a2", "now edit", "edited", TokenUsage(total=5, input=3, output=2), None)
-    assert runner._create_agent_commit_from_turns_popup(
-        turns=[first_turn, second_turn], backend="claude", backend_session_id="ses-1", model="m", quiet=True,
-    ) is True
+    assert (
+        runner._create_agent_commit_from_turns_popup(
+            turns=[first_turn, second_turn],
+            backend="claude",
+            backend_session_id="ses-1",
+            model="m",
+            quiet=True,
+        )
+        is True
+    )
     message = repo.message
     assert "tokens_since_last_commit_input: 133" in message
     assert "tokens_since_last_commit_output: 12" in message
@@ -3049,17 +3122,31 @@ def test_actions_agent_commit_failed_attempt_does_not_double_count(tmp_path):
     actions = AgitActions(repo, state)
     turn = SessionTurn("u1", "a1", "fix it", "done", TokenUsage(total=140, input=130, output=10), None)
 
-    assert actions.create_agent_commit_from_turns(
-        turns=[turn], backend="claude", backend_session_id="ses-1", model="m", quiet=True,
-    ) is False
+    assert (
+        actions.create_agent_commit_from_turns(
+            turns=[turn],
+            backend="claude",
+            backend_session_id="ses-1",
+            model="m",
+            quiet=True,
+        )
+        is False
+    )
     # Nothing staged: neither tokens nor trace were accumulated.
     assert state.pending_token_usage()["input"] == 0
     assert state.pending_trace() == []
 
     repo.staged = True
-    assert actions.create_agent_commit_from_turns(
-        turns=[turn], backend="claude", backend_session_id="ses-1", model="m", quiet=True,
-    ) is True
+    assert (
+        actions.create_agent_commit_from_turns(
+            turns=[turn],
+            backend="claude",
+            backend_session_id="ses-1",
+            model="m",
+            quiet=True,
+        )
+        is True
+    )
     assert "tokens_since_last_commit_input: 130" in repo.message
     assert repo.message.count("## User\n\nfix it") == 1
 
@@ -3068,7 +3155,6 @@ def test_actions_agent_commit_failed_attempt_does_not_double_count(tmp_path):
 
 
 def test_parse_worker_delivers_to_its_own_session_after_switch(tmp_path):
-    from agit.proxy.session import Session
 
     release = threading.Event()
     state_a = AgitState(tmp_path / "a")
@@ -3147,7 +3233,6 @@ def test_finish_agent_parse_discards_result_owned_by_another_session(tmp_path):
 
 
 def test_switch_active_joins_worker_before_swapping():
-    from agit.proxy.session import Session
 
     events = []
 
@@ -3514,10 +3599,10 @@ def test_sync_terminal_modes_mirrors_keyboard_protocol(monkeypatch):
     # must see these or it keeps sending a plain \r for Shift+Enter.
     runner._sync_terminal_modes(b"hello\x1b[>1u world \x1b[>4;2m text \x1b[<u\x1b[>4;0m")
 
-    assert b"\x1b[>1u" in writes      # kitty push
-    assert b"\x1b[>4;2m" in writes    # modifyOtherKeys on
-    assert b"\x1b[<u" in writes       # kitty pop
-    assert b"\x1b[>4;0m" in writes    # modifyOtherKeys off
+    assert b"\x1b[>1u" in writes  # kitty push
+    assert b"\x1b[>4;2m" in writes  # modifyOtherKeys on
+    assert b"\x1b[<u" in writes  # kitty pop
+    assert b"\x1b[>4;0m" in writes  # modifyOtherKeys off
     # Only the negotiation sequences are mirrored, never the text around them.
     assert all(payload.startswith(b"\x1b[") for payload in writes)
 
@@ -3687,7 +3772,7 @@ def test_idle_integration_skips_active_agent_and_clean_branches():
 # ProxyRunner.__new__)
 # ---------------------------------------------------------------------------
 
-from agit.proxy.renderer import ScreenRenderer, _BackgroundColorEraseScreen, detect_color_mode
+from agit.proxy.renderer import ScreenRenderer
 
 
 def _make_renderer(rows=24, cols=80, color_mode="truecolor"):
@@ -3708,11 +3793,20 @@ def test_screen_renderer_init_screen_creates_screen():
 def test_screen_renderer_cell_sgr_bold_red():
     r = ScreenRenderer(24, 80, color_mode="truecolor")
     import pyte.screens
-    cell = pyte.screens.Char("X", fg="red", bg="default", bold=True,
-                              italics=False, underscore=False,
-                              strikethrough=False, reverse=False, blink=False)
+
+    cell = pyte.screens.Char(
+        "X",
+        fg="red",
+        bg="default",
+        bold=True,
+        italics=False,
+        underscore=False,
+        strikethrough=False,
+        reverse=False,
+        blink=False,
+    )
     result = r.cell_sgr(cell)
-    assert "1" in result.split(";")   # bold
+    assert "1" in result.split(";")  # bold
     assert "31" in result.split(";")  # fg red
 
 
@@ -3769,7 +3863,7 @@ def test_screen_renderer_selection_ranges_span():
     assert 0 in ranges
     assert 1 in ranges
     assert ranges[0] == (2, 79)  # start=2, end=cols-1 on first row
-    assert ranges[1] == (0, 5)   # start=0, end=5 on last row
+    assert ranges[1] == (0, 5)  # start=0, end=5 on last row
 
 
 def test_screen_renderer_render_line_empty_cells():
@@ -3777,6 +3871,7 @@ def test_screen_renderer_render_line_empty_cells():
     line = r.render_line({}, cols=10)
     # Empty cells render as 10 spaces with no styling left active.
     import re
+
     plain = re.sub(r"\x1b\[[^m]*m", "", line)
     assert plain == " " * 10
 
@@ -3792,6 +3887,7 @@ def test_screen_renderer_track_sync_update_sets_flag():
 
 def test_screen_renderer_sync_hold_bounded():
     import time
+
     r = _make_renderer()
     r._in_sync_update = True
     r._sync_since = time.monotonic()
@@ -3885,6 +3981,7 @@ def test_screen_renderer_append_box():
 
 def test_screen_renderer_feed_strips_hostile_csi():
     import re
+
     r = _make_renderer(5, 20)
     hostile = re.compile(rb"\x1b\[[<>=][0-9;:]*[ -/]*[@-~]")
     # Should not raise even with hostile CSI
@@ -3917,6 +4014,8 @@ def test_duck_type_aliases_cover_extracted_classes():
             assert hasattr(ProxyRunner, name), (
                 f"ProxyRunner is missing alias {name!r}, self-called inside {cls.__name__}"
             )
+
+
 def test_configured_menu_key_opens_command_capture():
     # menu_key in ~/.agit/config.json rebinds the aGiT menu (default Ctrl-G).
     parser = ProxyInput(menu_key=b"\x10")  # ctrl-p
@@ -3929,6 +4028,7 @@ def test_configured_menu_key_opens_command_capture():
     forwarded, _echo, command, _exit = parser.feed(b"\x07")
     assert forwarded == [b"\x07"]
     assert command is None
+
 
 def test_real_init_defines_all_lifecycle_flags(tmp_path):
     # P7 removed the getattr() guards on these flags; for_testing() seeds them

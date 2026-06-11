@@ -86,6 +86,7 @@ def detect_color_mode(environ=None) -> str:
 # _BackgroundColorEraseScreen
 # ---------------------------------------------------------------------------
 
+
 class _BackgroundColorEraseScreen(pyte.HistoryScreen):
     # pyte erases cells using the cursor's *full* SGR attributes, so a backend
     # that clears the screen (or a line) while underline — or any glyph
@@ -144,6 +145,7 @@ class _BackgroundColorEraseScreen(pyte.HistoryScreen):
 # ---------------------------------------------------------------------------
 # ScreenRenderer
 # ---------------------------------------------------------------------------
+
 
 class ScreenRenderer:
     """Owns the pyte screen/stream and converts the grid to ANSI output.
@@ -309,7 +311,7 @@ class ScreenRenderer:
         combined = history + live
         end = len(combined) - self.scroll_back
         end = max(num_rows, min(end, len(combined)))
-        return combined[end - num_rows:end]
+        return combined[end - num_rows : end]
 
     # ------------------------------------------------------------------
     # Selection
@@ -453,7 +455,7 @@ class ScreenRenderer:
         scroll_back: int,
         user_declined: list,
         short_session_fn,
-            menu_label: str = "Ctrl-G",
+        menu_label: str = "Ctrl-G",
     ) -> str:
         declined = len(user_declined)
         session = f"{name or 'session'}" + (f" [{short_session_fn(session_id)}]" if session_id else "")

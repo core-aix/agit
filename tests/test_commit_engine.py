@@ -4,13 +4,12 @@ These tests construct CommitEngine directly — no ProxyRunner.__new__ required 
 verifying the core commit pipeline, parse-result consumption, parse-worker
 launch, and the simple state helpers.
 """
+
 from __future__ import annotations
 
 import threading
-import time
 import types
 
-import pytest
 
 from agit.backends.base import TokenUsage
 from agit.transcripts.opencode import SessionTurn
@@ -23,6 +22,7 @@ from agit.config import AgitState
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 class _Repo:
     """Minimal GitRepo stand-in."""
@@ -63,7 +63,10 @@ def _engine(tmp_path, *, staged: bool = True) -> tuple[CommitEngine, _Repo, Agit
 
 def _turn(prompt: str, response: str, *, total: int = 1, output: int = 1) -> SessionTurn:
     return SessionTurn(
-        "uid", "aid", prompt, response,
+        "uid",
+        "aid",
+        prompt,
+        response,
         TokenUsage(total=total, output=output, input=total - output),
         None,
         complete=True,
@@ -74,38 +77,48 @@ def _turn(prompt: str, response: str, *, total: int = 1, output: int = 1) -> Ses
 # CommitEngine.commit_turns — proxy mode (accumulate_trace_only_on_commit=False)
 # ---------------------------------------------------------------------------
 
+
 def test_commit_turns_returns_false_for_empty_turns(tmp_path):
     engine, repo, state = _engine(tmp_path)
-    assert engine.commit_turns(
-        turns=[],
-        backend="claude",
-        backend_session_id="s1",
-        model="m",
-        stage_untracked_fn=_noop_stage,
-    ) is False
+    assert (
+        engine.commit_turns(
+            turns=[],
+            backend="claude",
+            backend_session_id="s1",
+            model="m",
+            stage_untracked_fn=_noop_stage,
+        )
+        is False
+    )
     assert repo.message is None
 
 
 def test_commit_turns_returns_false_when_nothing_staged(tmp_path):
     engine, repo, state = _engine(tmp_path, staged=False)
-    assert engine.commit_turns(
-        turns=[_turn("fix it", "done")],
-        backend="claude",
-        backend_session_id="s1",
-        model="m",
-        stage_untracked_fn=_noop_stage,
-    ) is False
+    assert (
+        engine.commit_turns(
+            turns=[_turn("fix it", "done")],
+            backend="claude",
+            backend_session_id="s1",
+            model="m",
+            stage_untracked_fn=_noop_stage,
+        )
+        is False
+    )
 
 
 def test_commit_turns_creates_commit_when_staged(tmp_path):
     engine, repo, state = _engine(tmp_path)
-    assert engine.commit_turns(
-        turns=[_turn("fix the bug", "done")],
-        backend="claude",
-        backend_session_id="s1",
-        model="m",
-        stage_untracked_fn=_noop_stage,
-    ) is True
+    assert (
+        engine.commit_turns(
+            turns=[_turn("fix the bug", "done")],
+            backend="claude",
+            backend_session_id="s1",
+            model="m",
+            stage_untracked_fn=_noop_stage,
+        )
+        is True
+    )
     assert repo.message is not None
     assert repo.message.startswith("<agent> fix the bug")
 
@@ -198,8 +211,10 @@ def test_commit_turns_preserves_pending_users_not_in_turns(tmp_path):
 def test_commit_turns_stage_untracked_fn_receives_repo_and_state(tmp_path):
     engine, repo, state = _engine(tmp_path)
     calls = []
+
     def capture_stage(r, s):
         calls.append((r, s))
+
     engine.commit_turns(
         turns=[_turn("do it", "done")],
         backend="claude",
@@ -236,6 +251,7 @@ def test_commit_turns_auto_stages_untracked_excluding_declined(tmp_path):
 # CommitEngine.commit_turns — actions mode (accumulate_trace_only_on_commit=True)
 # ---------------------------------------------------------------------------
 
+
 def test_commit_turns_actions_mode_no_trace_on_failed_attempt(tmp_path):
     # Bug #14 (d041d10): a failed attempt must leave state pristine.
     engine, repo, state = _engine(tmp_path, staged=False)
@@ -269,6 +285,7 @@ def test_commit_turns_actions_mode_succeeds_with_clean_state(tmp_path):
 # ---------------------------------------------------------------------------
 # CommitEngine.record_user_prompt / await_followup
 # ---------------------------------------------------------------------------
+
 
 def test_record_user_prompt_appends_to_trace(tmp_path):
     engine, _, state = _engine(tmp_path)
@@ -306,6 +323,7 @@ def test_await_followup_skips_empty(tmp_path):
 # CommitEngine.sanitize_state_trace
 # ---------------------------------------------------------------------------
 
+
 def test_sanitize_state_trace_removes_event_blobs(tmp_path):
     engine, _, state = _engine(tmp_path)
     blob = '{"type":"event","payload":"..."}'
@@ -342,6 +360,7 @@ def test_sanitize_state_trace_noop_when_clean(tmp_path):
 # CommitEngine.start_parse / parse worker
 # ---------------------------------------------------------------------------
 
+
 def test_start_parse_sets_parse_thread_on_session(tmp_path):
     state = AgitState(tmp_path)
     session = Session.bare()
@@ -375,7 +394,10 @@ def test_start_parse_returns_false_when_already_running(tmp_path):
 
     class SlowBackend:
         name = "claude"
-        def latest_session_id(self, repo): return None
+
+        def latest_session_id(self, repo):
+            return None
+
         def export_session(self, repo, sid):
             ready.wait(timeout=5)
             return None
@@ -384,17 +406,23 @@ def test_start_parse_returns_false_when_already_running(tmp_path):
     session.repo = types.SimpleNamespace(repo=tmp_path)
 
     engine = CommitEngine(None, state)
-    assert engine.start_parse(
-        session=session,
-        discover_session_id_fn=lambda: None,
-        debug_fn=lambda *a, **k: None,
-    ) is True
+    assert (
+        engine.start_parse(
+            session=session,
+            discover_session_id_fn=lambda: None,
+            debug_fn=lambda *a, **k: None,
+        )
+        is True
+    )
     # Second launch while thread is alive
-    assert engine.start_parse(
-        session=session,
-        discover_session_id_fn=lambda: None,
-        debug_fn=lambda *a, **k: None,
-    ) is False
+    assert (
+        engine.start_parse(
+            session=session,
+            discover_session_id_fn=lambda: None,
+            debug_fn=lambda *a, **k: None,
+        )
+        is False
+    )
     ready.set()
     session.agent_parse_thread.join(timeout=5)
 
@@ -407,10 +435,15 @@ def test_start_parse_writes_result_to_owning_session(tmp_path):
     session.worktree = object()
 
     exported = ExportedSession("ses-1", "m", None, [])
+
     class Backend:
         name = "claude"
-        def latest_session_id(self, repo): return "ses-1"
-        def export_session(self, repo, sid): return exported
+
+        def latest_session_id(self, repo):
+            return "ses-1"
+
+        def export_session(self, repo, sid):
+            return exported
 
     session.backend = Backend()
     session.repo = types.SimpleNamespace(repo=tmp_path)
@@ -433,14 +466,13 @@ def test_start_parse_writes_result_to_owning_session(tmp_path):
 # CommitEngine.finish_parse_if_ready
 # ---------------------------------------------------------------------------
 
+
 def _make_finish_helpers(tmp_path, session, exported_session, *, last_message_id=None):
     """Set up a CommitEngine and helper stubs for finish_parse_if_ready tests."""
     state = AgitState(tmp_path)
     session.state = state
     session.backend = types.SimpleNamespace(name="claude")
-    session.agent_parse_result = (
-        exported_session.session_id, exported_session, last_message_id, state
-    )
+    session.agent_parse_result = (exported_session.session_id, exported_session, last_message_id, state)
     session.agent_parse_thread = None
 
     repo = _Repo(staged=True)
@@ -480,9 +512,14 @@ def test_finish_parse_returns_none_when_no_result(tmp_path):
 
 def test_finish_parse_defers_incomplete_turn(tmp_path):
     session = Session.bare()
-    exported = ExportedSession("ses-1", "m", None, [
-        SessionTurn("u1", "a1", "do it", "partial", TokenUsage(total=1, output=1), None, complete=False),
-    ])
+    exported = ExportedSession(
+        "ses-1",
+        "m",
+        None,
+        [
+            SessionTurn("u1", "a1", "do it", "partial", TokenUsage(total=1, output=1), None, complete=False),
+        ],
+    )
     engine, state, commits, commit_fn = _make_finish_helpers(tmp_path, session, exported)
 
     result, _ = engine.finish_parse_if_ready(
@@ -505,9 +542,14 @@ def test_finish_parse_commits_complete_turn(tmp_path):
     session = Session.bare()
     # SessionTurn(user_message_id, assistant_message_id, user_prompt, final_response,
     #             tokens, model, complete)
-    exported = ExportedSession("ses-1", "m", None, [
-        SessionTurn("u1", "msg-1", "fix it", "done", TokenUsage(total=1, output=1), None, complete=True),
-    ])
+    exported = ExportedSession(
+        "ses-1",
+        "m",
+        None,
+        [
+            SessionTurn("u1", "msg-1", "fix it", "done", TokenUsage(total=1, output=1), None, complete=True),
+        ],
+    )
     engine, state, commits, commit_fn = _make_finish_helpers(tmp_path, session, exported)
 
     result, _ = engine.finish_parse_if_ready(
@@ -530,9 +572,14 @@ def test_finish_parse_commits_complete_turn(tmp_path):
 
 def test_finish_parse_defers_awaited_followup_while_active(tmp_path):
     session = Session.bare()
-    exported = ExportedSession("ses-1", "m", None, [
-        SessionTurn("u1", "a1", "prompt one", "done", TokenUsage(total=1, output=1), None, complete=True),
-    ])
+    exported = ExportedSession(
+        "ses-1",
+        "m",
+        None,
+        [
+            SessionTurn("u1", "a1", "prompt one", "done", TokenUsage(total=1, output=1), None, complete=True),
+        ],
+    )
     engine, state, commits, commit_fn = _make_finish_helpers(tmp_path, session, exported)
 
     result, new_awaited = engine.finish_parse_if_ready(
@@ -555,10 +602,16 @@ def test_finish_parse_defers_awaited_followup_while_active(tmp_path):
 def test_finish_parse_clears_awaited_on_interrupt(tmp_path):
     # An Esc interrupt clears the awaited list so commits are not deferred forever.
     session = Session.bare()
-    exported = ExportedSession("ses-1", "m", None, [
-        SessionTurn("u1", "a1", "fix", "partial", TokenUsage(total=1, output=1), None,
-                    complete=True, interrupted=True),
-    ])
+    exported = ExportedSession(
+        "ses-1",
+        "m",
+        None,
+        [
+            SessionTurn(
+                "u1", "a1", "fix", "partial", TokenUsage(total=1, output=1), None, complete=True, interrupted=True
+            ),
+        ],
+    )
     engine, state, commits, commit_fn = _make_finish_helpers(tmp_path, session, exported)
 
     result, new_awaited = engine.finish_parse_if_ready(
@@ -608,12 +661,14 @@ def test_finish_parse_discards_stale_session_result(tmp_path):
 # CommitEngine.recover_nonempty_session / initialize_session_baseline
 # ---------------------------------------------------------------------------
 
+
 def test_recover_nonempty_session_returns_none_on_exception(tmp_path):
     state = AgitState(tmp_path)
     engine = CommitEngine(None, state)
 
     class FailBackend:
-        def latest_session_id(self, repo): raise RuntimeError("network error")
+        def latest_session_id(self, repo):
+            raise RuntimeError("network error")
 
     result = engine.recover_nonempty_session(
         FailBackend(),
@@ -629,7 +684,8 @@ def test_recover_nonempty_session_returns_none_when_same_id(tmp_path):
     engine = CommitEngine(None, state)
 
     class SameBackend:
-        def latest_session_id(self, repo): return "ses-1"
+        def latest_session_id(self, repo):
+            return "ses-1"
 
     result = engine.recover_nonempty_session(
         SameBackend(),

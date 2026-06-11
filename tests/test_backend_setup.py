@@ -68,7 +68,9 @@ def test_ensure_installed_backend_returns_installed_backend(monkeypatch):
 def test_ensure_installed_backend_switches_to_installed_alternative(monkeypatch):
     monkeypatch.setattr(bs, "backend_installed", lambda name: name == "claude")
     config = FakeConfig()
-    resolved = ensure_installed_backend("opencode", config, interactive=True, input_fn=_inputs("claude"), output_fn=lambda _s: None)
+    resolved = ensure_installed_backend(
+        "opencode", config, interactive=True, input_fn=_inputs("claude"), output_fn=lambda _s: None
+    )
     assert resolved == "claude"
     assert config.saved == ["claude"]
 
@@ -82,7 +84,9 @@ def test_ensure_installed_backend_non_interactive_raises(monkeypatch):
 def test_ensure_installed_backend_quit_raises(monkeypatch):
     monkeypatch.setattr(bs, "backend_installed", lambda name: False)
     with pytest.raises(BackendUnavailable):
-        ensure_installed_backend("opencode", FakeConfig(), interactive=True, input_fn=_inputs("q"), output_fn=lambda _s: None)
+        ensure_installed_backend(
+            "opencode", FakeConfig(), interactive=True, input_fn=_inputs("q"), output_fn=lambda _s: None
+        )
 
 
 def test_global_config_has_default_backend(tmp_path):

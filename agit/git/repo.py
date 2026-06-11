@@ -237,7 +237,9 @@ class GitRepo:
             command.extend(["--", *paths])
         return self._run(command, check=False).stdout.strip()
 
-    def _run(self, command: list[str], *, input_text: str | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
+    def _run(
+        self, command: list[str], *, input_text: str | None = None, check: bool = True
+    ) -> subprocess.CompletedProcess[str]:
         process = subprocess.run(
             command,
             cwd=self.repo,

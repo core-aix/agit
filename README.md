@@ -14,6 +14,17 @@ python3 -m pip install -e .
 
 This installs the `agit` command and the terminal UI dependency used for status bars and contextual command hints.
 
+### Contributing
+
+Install the optional pre-commit hooks for fast local lint/format on every commit (same checks as CI):
+
+```bash
+uv sync --group dev
+uv run pre-commit install
+```
+
+The hooks run `ruff` (lint + format) and basic file hygiene. Tests, coverage, and type checks run in CI.
+
 ## Usage
 
 Run in the current repository:

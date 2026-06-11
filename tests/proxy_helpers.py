@@ -13,6 +13,7 @@ Usage::
         runner.agent_in_flight = True
         assert runner.active.agent_in_flight is True
 """
+
 from __future__ import annotations
 
 from agit.proxy.runner import ProxyRunner

@@ -11,11 +11,19 @@ requires-python = ">=3.10"
 license = {text = "Apache-2.0"}
 authors = [{name = "aGiT contributors"}]
 dependencies = [
-    "coverage>=7.14.1",
     "prompt_toolkit>=3.0.52",
     "pyte>=0.8.2",
-    "pytest>=9.0.3",
     "watchdog>=6.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "coverage>=7.14.1",
+    "ruff>=0.9",
+    "mypy>=1.13",
+    "mypy-baseline>=0.7",
+    "pre-commit>=4.0",
 ]
 
 [project.scripts]
@@ -23,3 +31,23 @@ agit = "agit.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["agit"]
+omit = ["tests/*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint.per-file-ignores]
+# Tests deliberately group some imports with the test sections they belong to.
+"tests/*" = ["E402"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+# Pragmatic baseline for a codebase adopting mypy incrementally: type-check the
+# package, surface real issues, but don't require full strictness yet. The
+# pre-existing errors are held in a baseline (see CI) and burned down separately.
+files = ["agit"]

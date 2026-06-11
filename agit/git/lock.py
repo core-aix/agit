@@ -6,6 +6,7 @@ import os
 import time
 from pathlib import Path
 
+
 def already_running_message(pid: int | None) -> str:
     """Refusal shown when a second aGiT is started on a repo that already has one
     running. aGiT auto-commits and merges as the agent works, so two instances on

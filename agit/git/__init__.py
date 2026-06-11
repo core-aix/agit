@@ -13,7 +13,13 @@ from agit.git.worktree import (
 )
 
 __all__ = [
-    "GitError", "GitRepo",
-    "WorktreeInfo", "WorktreeManager", "BRANCH_PREFIX", "WORKTREES_DIRNAME", "_sanitize_name",
-    "RepoLock", "already_running_message",
+    "GitError",
+    "GitRepo",
+    "WorktreeInfo",
+    "WorktreeManager",
+    "BRANCH_PREFIX",
+    "WORKTREES_DIRNAME",
+    "_sanitize_name",
+    "RepoLock",
+    "already_running_message",
 ]

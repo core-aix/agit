@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    branches: [dev, main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The suite shells out to `git commit` in temp repos; the runner has no
+      # default git identity, so configure one or those tests fail with
+      # "Author identity unknown".
+      - name: Configure git identity
+        run: |
+          git config --global user.email "ci@agit.invalid"
+          git config --global user.name "aGiT CI"
+
+      # Install uv via its official script rather than a third-party action,
+      # so the workflow runs even under an "allow GitHub-owned actions only"
+      # policy. uv manages the Python toolchain itself.
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        run: uv sync --group dev
+
+      - name: Lint (ruff check)
+        run: uv run ruff check agit/ tests/
+
+      - name: Format (ruff format --check)
+        run: uv run ruff format --check agit/ tests/
+
+      - name: Types (mypy, new errors only)
+        # mypy runs against a committed baseline of pre-existing type debt
+        # (mypy-baseline.txt). The build fails only on NEW type errors; the
+        # baseline is burned down separately (#42). Regenerate with:
+        #   uv run mypy | uv run mypy-baseline sync
+        run: uv run mypy | uv run mypy-baseline filter
+
+      - name: Tests + coverage
+        run: |
+          uv run coverage run -m pytest -q
+          uv run coverage report

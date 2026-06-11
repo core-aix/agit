@@ -1,0 +1,21 @@
+# Fast local checks that mirror the CI lint/format gates (.github/workflows/ci.yml).
+# Opt-in: run `uv run pre-commit install` once. Heavier checks (pytest, coverage,
+# mypy) stay in CI so commits remain quick.
+#
+# ruff config is shared from pyproject.toml ([tool.ruff]).
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.16
+    hooks:
+      - id: ruff-check       # lint, with autofix
+        args: [--fix]
+      - id: ruff-format    # format
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-merge-conflict
+      - id: check-added-large-files

@@ -22,11 +22,9 @@ class ProxyAgent(Protocol):
         """A session id to start a fresh session with, or None to let the
         backend choose one that aGiT will discover afterwards."""
 
-    def spawn_command(self, repo: Path, *, session_id: str | None, resume: bool) -> list[str]:
-        ...
+    def spawn_command(self, repo: Path, *, session_id: str | None, resume: bool) -> list[str]: ...
 
-    def session_belongs_to_repo(self, repo: Path, session_id: str) -> bool:
-        ...
+    def session_belongs_to_repo(self, repo: Path, session_id: str) -> bool: ...
 
     def ensure_resumable(self, repo: Path, session_id: str) -> bool:
         """Make sure spawning the resume command in ``repo`` (as cwd) will find
@@ -43,14 +41,12 @@ class ProxyAgent(Protocol):
         or None if it doesn't record one. Used to detect a resume that drifted the
         cwd away from the worktree it was launched in."""
 
-    def latest_session_id(self, repo: Path) -> str | None:
-        ...
+    def latest_session_id(self, repo: Path) -> str | None: ...
 
     def list_sessions(self, repo: Path) -> list[SessionRef]:
         """Every session recorded for this repository, for listing/switching."""
 
-    def export_session(self, repo: Path, session_id: str) -> ExportedSession | None:
-        ...
+    def export_session(self, repo: Path, session_id: str) -> ExportedSession | None: ...
 
     def is_event_blob(self, content: str) -> bool:
         """Whether a trace entry is a raw backend event dump that should be

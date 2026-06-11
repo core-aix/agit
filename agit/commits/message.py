@@ -47,7 +47,9 @@ def build_agent_commit_message(
     trace_turn_limit: int = 5,
     session_name: str | None = None,
 ) -> str:
-    subject_prompt, full_subject = _subject_parts(_mask_secrets(latest_prompt), width=MAX_SUBJECT_WIDTH - len(AGENT_SUBJECT_PREFIX))
+    subject_prompt, full_subject = _subject_parts(
+        _mask_secrets(latest_prompt), width=MAX_SUBJECT_WIDTH - len(AGENT_SUBJECT_PREFIX)
+    )
     lines = [f"{AGENT_SUBJECT_PREFIX}{subject_prompt}"]
     if full_subject:
         # The truncated subject flows straight into its full text with no blank
@@ -127,7 +129,15 @@ def build_user_commit_message(
         # Extended subject continues directly under the subject line (no blank).
         lines.extend(_body_lines(full_subject))
     lines.append("")
-    lines.extend(["# aGiT Metadata", "commit_type: user", "backend: agit", f"agit_session_id: {agit_session_id}", f"agit_version: {__version__}"])
+    lines.extend(
+        [
+            "# aGiT Metadata",
+            "commit_type: user",
+            "backend: agit",
+            f"agit_session_id: {agit_session_id}",
+            f"agit_version: {__version__}",
+        ]
+    )
     return "\n".join(lines).rstrip() + "\n"
 
 

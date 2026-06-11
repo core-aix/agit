@@ -39,6 +39,7 @@ def _make_session(main, name, base, *, backend="test", turn=1):
 
 # --- naming (pure) ---
 
+
 def test_naming_helpers(tmp_path):
     repo = _init_repo(tmp_path)
     wm = WorktreeManager(repo)
@@ -51,6 +52,7 @@ def test_naming_helpers(tmp_path):
 
 
 # --- worktree lifecycle against real git ---
+
 
 def test_create_list_remove_worktree(tmp_path):
     repo = _init_repo(tmp_path)
@@ -84,6 +86,7 @@ def test_turn_branches_coexist_without_df_conflict(tmp_path):
 
 
 # --- merge behaviour against real git ---
+
 
 def test_merge_clean(tmp_path):
     repo = _init_repo(tmp_path)
@@ -259,7 +262,6 @@ def test_worktree_has_pending_work(tmp_path):
 
 
 def test_reconcile_integrates_and_deletes_stale_worktrees(tmp_path):
-    from agit.proxy import ProxyRunner
 
     main = _init_repo(tmp_path)
     base = main.current_branch()
@@ -294,7 +296,6 @@ def test_reconcile_integrates_and_deletes_stale_worktrees(tmp_path):
 
 
 def test_reconcile_flags_conflicting_stale_worktree(tmp_path):
-    from agit.proxy import ProxyRunner
 
     main = _init_repo(tmp_path)  # f.txt == "base\n"
     base = main.current_branch()
@@ -641,7 +642,7 @@ def test_remove_worktree_on_exit_drops_merged_extra_session(tmp_path):
     runner._primary_worktree_name = "session-1"  # this is an extra session
     runner.child_pid = None
     runner.master_fd = None
-    runner._integrate_session_on_exit()   # integrate -> detached at base, merged
+    runner._integrate_session_on_exit()  # integrate -> detached at base, merged
     runner._remove_worktree_on_exit()
 
     # A fully-merged *extra* session's worktree directory is gone on exit.
@@ -691,7 +692,7 @@ def test_remove_worktree_on_exit_keeps_unintegrated_session(tmp_path):
     runner.child_pid = None
     runner.master_fd = None
     runner._exiting = True
-    runner._integrate_session_on_exit()   # conflict -> aborts, leaves the work
+    runner._integrate_session_on_exit()  # conflict -> aborts, leaves the work
     runner._remove_worktree_on_exit()
 
     # A session that could not be integrated keeps its worktree for next startup.
@@ -824,8 +825,6 @@ def test_ensure_worktree_alive_path_exists_returns_early(tmp_path):
 
 def test_ensure_worktree_alive_recreates_worktree(tmp_path):
     from agit.backends.proxy_agents import make_proxy_agent
-    from agit.proxy import ProxyRunner
-    from agit.proxy.session import Session
 
     main = _init_repo(tmp_path)
     wm = WorktreeManager(main)
@@ -881,8 +880,6 @@ def test_ensure_worktree_alive_recreates_worktree(tmp_path):
 
 def test_ensure_worktree_alive_falls_back_on_open_session_failure(tmp_path):
     from agit.backends.proxy_agents import make_proxy_agent
-    from agit.proxy import ProxyRunner
-    from agit.proxy.session import Session
 
     main = _init_repo(tmp_path)
     wm = WorktreeManager(main)
@@ -939,6 +936,7 @@ def test_ensure_worktree_alive_falls_back_on_open_session_failure(tmp_path):
     assert runner.repo is runner.base_repo
     assert any("base repo" in m for m in messages), f"messages={messages}"
 
+
 def test_finalize_agent_merge_refuses_unresolved_conflict_markers(tmp_path):
     # Issue #13: `add_all()` used to run before the marker check, which cleared
     # the unmerged index state and made `git diff --check` (worktree vs index)
@@ -985,6 +983,7 @@ def test_has_conflict_markers_sees_staged_markers(tmp_path):
     repo.add_all()
     assert repo.has_conflict_markers() is True
 
+
 def test_ensure_turn_branch_never_resets_existing_branch_with_work(tmp_path):
     # Issue #16: recovery paths restart the turn counter (a recreated worktree
     # is detached at base, so _turn_from_branch yields 0) while an earlier turn
@@ -1022,6 +1021,7 @@ def test_switch_create_refuses_to_reset_existing_branch(tmp_path):
         repo.switch("topic", create=True)  # -c, not -C: never resets
     # The branch is untouched and still where it was created.
     assert repo.rev_parse("topic") != repo.rev_parse("HEAD")
+
 
 def test_agent_made_commits_integrate_when_idle(tmp_path):
     # The agent ran `git commit` itself, leaving the worktree clean — the

@@ -1,7 +1,13 @@
 import json
 
 from agit.transcripts import claude as claude_session
-from agit.transcripts.claude import export_session, latest_session_id, list_sessions, parse_rows, session_belongs_to_repo
+from agit.transcripts.claude import (
+    export_session,
+    latest_session_id,
+    list_sessions,
+    parse_rows,
+    session_belongs_to_repo,
+)
 
 
 def test_session_cwd_reads_last_recorded_cwd(monkeypatch, tmp_path):
@@ -11,11 +17,11 @@ def test_session_cwd_reads_last_recorded_cwd(monkeypatch, tmp_path):
     proj.mkdir(parents=True)
     (proj / "s.jsonl").write_text(
         '{"type":"user","cwd":"/old/dir"}\n'
-        '{"type":"assistant"}\n'                       # a line without cwd is skipped
+        '{"type":"assistant"}\n'  # a line without cwd is skipped
         '{"type":"user","cwd":"/new/dir"}\n',
         encoding="utf-8",
     )
-    assert claude_session.session_cwd("s") == "/new/dir"   # last cwd wins
+    assert claude_session.session_cwd("s") == "/new/dir"  # last cwd wins
     assert claude_session.session_cwd("missing") is None
 
 
@@ -91,11 +97,18 @@ def _assistant(msg_id, text, *, model="claude-opus-4-8", usage=None, content=Non
 def test_parse_rows_groups_turns_with_final_response_and_tokens():
     rows = [
         _user("u1", "first prompt"),
-        _assistant("m0", "", content=[{"type": "thinking", "thinking": "..."}], usage={"input_tokens": 10, "output_tokens": 5}),
+        _assistant(
+            "m0", "", content=[{"type": "thinking", "thinking": "..."}], usage={"input_tokens": 10, "output_tokens": 5}
+        ),
         _assistant(
             "m1",
             "final answer one",
-            usage={"input_tokens": 20, "output_tokens": 100, "cache_read_input_tokens": 8000, "cache_creation_input_tokens": 200},
+            usage={
+                "input_tokens": 20,
+                "output_tokens": 100,
+                "cache_read_input_tokens": 8000,
+                "cache_creation_input_tokens": 200,
+            },
         ),
         _user("u2", "second prompt"),
         _assistant("m2", "final answer two", usage={"input_tokens": 30, "output_tokens": 50}),
@@ -131,7 +144,10 @@ def test_parse_rows_marks_turn_incomplete_while_last_message_is_tool_use():
         _assistant(
             "m1",
             "Let me add a sanitizer.",
-            content=[{"type": "text", "text": "Let me add a sanitizer."}, {"type": "tool_use", "id": "t1", "name": "Edit", "input": {}}],
+            content=[
+                {"type": "text", "text": "Let me add a sanitizer."},
+                {"type": "tool_use", "id": "t1", "name": "Edit", "input": {}},
+            ],
             stop_reason="tool_use",
         ),
     ]
@@ -145,7 +161,15 @@ def test_parse_rows_marks_turn_incomplete_while_last_message_is_tool_use():
 def test_parse_rows_marks_turn_complete_when_last_message_ends_the_turn():
     rows = [
         _user("u1", "fix the bug and add tests"),
-        _assistant("m1", "Working on it.", content=[{"type": "text", "text": "Working on it."}, {"type": "tool_use", "id": "t1", "name": "Edit", "input": {}}], stop_reason="tool_use"),
+        _assistant(
+            "m1",
+            "Working on it.",
+            content=[
+                {"type": "text", "text": "Working on it."},
+                {"type": "tool_use", "id": "t1", "name": "Edit", "input": {}},
+            ],
+            stop_reason="tool_use",
+        ),
         _assistant("m2", "Done — code and tests are in.", stop_reason="end_turn"),
     ]
 
@@ -167,11 +191,19 @@ def test_parse_rows_excludes_meta_sidechain_tool_results_and_commands():
         _user("c", "<local-command-caveat>noise</local-command-caveat>", isMeta=True),
         _user("s", "<command-name>/model</command-name>"),
         _user("side", "subagent prompt", isSidechain=True),
-        {"type": "user", "uuid": "tr", "message": {"role": "user", "content": [{"type": "tool_result", "content": "x"}]}},
+        {
+            "type": "user",
+            "uuid": "tr",
+            "message": {"role": "user", "content": [{"type": "tool_result", "content": "x"}]},
+        },
         _user("real", "the real prompt"),
         _assistant("m1", "response"),
         # sidechain assistant output must not be attributed to the turn
-        {"type": "assistant", "isSidechain": True, "message": {"id": "sx", "content": [{"type": "text", "text": "side"}], "usage": {}}},
+        {
+            "type": "assistant",
+            "isSidechain": True,
+            "message": {"id": "sx", "content": [{"type": "text", "text": "side"}], "usage": {}},
+        },
     ]
 
     session = parse_rows("sess-2", rows)
@@ -377,7 +409,9 @@ def test_parse_rows_interrupt_marker_completes_turn_and_is_not_a_prompt():
     # not become a turn of its own or pollute the subject/trace.
     rows = [
         _user("u1", "fix the parser"),
-        _assistant("m1", "Let me look at the file.", usage={"input_tokens": 5, "output_tokens": 5}, stop_reason="tool_use"),
+        _assistant(
+            "m1", "Let me look at the file.", usage={"input_tokens": 5, "output_tokens": 5}, stop_reason="tool_use"
+        ),
         _user("int-1", "[Request interrupted by user]"),
     ]
 
@@ -419,5 +453,5 @@ def test_parse_rows_superseded_tool_use_turn_is_complete():
 
     session = parse_rows("sess-1", rows)
 
-    assert session.turns[0].complete is True   # superseded: finished for good
+    assert session.turns[0].complete is True  # superseded: finished for good
     assert session.turns[1].complete is False  # dangling tool_use: still mid-flight

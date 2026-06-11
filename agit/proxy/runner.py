@@ -10,9 +10,7 @@ import subprocess
 import sys
 import termios
 import threading
-import textwrap
 import time
-import tty
 
 import pyte
 
@@ -27,7 +25,7 @@ except ImportError:  # pragma: no cover - exercised only without optional depend
 from agit.commits import AgitActions
 from agit.backends.setup import BackendUnavailable, backend_installed, ensure_installed_backend, install_hint
 from agit.backends.proxy_agents import available_backends, make_proxy_agent
-from agit.commits import build_agent_merge_message, build_user_commit_message
+from agit.commits import build_user_commit_message
 from agit.git import GitRepo
 from agit.config import GlobalConfig
 from agit.git import RepoLock, already_running_message
@@ -44,17 +42,14 @@ from agit.proxy.session import Session
 # renderer.py (P1). Re-import them here so call sites in this file are unchanged
 # and the agit.proxy shim can export them under their original names.
 from agit.proxy.renderer import (
-    _PALETTE_256,
-    _REVERSE_256,
-    _build_palette_256,
-    _nearest_256,
-    _nearest_ansi16,
     detect_color_mode,
     _BackgroundColorEraseScreen,
     ScreenRenderer,
 )
+
 # TerminalHost lives in terminal.py (P1).
 from agit.proxy.terminal import TerminalHost
+
 # Modal state-machines (P6 Stage 2): PromptModal and SelectModal encode the
 # byte-handling logic for free-text and selection popups.
 from agit.proxy.modal import PromptModal, SelectModal, _escape_sequence_complete
@@ -111,12 +106,20 @@ class RepoChangeHandler(FileSystemEventHandler):
         self.changed.set()
 
 
-
 class ProxyInput:
     # Order matters (shown in the palette). Only "session" starts with "s" so
     # that pressing s+Enter jumps straight to the session picker. Git-specific
     # commands are grouped under a "git-" prefix.
-    COMMANDS = ["session", "agent-backend", "git-base-branch", "git-status", "git-stage", "git-unstaged", "git-user-commit", "exit"]
+    COMMANDS = [
+        "session",
+        "agent-backend",
+        "git-base-branch",
+        "git-status",
+        "git-stage",
+        "git-unstaged",
+        "git-user-commit",
+        "exit",
+    ]
 
     def __init__(self, menu_key: bytes = b"\x07") -> None:
         self.capturing = False
@@ -256,7 +259,9 @@ class ProxyRunner:
         self.worktree = None  # set when this session runs in a git worktree
         self.global_config = _global_config if _global_config is not None else GlobalConfig()
         self._apply_timings(self.global_config.timings)
-        self.state = _state if _state is not None else AgitState(repo.repo, default_backend=self.global_config.default_backend)
+        self.state = (
+            _state if _state is not None else AgitState(repo.repo, default_backend=self.global_config.default_backend)
+        )
         if backend and backend != self.state.backend:
             self.state.remember_backend_session()
             self.state.backend = backend
@@ -354,8 +359,7 @@ class ProxyRunner:
         # IntegrationService: encapsulates all branch/merge/integration policy.
         # base_branch is set at startup (run()) and updated by _perform_base_switch.
         self._integration: IntegrationService = (
-            _integration if _integration is not None
-            else IntegrationService(repo, None, menu_label=self._menu_label())
+            _integration if _integration is not None else IntegrationService(repo, None, menu_label=self._menu_label())
         )
         self._base_branch: str | None = None  # integration target branch (set at startup)
         self._integration_paused = False  # set when the base repo is switched off _base_branch out-of-band
@@ -394,8 +398,11 @@ class ProxyRunner:
         # interactive glitch (e.g. Claude's native session picker) can be replayed
         # byte-for-byte; it implies debug logging too.
         self.raw_capture = os.environ.get("AGIT_DEBUG_RAW", "").strip().lower() in {"1", "true", "yes"}
-        self.debug_proxy = (verbose or self.raw_capture
-                            or os.environ.get("AGIT_DEBUG_PROXY", "").strip().lower() in {"1", "true", "yes"})
+        self.debug_proxy = (
+            verbose
+            or self.raw_capture
+            or os.environ.get("AGIT_DEBUG_PROXY", "").strip().lower() in {"1", "true", "yes"}
+        )
         # One diagnostic-log file per run, in the base repo's .agit/ (survives the
         # per-run worktree teardown).
         self._diag_run = time.strftime("%Y%m%d-%H%M%S")
@@ -491,63 +498,65 @@ class ProxyRunner:
         instance = cls.__new__(cls)
 
         # --- runner-level defaults (fields that live on the runner, not the session) ---
-        instance.__dict__.update({
-            "verbose": False,
-            "input": ProxyInput(),
-            "running": True,
-            "old_attrs": None,
-            "original_sigwinch": None,
-            "original_signal_handlers": {},
-            "rows": 24,
-            "cols": 80,
-            "_last_render": 0.0,
-            "_render_pending": False,
-            "_in_sync_update": False,
-            "_sync_since": 0.0,
-            "message": None,
-            "message_until": 0.0,
-            "_message_sticky": False,
-            "_last_agent_commit_id": None,
-            "_awaited_followups": [],
-            "host_fg_value": None,
-            "host_bg_value": None,
-            "host_palette": {},
-            "host_da": None,
-            "color_mode": "truecolor",
-            "management_lock": None,
-            "base_repo": None,
-            "_base_branch": None,
-            "_integration_paused": False,
-            "_base_drift_check_at": 0.0,
-            "_pending_enter_at": None,
-            "_pending_enter_fd": None,
-            "_base_advanced": False,
-            "_last_base_head": None,
-            "_base_edits_declined_status": None,
-            "_popup_exit_pending": False,
-            "_popup_exit_force": False,
-            "_reap_pids": [],
-            "_idle_integrate_at": 0.0,
-            "_base_poll_at": 0.0,
-            "_warned_backend_session": False,
-            "_user_declined": [],
-            "sessions": [],
-            "worktree_manager": None,
-            "raw_capture": False,
-            "debug_proxy": False,
-            "_diag_run": "test",
-            "_force_new_session": False,
-            "_primary_worktree_name": None,
-            "global_config": None,
-            # Lazily-set fields that getattr() guards in production methods:
-            "_monitor_base_edits": False,
-            "_base_check_at": 0.0,
-            "_cwd_drift_checked": False,
-            "_cwd_check_at": 0.0,
-            "_relaunch_times": [],
-            "_exiting": False,
-            "_finalized_on_exit": False,
-        })
+        instance.__dict__.update(
+            {
+                "verbose": False,
+                "input": ProxyInput(),
+                "running": True,
+                "old_attrs": None,
+                "original_sigwinch": None,
+                "original_signal_handlers": {},
+                "rows": 24,
+                "cols": 80,
+                "_last_render": 0.0,
+                "_render_pending": False,
+                "_in_sync_update": False,
+                "_sync_since": 0.0,
+                "message": None,
+                "message_until": 0.0,
+                "_message_sticky": False,
+                "_last_agent_commit_id": None,
+                "_awaited_followups": [],
+                "host_fg_value": None,
+                "host_bg_value": None,
+                "host_palette": {},
+                "host_da": None,
+                "color_mode": "truecolor",
+                "management_lock": None,
+                "base_repo": None,
+                "_base_branch": None,
+                "_integration_paused": False,
+                "_base_drift_check_at": 0.0,
+                "_pending_enter_at": None,
+                "_pending_enter_fd": None,
+                "_base_advanced": False,
+                "_last_base_head": None,
+                "_base_edits_declined_status": None,
+                "_popup_exit_pending": False,
+                "_popup_exit_force": False,
+                "_reap_pids": [],
+                "_idle_integrate_at": 0.0,
+                "_base_poll_at": 0.0,
+                "_warned_backend_session": False,
+                "_user_declined": [],
+                "sessions": [],
+                "worktree_manager": None,
+                "raw_capture": False,
+                "debug_proxy": False,
+                "_diag_run": "test",
+                "_force_new_session": False,
+                "_primary_worktree_name": None,
+                "global_config": None,
+                # Lazily-set fields that getattr() guards in production methods:
+                "_monitor_base_edits": False,
+                "_base_check_at": 0.0,
+                "_cwd_drift_checked": False,
+                "_cwd_check_at": 0.0,
+                "_relaunch_times": [],
+                "_exiting": False,
+                "_finalized_on_exit": False,
+            }
+        )
         # Apply timing class-constant defaults (so CHILD_IDLE_SECONDS etc. resolve).
         # These stay as class attributes; no instance-level override needed unless
         # the test provides one via **overrides below.
@@ -572,8 +581,7 @@ class ProxyRunner:
             if isinstance(descriptor, property):
                 if descriptor.fset is None:
                     raise TypeError(
-                        f"for_testing() cannot set {key!r}: it is a read-only "
-                        f"property derived from runner state"
+                        f"for_testing() cannot set {key!r}: it is a read-only property derived from runner state"
                     )
                 setattr(instance, key, value)
             else:
@@ -934,8 +942,9 @@ class ProxyRunner:
         # its worktree at the same path so the backend finds its transcript).
         record = self._recall_backend_session(name)
         if record and record.get("id"):
-            self._new_session(record.get("worktree") or self._next_session_name(),
-                              backend=name, resume_session_id=record["id"])
+            self._new_session(
+                record.get("worktree") or self._next_session_name(), backend=name, resume_session_id=record["id"]
+            )
             return
         # Otherwise start fresh, confirming the session name first.
         session_name = self._prompt_session_name(f"New {name} session", default=self._next_session_name())
@@ -1118,8 +1127,7 @@ class ProxyRunner:
         # no PTY fds to drain, and the simple cooked readline is the right tool.
         # Do NOT convert this to a modal; modals require the reactor to be live.
         default = self._first_free_session_name()
-        print("Continuing a conversation that has no name yet."
-              if continuing else "Starting a new session.")
+        print("Continuing a conversation that has no name yet." if continuing else "Starting a new session.")
         try:
             taken = {info.name for info in self._worktrees().list()}
         except Exception:
@@ -1155,10 +1163,10 @@ class ProxyRunner:
             self._debug(f"align to base failed: {error!r}")
             return
         if outcome.startswith("merged:"):
-            branch = outcome[len("merged:"):]
+            branch = outcome[len("merged:") :]
             self._debug(f"merged base '{self._base_branch}' into session branch {branch}")
         elif outcome.startswith("conflict:"):
-            branch = outcome[len("conflict:"):]
+            branch = outcome[len("conflict:") :]
             self._debug(f"base '{self._base_branch}' conflicts with {branch}; left for integration")
         elif outcome == "repointed":
             self._debug(f"re-pointed session worktree to current base '{self._base_branch}'")
@@ -1574,8 +1582,10 @@ class ProxyRunner:
             self._set_message("No other branches to switch the base to.")
             self._render()
             return
-        target = arg.strip() if arg.strip() in candidates else self._select_popup(
-            f"Switch base from '{self._base_branch}' to:", candidates
+        target = (
+            arg.strip()
+            if arg.strip() in candidates
+            else self._select_popup(f"Switch base from '{self._base_branch}' to:", candidates)
         )
         if not target:
             self._set_message("Cancelled.")
@@ -1845,9 +1855,7 @@ class ProxyRunner:
             self._set_message("No past conversations found to resume.")
             self._render()
             return
-        live_ids = {
-            getattr(getattr(s, "state", None), "backend_session_id", None) for s in self.sessions
-        }
+        live_ids = {getattr(getattr(s, "state", None), "backend_session_id", None) for s in self.sessions}
         names = self._agit_named_sessions()
         options: list[str] = []
         for ref in sessions:
@@ -1878,10 +1886,7 @@ class ProxyRunner:
 
     def _live_session_name_taken(self, name: str) -> bool:
         sanitized = _sanitize_name(name)
-        return any(
-            _sanitize_name(self._session_name(index)) == sanitized
-            for index in range(len(self.sessions))
-        )
+        return any(_sanitize_name(self._session_name(index)) == sanitized for index in range(len(self.sessions)))
 
     def _format_age(self, updated: float) -> str:
         delta = max(0, int(time.time() - (updated or 0)))
@@ -2286,7 +2291,9 @@ class ProxyRunner:
         if Observer is None:
             return
         observer = Observer()
-        observer.schedule(RepoChangeHandler(self.repo.repo, self.file_change_event), str(self.repo.repo), recursive=True)
+        observer.schedule(
+            RepoChangeHandler(self.repo.repo, self.file_change_event), str(self.repo.repo), recursive=True
+        )
         observer.start()
         self.file_observer = observer
 
@@ -2482,7 +2489,9 @@ class ProxyRunner:
             if done:
                 exit_code = os.waitstatus_to_exitcode(status) if hasattr(os, "waitstatus_to_exitcode") else 0
                 sample = self.last_child_output_sample[-512:].decode(errors="replace").replace("\x1b", "\\x1b")
-                self._debug(f"child exited pid={self.child_pid} status={status} exit_code={exit_code} last_output={sample!r}")
+                self._debug(
+                    f"child exited pid={self.child_pid} status={status} exit_code={exit_code} last_output={sample!r}"
+                )
                 # Same handling as the master_fd-EOF path: switch away (multi
                 # session) or relaunch+resume (single) so Claude exiting its own
                 # picker on Esc doesn't take aGiT down. These two detectors race;
@@ -2585,11 +2594,25 @@ class ProxyRunner:
 
     def _feed_child_output(self, output: bytes) -> None:
         ScreenRenderer.feed(self, output, pyte_hostile_csi_re=_PYTE_HOSTILE_CSI_RE)
+
     def _sync_terminal_modes(self, output: bytes) -> None:
         # OpenCode enables mouse reporting on its PTY. Because aGiT renders the
         # screen itself, the host terminal never sees those mode switches unless
         # we mirror them explicitly.
-        for mode in (b"9", b"1000", b"1001", b"1002", b"1003", b"1004", b"1005", b"1006", b"1007", b"1015", b"1016", b"2004"):
+        for mode in (
+            b"9",
+            b"1000",
+            b"1001",
+            b"1002",
+            b"1003",
+            b"1004",
+            b"1005",
+            b"1006",
+            b"1007",
+            b"1015",
+            b"1016",
+            b"2004",
+        ):
             if b"\x1b[?" + mode + b"h" in output:
                 os.write(sys.stdout.fileno(), b"\x1b[?" + mode + b"h")
             if b"\x1b[?" + mode + b"l" in output:
@@ -2614,8 +2637,10 @@ class ProxyRunner:
         # here because no PTY children are running yet and no reactor iteration
         # is live.  Do NOT convert to a modal — there is nothing to drain yet.
         TerminalHost.detect_host_terminal(self, debug_fn=self._debug if self.debug_proxy else None)
+
     def _parse_host_terminal_responses(self, data: bytes) -> None:
         TerminalHost.parse_host_terminal_responses(self, data, debug_fn=self._debug if self.debug_proxy else None)
+
     def _answer_terminal_queries(self, output: bytes) -> None:
         if self.master_fd is None:
             return
@@ -2650,14 +2675,19 @@ class ProxyRunner:
 
     def _track_sync_update(self, output: bytes) -> None:
         ScreenRenderer.track_sync_update(self, output)
+
     def _sync_hold(self, now: float) -> bool:
         return ScreenRenderer.sync_hold(self, now, self.SYNC_MAX_HOLD)
+
     def _render_output(self) -> None:
         ScreenRenderer.render_output(self, self._render, self.RENDER_MIN_INTERVAL, self.SYNC_MAX_HOLD)
+
     def _flush_pending_render(self) -> None:
         ScreenRenderer.flush_pending_render(self, self._render, self.RENDER_MIN_INTERVAL, self.SYNC_MAX_HOLD)
+
     def _cursor_sequence(self) -> str:
         return ScreenRenderer.cursor_sequence(self, self.rows, self.cols, self.scroll_back)
+
     def _render(self) -> None:
         if self.screen is None:
             return
@@ -2676,20 +2706,29 @@ class ProxyRunner:
             message_sticky=self._message_sticky,
             message_until=self.message_until,
         )
+
     def _append_command_palette(self, parts: list[str]) -> None:
         ScreenRenderer.append_command_palette(
-            self, parts,
-            rows=self.rows, cols=self.cols,
+            self,
+            parts,
+            rows=self.rows,
+            cols=self.cols,
             input_text=self.input.text(),
             input_matches=self.input.matches(),
             input_selected=self.input.selected(),
         )
+
     def _append_message_popup(self, parts: list[str], message: str) -> None:
         ScreenRenderer.append_message_popup(self, parts, message, rows=self.rows, cols=self.cols)
-    def _append_box(self, parts: list[str], row: int, col: int, width: int, lines: list[str], highlight: str | None = None) -> None:
+
+    def _append_box(
+        self, parts: list[str], row: int, col: int, width: int, lines: list[str], highlight: str | None = None
+    ) -> None:
         ScreenRenderer.append_box(self, parts, row, col, width, lines, highlight, rows=self.rows)
+
     def _render_line(self, cells, sel: tuple[int, int] | None = None) -> str:
         return ScreenRenderer.render_line(self, cells, sel, cols=self.cols)
+
     def _hold_incomplete_tail(self, data: bytes) -> tuple[bytes, bytes]:
         # If the read ends mid escape-sequence (e.g. a mouse report split across
         # reads), hold the trailing partial so it is completed on the next read
@@ -2741,8 +2780,12 @@ class ProxyRunner:
 
     def _selection_ranges(self) -> dict[int, tuple[int, int]]:
         return ScreenRenderer.selection_ranges(self, self.cols)
+
     def _copy_selection(self) -> None:
-        ScreenRenderer.copy_selection(self, self.rows, self.cols, self._copy_to_clipboard, lambda msg, **kw: self._set_message(msg, **kw))
+        ScreenRenderer.copy_selection(
+            self, self.rows, self.cols, self._copy_to_clipboard, lambda msg, **kw: self._set_message(msg, **kw)
+        )
+
     def _copy_to_clipboard(self, text: str) -> None:
         payload = text.encode("utf-8", errors="replace")
         if shutil.which("pbcopy"):
@@ -2760,14 +2803,19 @@ class ProxyRunner:
 
     def _history_len(self) -> int:
         return ScreenRenderer.history_len(self)
+
     def _scroll(self, delta: int) -> None:
         ScreenRenderer.scroll(self, delta, self._render)
+
     def _visible_lines(self) -> list:
         return ScreenRenderer.visible_lines(self, self.rows)
+
     def _cell_sgr(self, cell) -> str:
         return ScreenRenderer.cell_sgr(self, cell)
+
     def _color_code(self, color: str, *, foreground: bool) -> str | None:
         return ScreenRenderer.color_code(self, color, foreground=foreground)
+
     def _hex_color_code(self, color: str, *, foreground: bool) -> str:
         return ScreenRenderer.hex_color_code(self, color, foreground=foreground)
 
@@ -2803,8 +2851,18 @@ class ProxyRunner:
     def append_box(self, parts, row, col, width, lines, highlight=None, *, rows: int) -> None:
         ScreenRenderer.append_box(self, parts, row, col, width, lines, highlight, rows=rows)
 
-    def append_command_palette(self, parts, *, rows: int, cols: int, input_text: str, input_matches, input_selected) -> None:
-        ScreenRenderer.append_command_palette(self, parts, rows=rows, cols=cols, input_text=input_text, input_matches=input_matches, input_selected=input_selected)
+    def append_command_palette(
+        self, parts, *, rows: int, cols: int, input_text: str, input_matches, input_selected
+    ) -> None:
+        ScreenRenderer.append_command_palette(
+            self,
+            parts,
+            rows=rows,
+            cols=cols,
+            input_text=input_text,
+            input_matches=input_matches,
+            input_selected=input_selected,
+        )
 
     def append_message_popup(self, parts, message: str, *, rows: int, cols: int) -> None:
         ScreenRenderer.append_message_popup(self, parts, message, rows=rows, cols=cols)
@@ -2866,6 +2924,7 @@ class ProxyRunner:
             short_session_fn=_short_session,
             menu_label=self._menu_label(),
         )
+
     def _render_status(self, text: str) -> None:
         prompt = text.replace("\r", "").replace("\n", "")
         line = f" aGiT> {prompt}"[: self.cols].ljust(self.cols)
@@ -2873,8 +2932,10 @@ class ProxyRunner:
 
     def _enter_host_screen(self) -> None:
         TerminalHost.enter_host_screen(self)
+
     def _enable_host_mouse(self) -> None:
         TerminalHost.enable_host_mouse(self)
+
     def _run_command(self, command: str) -> None:
         # aGiT commands in proxy mode are triggered via Ctrl-G and are plain
         # names; ":" is not a command trigger here (it is forwarded to the
@@ -3048,7 +3109,9 @@ class ProxyRunner:
         state.clear_trace()
         return True
 
-    def _review_untracked_popup(self, *, include_declined: bool, repo: GitRepo | None = None, state: AgitState | None = None) -> str:
+    def _review_untracked_popup(
+        self, *, include_declined: bool, repo: GitRepo | None = None, state: AgitState | None = None
+    ) -> str:
         repo = repo or self.repo
         state = state or self.state
         self._prune_declined_untracked(repo, state)
@@ -3105,8 +3168,11 @@ class ProxyRunner:
         if answer in {"a", "all"}:
             selected = list(ordered)
         else:
-            selected = [ordered[int(token) - 1] for token in answer.replace(",", " ").split()
-                        if token.isdigit() and 1 <= int(token) <= len(ordered)]
+            selected = [
+                ordered[int(token) - 1]
+                for token in answer.replace(",", " ").split()
+                if token.isdigit() and 1 <= int(token) <= len(ordered)
+            ]
         if not selected:
             return "No valid selection; nothing staged."
         return self._commit_user_files(selected, state)
@@ -3123,8 +3189,18 @@ class ProxyRunner:
         self.base_repo.commit(build_user_commit_message(message=message.strip(), agit_session_id=state.session_id))
         return f"Committed {len(paths)} file(s) to {self._base_branch}."
 
-    def _create_agent_commit_from_turns_popup(self, *, turns, backend: str, backend_session_id: str | None, model: str | None, quiet: bool, prompt_untracked: bool = True) -> bool:
+    def _create_agent_commit_from_turns_popup(
+        self,
+        *,
+        turns,
+        backend: str,
+        backend_session_id: str | None,
+        model: str | None,
+        quiet: bool,
+        prompt_untracked: bool = True,
+    ) -> bool:
         if prompt_untracked:
+
             def stage_untracked_fn(repo, state):
                 self._review_untracked_popup(include_declined=False)
         else:
@@ -3249,10 +3325,14 @@ class ProxyRunner:
         try:
             if self.agent_parse_thread and self.agent_parse_thread.is_alive():
                 self.agent_parse_thread.join(timeout=20)
-            self._finish_agent_parse_if_ready(quiet=True, prompt_untracked=False, integrate=False, require_complete=False)
+            self._finish_agent_parse_if_ready(
+                quiet=True, prompt_untracked=False, integrate=False, require_complete=False
+            )
             if self._start_agent_parse() and self.agent_parse_thread:
                 self.agent_parse_thread.join(timeout=20)
-            self._finish_agent_parse_if_ready(quiet=True, prompt_untracked=False, integrate=False, require_complete=False)
+            self._finish_agent_parse_if_ready(
+                quiet=True, prompt_untracked=False, integrate=False, require_complete=False
+            )
         except Exception as error:  # never block on a commit failure
             self._debug(f"sync commit failed: {error!r}")
 
@@ -3323,7 +3403,7 @@ class ProxyRunner:
         # loop can wait on it once it dies, instead of leaving a zombie for the
         # rest of the run. Host-level (shared across sessions), not swapped.
         if pid:
-                self._reap_pids.append(pid)
+            self._reap_pids.append(pid)
 
     def _reap_stopped_children(self) -> None:
         pids = self._reap_pids
@@ -3385,7 +3465,9 @@ class ProxyRunner:
                 # branch) rather than risk discarding unmerged work.
                 self.base_repo.rev_parse(self._base_branch)
                 if self.base_repo.log_range(self._base_branch, branch):
-                    self._debug(f"keeping worktree '{info.name}' on exit: '{branch}' still ahead of {self._base_branch}")
+                    self._debug(
+                        f"keeping worktree '{info.name}' on exit: '{branch}' still ahead of {self._base_branch}"
+                    )
                     return  # commits still ahead of base → unintegrated; keep it
         except Exception as error:
             self._debug(f"keeping worktree '{info.name}' on exit: {error!r}")
@@ -3660,7 +3742,14 @@ class ProxyRunner:
             debug_fn=self._debug,
         )
 
-    def _finish_agent_parse_if_ready(self, *, quiet: bool, prompt_untracked: bool | None = None, integrate: bool = True, require_complete: bool = True) -> bool | None:
+    def _finish_agent_parse_if_ready(
+        self,
+        *,
+        quiet: bool,
+        prompt_untracked: bool | None = None,
+        integrate: bool = True,
+        require_complete: bool = True,
+    ) -> bool | None:
         if prompt_untracked is None:
             # Worktree sessions are isolated sandboxes, so agent commits there
             # auto-stage everything; only the main working tree prompts.
@@ -3734,7 +3823,10 @@ class ProxyRunner:
             if self.verbose:
                 self._render_status(f"git changes found; parsing {self.backend.name} session")
             return
-        if now - self.last_status_change < self.FILE_STABLE_SECONDS or now - self.last_child_output < self.CHILD_IDLE_SECONDS:
+        if (
+            now - self.last_status_change < self.FILE_STABLE_SECONDS
+            or now - self.last_child_output < self.CHILD_IDLE_SECONDS
+        ):
             if self.verbose:
                 self._render_status(f"git changes found; waiting for {self.backend.name} to become idle")
             return
@@ -3794,16 +3886,22 @@ class ProxyRunner:
 
     def _pause_child_ui(self) -> None:
         TerminalHost.pause_child_ui(self)
+
     def _resume_child_ui(self) -> None:
         TerminalHost.resume_child_ui(self, self._render)
+
     def _set_raw(self) -> None:
         TerminalHost.set_raw(self)
+
     def _set_cooked(self) -> None:
         TerminalHost.set_cooked(self)
+
     def _restore_terminal(self) -> None:
         TerminalHost.restore_terminal(self)
+
     def _disable_host_terminal_modes(self) -> None:
         TerminalHost.disable_host_terminal_modes(self)
+
     def _resize_child(self) -> None:
         if self.master_fd is None:
             return

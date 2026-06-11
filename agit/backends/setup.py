@@ -13,8 +13,7 @@ INSTALL_HINTS = {
         "  e.g. curl -fsSL https://claude.ai/install.sh | bash  (or: npm install -g @anthropic-ai/claude-code)"
     ),
     "opencode": (
-        "Install OpenCode: https://opencode.ai\n"
-        "  e.g. brew install sst/tap/opencode  (or: npm install -g opencode-ai)"
+        "Install OpenCode: https://opencode.ai\n  e.g. brew install sst/tap/opencode  (or: npm install -g opencode-ai)"
     ),
 }
 
@@ -110,7 +109,11 @@ def _wait_for_install(
     while True:
         output_fn(f"\n'{name}' is not installed.")
         output_fn(install_hint(name))
-        answer = input_fn("Press Enter after installing to continue, or type 'b' to choose a different backend: ").strip().lower()
+        answer = (
+            input_fn("Press Enter after installing to continue, or type 'b' to choose a different backend: ")
+            .strip()
+            .lower()
+        )
         if answer in {"b", "back", "c", "choose"}:
             return False
         if backend_installed(name):

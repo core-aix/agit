@@ -223,9 +223,7 @@ class CommitEngine:
             for turn in turns:
                 self.state.add_token_usage(turn.tokens)
 
-            subject_text = (
-                " / ".join(subject_prompts) if subject_prompts else f"{backend} changes"
-            )
+            subject_text = " / ".join(subject_prompts) if subject_prompts else f"{backend} changes"
 
         commit_sha = self.repo.commit(
             build_agent_commit_message(
@@ -318,24 +316,15 @@ class CommitEngine:
         if awaited and any(getattr(t, "interrupted", False) for t in all_turns):
             awaited = []
         if awaited:
-            seen = {
-                " ".join((t.user_prompt or "").split())
-                for t in exported_session.turns
-            }
+            seen = {" ".join((t.user_prompt or "").split()) for t in exported_session.turns}
             awaited = [p for p in awaited if p not in seen]
             if require_complete and awaited and agent_is_active_fn():
-                debug_fn(
-                    f"deferring agent commit: {len(awaited)} queued follow-up(s) "
-                    "not yet in transcript"
-                )
+                debug_fn(f"deferring agent commit: {len(awaited)} queued follow-up(s) not yet in transcript")
                 return None, awaited
             awaited = []  # committing now — drop cancelled queue entries
 
         if require_complete and all_turns and not all_turns[-1].complete:
-            debug_fn(
-                f"deferring agent commit: latest turn still in progress "
-                f"session_id={new_session_id}"
-            )
+            debug_fn(f"deferring agent commit: latest turn still in progress session_id={new_session_id}")
             return None, awaited
 
         complete_turns = [t for t in all_turns if t.final_response]
@@ -432,10 +421,7 @@ class CommitEngine:
                 exported = backend.export_session(repo.repo, session_id) if session_id else None
                 turn_count = len(exported.turns) if exported else 0
                 final_count = len([t for t in exported.turns if t.final_response]) if exported else 0
-                debug_fn(
-                    f"agent parse worker finished session_id={session_id} "
-                    f"turns={turn_count} finals={final_count}"
-                )
+                debug_fn(f"agent parse worker finished session_id={session_id} turns={turn_count} finals={final_count}")
                 result = (session_id, exported, last_message_id, state)
             finally:
                 with parse_lock:
@@ -446,9 +432,7 @@ class CommitEngine:
 
         session.last_parse_start = time.monotonic()
         debug_fn(f"agent parse started last_message_id={last_message_id}")
-        session.agent_parse_thread = threading.Thread(
-            target=worker, name="agit-session-parse", daemon=True
-        )
+        session.agent_parse_thread = threading.Thread(target=worker, name="agit-session-parse", daemon=True)
         session.agent_parse_thread.start()
         return True
 
