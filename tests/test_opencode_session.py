@@ -55,11 +55,23 @@ def test_parse_exported_session_groups_multiple_assistants_until_next_user():
             "messages": [
                 {"info": {"role": "user", "id": "u1"}, "parts": [{"type": "text", "text": "add timer"}]},
                 {
-                    "info": {"role": "assistant", "id": "a-tools", "parentID": "u1", "finish": "tool-calls", "tokens": {"total": 5}},
+                    "info": {
+                        "role": "assistant",
+                        "id": "a-tools",
+                        "parentID": "u1",
+                        "finish": "tool-calls",
+                        "tokens": {"total": 5},
+                    },
                     "parts": [{"type": "tool", "tool": "edit"}],
                 },
                 {
-                    "info": {"role": "assistant", "id": "a-final", "parentID": "u1", "finish": "stop", "tokens": {"total": 7, "input": 5, "output": 2}},
+                    "info": {
+                        "role": "assistant",
+                        "id": "a-final",
+                        "parentID": "u1",
+                        "finish": "stop",
+                        "tokens": {"total": 7, "input": 5, "output": 2},
+                    },
                     "parts": [{"type": "text", "text": "Added countdown timer."}],
                 },
             ],
@@ -80,12 +92,27 @@ def test_parse_exported_session_excludes_compaction_summary():
             "messages": [
                 {"info": {"role": "user", "id": "u1"}, "parts": [{"type": "text", "text": "do the work"}]},
                 {
-                    "info": {"role": "assistant", "id": "a1", "parentID": "u1", "finish": "stop", "tokens": {"total": 4, "output": 4}},
+                    "info": {
+                        "role": "assistant",
+                        "id": "a1",
+                        "parentID": "u1",
+                        "finish": "stop",
+                        "tokens": {"total": 4, "output": 4},
+                    },
                     "parts": [{"type": "text", "text": "real response"}],
                 },
                 {
                     # The compaction summary must not overwrite the turn's response.
-                    "info": {"role": "assistant", "id": "sum", "parentID": "u1", "mode": "compaction", "agent": "compaction", "summary": True, "finish": "stop", "tokens": {"total": 0}},
+                    "info": {
+                        "role": "assistant",
+                        "id": "sum",
+                        "parentID": "u1",
+                        "mode": "compaction",
+                        "agent": "compaction",
+                        "summary": True,
+                        "finish": "stop",
+                        "tokens": {"total": 0},
+                    },
                     "parts": [{"type": "text", "text": "This is a summary of the conversation so far..."}],
                 },
             ],
@@ -107,7 +134,10 @@ def test_parse_exported_session_counts_reasoning_part_tokens():
                 {
                     "info": {"role": "assistant", "id": "a1", "finish": "stop"},
                     "parts": [
-                        {"type": "reasoning", "tokens": {"input": 10, "output": 0, "reasoning": 6, "cache": {"read": 4}}},
+                        {
+                            "type": "reasoning",
+                            "tokens": {"input": 10, "output": 0, "reasoning": 6, "cache": {"read": 4}},
+                        },
                         {"type": "text", "text": "done", "tokens": {"input": 12, "output": 2, "reasoning": 0}},
                     ],
                 },
@@ -135,7 +165,10 @@ def test_parse_exported_session_extracts_final_text_from_event_blob():
             "info": {"id": "ses-1"},
             "messages": [
                 {"info": {"role": "user", "id": "u1"}, "parts": [{"type": "text", "text": "hi"}]},
-                {"info": {"role": "assistant", "id": "a1", "finish": "stop"}, "parts": [{"type": "text", "text": event_blob}]},
+                {
+                    "info": {"role": "assistant", "id": "a1", "finish": "stop"},
+                    "parts": [{"type": "text", "text": event_blob}],
+                },
             ],
         }
     )

@@ -7,7 +7,6 @@ copied), and default_session_fields() coverage moves to Session.bare().
 
 from types import SimpleNamespace
 
-from agit.proxy import ProxyRunner
 from agit.proxy.process import BackendProcess
 from agit.proxy.session import Session
 from proxy_helpers import make_runner

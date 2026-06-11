@@ -55,6 +55,7 @@ if TYPE_CHECKING:
 # Merge-context state machine
 # ---------------------------------------------------------------------------
 
+
 class MergePhase(Enum):
     """Lifecycle of an in-progress agent-assisted merge resolution.
 
@@ -122,13 +123,14 @@ class MergeContext:
 # ---------------------------------------------------------------------------
 
 INTEGRATED = "integrated"
-CONFLICT   = "conflict"
-SKIP       = "skip"
+CONFLICT = "conflict"
+SKIP = "skip"
 
 
 # ---------------------------------------------------------------------------
 # IntegrationService
 # ---------------------------------------------------------------------------
+
 
 class IntegrationService:
     """Stateless (except for ``base_repo`` / ``base_branch``) integration logic.
@@ -272,9 +274,7 @@ class IntegrationService:
         """
         current = self.base_repo.current_branch()
         if current != self.base_branch:
-            raise RuntimeError(
-                f"base repo is on '{current}', not the integration branch '{self.base_branch}'"
-            )
+            raise RuntimeError(f"base repo is on '{current}', not the integration branch '{self.base_branch}'")
         self.base_repo.merge_ff_only(source_branch)
         repo.switch_detach(self.base_branch)
         if repo.current_branch() != source_branch:
@@ -518,9 +518,7 @@ class IntegrationService:
             if repo is None or repo.merge_in_progress() or repo.has_changes():
                 return True
             branch = repo.current_branch()
-            return branch.startswith("agit/") and bool(
-                self.base_repo.log_range(self.base_branch, branch)
-            )
+            return branch.startswith("agit/") and bool(self.base_repo.log_range(self.base_branch, branch))
         except Exception:
             return True
 

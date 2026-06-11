@@ -45,6 +45,7 @@ class AgitActions:
         the same d041d10 semantics as the proxy path: accumulated only once the
         commit actually happens.
         """
+
         def stage_untracked_fn(repo, state):
             self.review_untracked(include_declined=False)
 

@@ -62,5 +62,4 @@ class AgentResult:
 class AgentBackend(Protocol):
     name: str
 
-    def run(self, prompt: str, *, model: str | None, session_id: str | None) -> AgentResult:
-        ...
+    def run(self, prompt: str, *, model: str | None, session_id: str | None) -> AgentResult: ...

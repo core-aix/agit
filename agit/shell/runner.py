@@ -22,7 +22,9 @@ BACKENDS = {
 
 
 class AgitShell:
-    def __init__(self, repo: GitRepo, *, verbose: bool = False, backend: str | None = None, new_session: bool = False) -> None:
+    def __init__(
+        self, repo: GitRepo, *, verbose: bool = False, backend: str | None = None, new_session: bool = False
+    ) -> None:
         self.repo = repo
         self.global_config = GlobalConfig()
         self.state = AgitState(repo.repo, default_backend=self.global_config.default_backend)

@@ -67,8 +67,16 @@ def test_timings_override_subset_from_config(tmp_path):
 def test_timings_ignore_invalid_values(tmp_path):
     path = tmp_path / "config.json"
     path.write_text(
-        json.dumps({"timings": {"base_poll_seconds": -5, "child_idle_seconds": "soon",
-                                "file_stable_seconds": True, "parse_cooldown_seconds": 0}})
+        json.dumps(
+            {
+                "timings": {
+                    "base_poll_seconds": -5,
+                    "child_idle_seconds": "soon",
+                    "file_stable_seconds": True,
+                    "parse_cooldown_seconds": 0,
+                }
+            }
+        )
     )
     timings = GlobalConfig(path).timings
     # Non-positive, wrong-type, and bool values all fall back to the defaults.
@@ -107,7 +115,12 @@ def test_claude_backend_parses_json_result():
             "result": "the answer",
             "session_id": "sess-xyz",
             "modelUsage": {"claude-opus-4-8": {"inputTokens": 1}},
-            "usage": {"input_tokens": 12, "output_tokens": 34, "cache_read_input_tokens": 100, "cache_creation_input_tokens": 5},
+            "usage": {
+                "input_tokens": 12,
+                "output_tokens": 34,
+                "cache_read_input_tokens": 100,
+                "cache_creation_input_tokens": 5,
+            },
         }
     )
     response, session_id, model, tokens = backend._parse_output(output)

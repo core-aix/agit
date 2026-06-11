@@ -42,7 +42,10 @@ def test_agent_commit_message_contains_trace_and_metadata():
 def test_commit_message_masks_secrets_in_subject_and_trace():
     message = build_agent_commit_message(
         latest_prompt="use api_key=sk-abc12345678901234567890",
-        trace=[{"role": "user", "content": "password=hunter2"}, {"role": "agent", "content": "token: ghp_abcdefghijklmnopqrstuvwxyz"}],
+        trace=[
+            {"role": "user", "content": "password=hunter2"},
+            {"role": "agent", "content": "token: ghp_abcdefghijklmnopqrstuvwxyz"},
+        ],
         backend="opencode",
         backend_session_id="ses-1",
         agit_session_id="agit-1",
@@ -96,7 +99,15 @@ def test_agent_commit_message_omits_zero_reasoning():
         backend_session_id="ses-1",
         agit_session_id="agit-1",
         model="provider/model",
-        token_usage={"context": 100, "total": 5, "input": 100, "output": 5, "reasoning": 0, "cache_read": 0, "cache_write": 0},
+        token_usage={
+            "context": 100,
+            "total": 5,
+            "input": 100,
+            "output": 5,
+            "reasoning": 0,
+            "cache_read": 0,
+            "cache_write": 0,
+        },
     )
 
     assert "tokens_since_last_commit_input: 100" in message
@@ -111,7 +122,15 @@ def test_agent_commit_message_includes_nonzero_reasoning():
         backend_session_id="ses-1",
         agit_session_id="agit-1",
         model="provider/model",
-        token_usage={"context": 100, "total": 11, "input": 100, "output": 5, "reasoning": 6, "cache_read": 0, "cache_write": 0},
+        token_usage={
+            "context": 100,
+            "total": 11,
+            "input": 100,
+            "output": 5,
+            "reasoning": 6,
+            "cache_read": 0,
+            "cache_write": 0,
+        },
     )
 
     assert "tokens_since_last_commit_reasoning: 6" in message
@@ -226,10 +245,12 @@ def test_commit_message_body_lines_are_wrapped_to_72():
 def test_agent_commit_trace_is_limited_by_user_turns():
     trace = []
     for index in range(7):
-        trace.extend([
-            {"role": "user", "content": f"user {index}"},
-            {"role": "agent", "content": f"agent {index}"},
-        ])
+        trace.extend(
+            [
+                {"role": "user", "content": f"user {index}"},
+                {"role": "agent", "content": f"agent {index}"},
+            ]
+        )
 
     message = build_agent_commit_message(
         latest_prompt="change it",

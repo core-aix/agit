@@ -1,10 +1,9 @@
 import subprocess
-from pathlib import Path
 
 import pytest
 
 from agit import cli
-from agit.git import GitError, GitRepo
+from agit.git import GitRepo
 
 
 def _has_git() -> bool:

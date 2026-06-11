@@ -4,6 +4,7 @@ The ``make_runner`` factory lives in ``tests/proxy_helpers.py`` (importable
 as ``proxy_helpers`` on the pytest sys.path); this file also re-exports it
 for convenience.
 """
+
 from __future__ import annotations
 
 import pytest

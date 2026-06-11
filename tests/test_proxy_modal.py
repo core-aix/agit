@@ -11,10 +11,8 @@ from __future__ import annotations
 import os
 import types
 
-import pytest
 
 from agit.proxy.modal import PromptModal, SelectModal
-from agit.proxy.runner import ProxyRunner
 from proxy_helpers import make_runner
 
 
@@ -297,7 +295,6 @@ def test_prompt_popup_facade_delegates_to_run_modal():
     """_prompt_popup is a thin facade: it constructs PromptModal and delegates."""
     runner = make_runner()
     modals_seen = []
-    original_run_modal = runner._run_modal if hasattr(runner, "_run_modal") else None
 
     def fake_run_modal(modal):
         modals_seen.append(modal)
@@ -361,11 +358,13 @@ def test_exit_byte_in_modal_reaches_finalize_pending_work():
     # First read: Ctrl-C from inside the modal → _run_exit_flow is called.
     # _run_exit_flow opens _confirm_exit (which calls _select_popup/_run_modal).
     # The second read below answers the confirmation popup with "Yes, exit".
-    reads = iter([
-        b"\x03",       # Ctrl-C inside the prompt modal → triggers exit flow
-        b"\x1b[B",     # Down arrow to select "Yes, exit" in confirmation popup
-        b"\r",         # Enter to confirm
-    ])
+    reads = iter(
+        [
+            b"\x03",  # Ctrl-C inside the prompt modal → triggers exit flow
+            b"\x1b[B",  # Down arrow to select "Yes, exit" in confirmation popup
+            b"\r",  # Enter to confirm
+        ]
+    )
     runner._popup_read_input = lambda: next(reads)
 
     # A PromptModal open; user presses Ctrl-C.
@@ -389,13 +388,15 @@ def test_exit_byte_in_modal_decline_continues_modal():
 
     # Ctrl-C then exit declined (Esc on the confirmation popup → cancel → False),
     # then the user types "ok" and confirms.
-    reads = iter([
-        b"\x03",   # Ctrl-C → _run_exit_flow → opens confirm popup
-        b"\x1b",   # Esc → cancel the confirm popup → exit flow returns False
-        b"o",      # back in original modal: typing 'o'
-        b"k",
-        b"\r",
-    ])
+    reads = iter(
+        [
+            b"\x03",  # Ctrl-C → _run_exit_flow → opens confirm popup
+            b"\x1b",  # Esc → cancel the confirm popup → exit flow returns False
+            b"o",  # back in original modal: typing 'o'
+            b"k",
+            b"\r",
+        ]
+    )
     runner._popup_read_input = lambda: next(reads)
 
     result = runner._run_modal(PromptModal("Stage", "Enter:"))

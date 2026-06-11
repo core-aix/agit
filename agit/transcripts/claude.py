@@ -110,7 +110,7 @@ def list_worktree_sessions(worktrees_root: Path) -> list[tuple[str, SessionRef]]
     for project_dir in root.iterdir():
         if not project_dir.is_dir() or not project_dir.name.startswith(prefix):
             continue
-        worktree_key = project_dir.name[len(prefix):]
+        worktree_key = project_dir.name[len(prefix) :]
         if not worktree_key:
             continue
         for ref in _refs_in_project_dir(project_dir):

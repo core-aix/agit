@@ -5,6 +5,7 @@ ProxyRunner.__new__ except where testing the delegation from runner stubs.
 Real git repos (via tmp_path) are used where git semantics must be verified;
 pure-logic tests use lightweight fakes.
 """
+
 import subprocess
 import time
 import types
