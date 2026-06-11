@@ -62,7 +62,7 @@ class PromptModal:
         """Return the message string that should be shown in the popup area."""
         return f"{self.title}\n{self.prompt}\n> {self.value}"
 
-    def feed(self, data: bytes) -> tuple[str, object]:
+    def feed(self, data: bytes) -> tuple[str, str | None]:
         """Process *data* bytes and return an action tuple.
 
         The caller should loop: render → read → feed → handle action.
@@ -132,7 +132,7 @@ class SelectModal:
             lines.append(prefix + option)
         return "\n".join(lines)
 
-    def feed(self, data: bytes) -> tuple[str, object]:
+    def feed(self, data: bytes) -> tuple[str, str | None]:
         """Process *data* bytes and return an action tuple."""
         # Lone Esc read: immediate cancel.
         if data == b"\x1b":
