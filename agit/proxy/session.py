@@ -93,6 +93,8 @@ class Session:
         # Per-session fields are set dynamically from FIELDS; annotate the one
         # accessed with a concrete type so mypy can check it.
         state: "AgitState | None"
+        last_child_output: float
+        last_poll: float
 
     def __init__(self, **fields) -> None:
         self.process = BackendProcess(

@@ -8,6 +8,7 @@ import shutil
 import signal
 import subprocess
 import sys
+from typing import Any
 import termios
 import threading
 import time
@@ -18,9 +19,9 @@ try:
     from watchdog.events import FileSystemEvent, FileSystemEventHandler
     from watchdog.observers import Observer
 except ImportError:  # pragma: no cover - exercised only without optional dependency
-    FileSystemEvent = None
-    FileSystemEventHandler = object
-    Observer = None
+    FileSystemEvent = None  # type: ignore[misc, assignment]
+    FileSystemEventHandler = object  # type: ignore[misc, assignment]
+    Observer = None  # type: ignore[misc, assignment]
 
 from agit.commits import AgitActions
 from agit.backends.setup import BackendUnavailable, backend_installed, ensure_installed_backend, install_hint
@@ -256,7 +257,7 @@ class ProxyRunner:
         self._force_new_session = new_session  # start a fresh conversation, do not resume
         self.name = "main"  # session label (multiplexer assigns names to others)
         self._primary_worktree_name: str | None = None  # session kept across exits for auto-resume
-        self.worktree = None  # set when this session runs in a git worktree
+        self.worktree: WorktreeInfo | None = None  # set when this session runs in a git worktree
         self.global_config = _global_config if _global_config is not None else GlobalConfig()
         self._apply_timings(self.global_config.timings)
         self.state = (
@@ -277,13 +278,13 @@ class ProxyRunner:
         self.last_poll = 0.0
         self.status_check_pending = False
         self.file_change_event = threading.Event()
-        self.file_observer = None
+        self.file_observer: Any = None
         self.parse_pending = False
         self.last_parse_start = 0.0
         self.running = True
-        self.old_attrs = None
+        self.old_attrs: Any = None
         self.original_sigwinch = None
-        self.original_signal_handlers = {}
+        self.original_signal_handlers: dict = {}
         self.rows = 24
         self.cols = 80
         self.screen: pyte.Screen | None = None
@@ -365,7 +366,7 @@ class ProxyRunner:
         self._integration_paused = False  # set when the base repo is switched off _base_branch out-of-band
         self._base_drift_check_at = 0.0
         self.turn = 0  # per-session transient-branch counter
-        self.merge_ctx = None  # in-progress agent merge resolution, if any
+        self.merge_ctx: MergeContext | None = None  # in-progress agent merge resolution
         self._pending_enter_at: float | None = None  # deferred submit of an injected prompt
         self._pending_enter_fd: int | None = None  # the PTY that injected prompt's Enter must go to
         self._base_advanced = False  # base moved; sync idle sessions onto it on the next loop pass
@@ -703,7 +704,7 @@ class ProxyRunner:
         self._monitor_base_edits = True
         self._base_check_at = 0.0
         try:
-            self._base_status_baseline = set(self.base_repo.status_short().splitlines())
+            self._base_status_baseline: set[str] = set(self.base_repo.status_short().splitlines())
         except Exception:
             self._base_status_baseline = set()
         self._set_message(
@@ -2303,7 +2304,7 @@ class ProxyRunner:
             return
         observer.stop()
         observer.join(timeout=2.0)
-        self.file_observer = None
+        self.file_observer: Any = None
 
     def _background_fds(self) -> dict:
         # master_fd -> session object, for every session that is not the active
