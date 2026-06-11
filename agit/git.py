@@ -79,6 +79,12 @@ class GitRepo:
     def has_tracked_changes(self) -> bool:
         return self._diff_has_changes(["git", "diff", "--quiet"]) or self.has_staged_changes()
 
+    def diff_head(self) -> str:
+        # Content of all tracked changes (staged + unstaged) relative to HEAD.
+        # Used as a fingerprint: `status --short` alone cannot tell new edits to
+        # an already-modified file apart from the state a user declined before.
+        return self._run(["git", "diff", "HEAD"], check=False).stdout
+
     def add_tracked(self) -> None:
         self._run(["git", "add", "-u"])
 
@@ -131,7 +137,10 @@ class GitRepo:
     def switch(self, branch: str, *, create: bool = False, base: str | None = None) -> None:
         command = ["git", "switch"]
         if create:
-            command.append("-C")
+            # `-c`, never `-C`: create must not silently reset an existing
+            # branch — a leftover turn branch can still hold unintegrated
+            # commits. Callers pick a free name (or handle the GitError).
+            command.append("-c")
         command.append(branch)
         if create and base:
             command.append(base)
@@ -209,9 +218,15 @@ class GitRepo:
         return self._run(["git", "rev-parse", "--verify", "--quiet", "MERGE_HEAD"], check=False).returncode == 0
 
     def has_conflict_markers(self) -> bool:
-        # `git diff --check` reports leftover conflict markers (and whitespace errors).
-        output = self._run(["git", "diff", "--check"], check=False).stdout
-        return "conflict marker" in output.lower()
+        # `git diff --check` reports leftover conflict markers, but only in the
+        # worktree vs the index — once `add_all()` stages the files it sees
+        # nothing. `--cached` checks the staged content against HEAD, so markers
+        # are still caught right before they would be committed.
+        for command in (["git", "diff", "--check"], ["git", "diff", "--cached", "--check"]):
+            output = self._run(command, check=False).stdout
+            if "conflict marker" in output.lower():
+                return True
+        return False
 
     def add_all(self) -> None:
         self._run(["git", "add", "-A"])

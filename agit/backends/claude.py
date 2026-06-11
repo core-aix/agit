@@ -76,10 +76,27 @@ class ClaudeBackend:
         return None
 
     def _model(self, data: dict) -> str | None:
+        # An explicit top-level model field, when present, is authoritative.
+        if isinstance(data.get("model"), str) and data["model"]:
+            return data["model"]
+        # `modelUsage` can list several models for one invocation (a Haiku
+        # sub-agent or background model alongside the main one) in arbitrary
+        # order; the metadata (and the --model passed on later runs) must name
+        # the MAIN conversation model — the one that produced the most output,
+        # with overall token volume as the tie-breaker.
         model_usage = data.get("modelUsage")
-        if isinstance(model_usage, dict) and model_usage:
-            return next(iter(model_usage))
-        return None
+        if not isinstance(model_usage, dict) or not model_usage:
+            return None
+
+        def weight(item: tuple[str, object]) -> tuple[int, int]:
+            usage = item[1]
+            if not isinstance(usage, dict):
+                return (0, 0)
+            output = self._int(usage.get("outputTokens"))
+            total = sum(self._int(value) for value in usage.values())
+            return (output, total)
+
+        return max(model_usage.items(), key=weight)[0]
 
     def _tokens(self, usage: object) -> TokenUsage:
         if not isinstance(usage, dict):

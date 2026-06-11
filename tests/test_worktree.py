@@ -7,6 +7,7 @@ from agit.actions import AgitActions
 from agit.git import GitRepo
 from agit.state import AgitState
 from agit.worktree import WorktreeManager, _sanitize_name
+from proxy_helpers import make_runner
 
 
 def _init_repo(path):
@@ -110,18 +111,17 @@ def test_merge_conflict_reports_and_aborts(tmp_path):
 
 
 def _integration_runner(main_repo, worktree_repo, base_branch, name):
-    from agit.proxy import ProxyRunner
-
-    runner = ProxyRunner.__new__(ProxyRunner)
-    runner.base_repo = main_repo
-    runner.repo = worktree_repo
-    runner._base_branch = base_branch
-    runner.name = name
-    runner.worktree = object()  # non-None marks this as a worktree session
-    runner.turn = 0
-    runner.merge_ctx = None
-    runner.master_fd = None
-    runner.agent_in_flight = False
+    runner = make_runner(
+        repo=worktree_repo,
+        base_repo=main_repo,
+        _base_branch=base_branch,
+        name=name,
+        worktree=object(),  # non-None marks this as a worktree session
+        turn=0,
+        merge_ctx=None,
+        master_fd=None,
+        agent_in_flight=False,
+    )
     runner.worktree_manager = WorktreeManager(main_repo)
     runner.backend = type("B", (), {"name": "test"})()
     runner._set_message = lambda *a, **k: None
@@ -221,21 +221,18 @@ def test_finalize_agent_merge_commits_and_advances(tmp_path):
 
 
 def test_turn_from_branch():
-    from agit.proxy import ProxyRunner
-
-    runner = ProxyRunner.__new__(ProxyRunner)
+    runner = make_runner()
     assert runner._turn_from_branch("agit/session-1/t0") == 0
     assert runner._turn_from_branch("agit/feature/t5") == 5
     assert runner._turn_from_branch("main") == 0
 
 
 def test_open_session_worktree_creates_then_reuses(tmp_path):
-    from agit.proxy import ProxyRunner
-
     main = _init_repo(tmp_path)
-    runner = ProxyRunner.__new__(ProxyRunner)
-    runner.base_repo = main
-    runner._base_branch = main.current_branch()
+    runner = make_runner(
+        base_repo=main,
+        _base_branch=main.current_branch(),
+    )
     runner.worktree_manager = WorktreeManager(main)
 
     info1, repo1 = runner._open_session_worktree("s1")
@@ -248,14 +245,13 @@ def test_open_session_worktree_creates_then_reuses(tmp_path):
 
 
 def test_worktree_has_pending_work(tmp_path):
-    from agit.proxy import ProxyRunner
-
     main = _init_repo(tmp_path)
     base = main.current_branch()
     info, repo = _make_session(main, "s", base)
-    runner = ProxyRunner.__new__(ProxyRunner)
-    runner.base_repo = main
-    runner._base_branch = base
+    runner = make_runner(
+        base_repo=main,
+        _base_branch=base,
+    )
 
     assert runner._worktree_has_pending_work(repo, repo.current_branch()) is False
     _commit(repo, "a.txt", "x\n", "work")
@@ -273,12 +269,13 @@ def test_reconcile_integrates_and_deletes_stale_worktrees(tmp_path):
     _, pending_work = _make_session(main, "pending-one", base)
     _commit(pending_work, "p.txt", "pending\n", "pending work")
 
-    runner = ProxyRunner.__new__(ProxyRunner)
-    runner.base_repo = main
-    runner.repo = GitRepo.discover(active.path)  # the active session's worktree
-    runner._base_branch = base
-    runner.worktree = active
-    runner.name = "session-1"
+    runner = make_runner(
+        repo=GitRepo.discover(active.path),  # the active session's worktree
+        base_repo=main,
+        _base_branch=base,
+        worktree=active,
+        name="session-1",
+    )
     runner.worktree_manager = wm
     messages = []
     runner._set_message = lambda message, **kw: messages.append(message)
@@ -308,12 +305,13 @@ def test_reconcile_flags_conflicting_stale_worktree(tmp_path):
     _commit(stale_work, "f.txt", "stale change\n", "stale edit")
     _commit(main, "f.txt", "base change\n", "base edit")  # diverges -> conflict
 
-    runner = ProxyRunner.__new__(ProxyRunner)
-    runner.base_repo = main
-    runner.repo = GitRepo.discover(active.path)
-    runner._base_branch = base
-    runner.worktree = active
-    runner.name = "session-1"
+    runner = make_runner(
+        repo=GitRepo.discover(active.path),
+        base_repo=main,
+        _base_branch=base,
+        worktree=active,
+        name="session-1",
+    )
     runner.worktree_manager = wm
     messages = []
     runner._set_message = lambda message, **kw: messages.append(message)
@@ -458,16 +456,15 @@ def test_repoint_current_to_base_detaches_at_new_base(tmp_path):
 
 
 def test_base_switch_candidates_excludes_agit_and_current(tmp_path):
-    from agit.proxy import ProxyRunner
-
     main = _init_repo(tmp_path)
     base = main.current_branch()
     main.create_branch("feature", base)
     WorktreeManager(main).create("s1", base=base)  # creates an agit/s1/t0 branch
 
-    runner = ProxyRunner.__new__(ProxyRunner)
-    runner.base_repo = main
-    runner._base_branch = base
+    runner = make_runner(
+        base_repo=main,
+        _base_branch=base,
+    )
 
     candidates = runner._base_switch_candidates()
     assert "feature" in candidates
@@ -537,17 +534,16 @@ def test_align_session_to_base_merges_new_base_commits_into_worktree(tmp_path):
 
 
 def test_poll_base_advanced_detects_out_of_band_commits(tmp_path):
-    from agit.proxy import ProxyRunner
-
     main = _init_repo(tmp_path)
     base = main.current_branch()
-    runner = ProxyRunner.__new__(ProxyRunner)
-    runner.base_repo = main
-    runner._base_branch = base
-    runner.worktree = object()
-    runner._base_advanced = False
-    runner._last_base_head = None
-    runner._base_poll_at = 0.0
+    runner = make_runner(
+        base_repo=main,
+        _base_branch=base,
+        worktree=object(),
+        _base_advanced=False,
+        _last_base_head=None,
+        _base_poll_at=0.0,
+    )
     runner._debug = lambda *a, **k: None
 
     # First poll only records the baseline — it never triggers a sync on startup.
@@ -566,16 +562,15 @@ def test_poll_base_advanced_detects_out_of_band_commits(tmp_path):
 
 
 def test_poll_base_advanced_noop_without_worktree(tmp_path):
-    from agit.proxy import ProxyRunner
-
     main = _init_repo(tmp_path)
-    runner = ProxyRunner.__new__(ProxyRunner)
-    runner.base_repo = main
-    runner._base_branch = main.current_branch()
-    runner.worktree = None  # legacy / non-worktree session: nothing to sync
-    runner._base_advanced = False
-    runner._last_base_head = None
-    runner._base_poll_at = 0.0
+    runner = make_runner(
+        base_repo=main,
+        _base_branch=main.current_branch(),
+        worktree=None,  # legacy / non-worktree session: nothing to sync
+        _base_advanced=False,
+        _last_base_head=None,
+        _base_poll_at=0.0,
+    )
 
     runner._poll_base_advanced()
     assert runner._base_advanced is False
@@ -804,24 +799,21 @@ def test_sync_idle_worktree_fast_forwards_to_advanced_base(tmp_path):
 
 
 def test_ensure_worktree_alive_none_returns_early():
-    from agit.proxy import ProxyRunner
-
-    runner = ProxyRunner.__new__(ProxyRunner)
-    runner.worktree = None
+    runner = make_runner(worktree=None)
     runner._ensure_worktree_alive()
     assert runner.worktree is None
 
 
 def test_ensure_worktree_alive_path_exists_returns_early(tmp_path):
-    from agit.proxy import ProxyRunner
-
     main = _init_repo(tmp_path)
     wm = WorktreeManager(main)
     info = wm.create("s1", base=main.current_branch())
-    runner = ProxyRunner.__new__(ProxyRunner)
-    runner.base_repo = main
-    runner.worktree = info
-    runner.repo = GitRepo.discover(info.path)
+    repo = GitRepo.discover(info.path)
+    runner = make_runner(
+        repo=repo,
+        base_repo=main,
+        worktree=info,
+    )
     repo_before = runner.repo
 
     runner._ensure_worktree_alive()
@@ -833,7 +825,7 @@ def test_ensure_worktree_alive_path_exists_returns_early(tmp_path):
 def test_ensure_worktree_alive_recreates_worktree(tmp_path):
     from agit.backends.proxy_agents import make_proxy_agent
     from agit.proxy import ProxyRunner
-    from agit.session_runtime import default_session_fields
+    from agit.proxy.session import Session
 
     main = _init_repo(tmp_path)
     wm = WorktreeManager(main)
@@ -842,31 +834,29 @@ def test_ensure_worktree_alive_recreates_worktree(tmp_path):
     shutil.rmtree(info.path)
     assert not info.path.exists()
 
-    runner = ProxyRunner.__new__(ProxyRunner)
-    for field, value in default_session_fields().items():
-        setattr(runner, field, value)
-    runner.base_repo = main
-    runner.repo = work
-    runner.worktree = info
-    runner.name = "session-1"
-    runner._base_branch = main.current_branch()
+    state = AgitState(info.path, default_backend="opencode")
+    runner = make_runner(
+        repo=work,
+        base_repo=main,
+        worktree=info,
+        name="session-1",
+        _base_branch=main.current_branch(),
+        state=state,
+        backend=make_proxy_agent("opencode"),
+        actions=AgitActions(work, state),
+        child_pid=None,
+        master_fd=None,
+        file_observer=None,
+        passthrough_prompt=bytearray(),
+        agent_in_flight=False,
+        turn=0,
+        merge_ctx=None,
+    )
     runner.worktree_manager = wm
-    runner.tracking_enabled = True
     runner.global_config = type("G", (), {"default_backend": "opencode"})()
-    runner.state = AgitState(info.path, default_backend="opencode")
-    runner.backend = make_proxy_agent("opencode")
-    runner.actions = AgitActions(work, runner.state)
     runner.verbose = False
-    runner.child_pid = None
-    runner.master_fd = None
-    runner.file_observer = None
-    runner.passthrough_prompt = bytearray()
-    runner.agent_in_flight = False
-    runner.turn = 0
     runner.sessions = [None]
     runner.active_index = 0
-    runner.merge_ctx = None
-    runner.tracking_enabled = True
 
     messages = []
     runner._set_message = lambda msg, **kw: messages.append(msg)
@@ -892,7 +882,7 @@ def test_ensure_worktree_alive_recreates_worktree(tmp_path):
 def test_ensure_worktree_alive_falls_back_on_open_session_failure(tmp_path):
     from agit.backends.proxy_agents import make_proxy_agent
     from agit.proxy import ProxyRunner
-    from agit.session_runtime import default_session_fields
+    from agit.proxy.session import Session
 
     main = _init_repo(tmp_path)
     wm = WorktreeManager(main)
@@ -901,31 +891,29 @@ def test_ensure_worktree_alive_falls_back_on_open_session_failure(tmp_path):
     shutil.rmtree(info.path)
     assert not info.path.exists()
 
-    runner = ProxyRunner.__new__(ProxyRunner)
-    for field, value in default_session_fields().items():
-        setattr(runner, field, value)
-    runner.base_repo = main
-    runner.repo = work
-    runner.worktree = info
-    runner.name = "session-1"
-    runner._base_branch = main.current_branch()
+    state2 = AgitState(info.path, default_backend="opencode")
+    runner = make_runner(
+        repo=work,
+        base_repo=main,
+        worktree=info,
+        name="session-1",
+        _base_branch=main.current_branch(),
+        state=state2,
+        backend=make_proxy_agent("opencode"),
+        actions=AgitActions(work, state2),
+        child_pid=None,
+        master_fd=None,
+        file_observer=None,
+        passthrough_prompt=bytearray(),
+        agent_in_flight=False,
+        turn=0,
+        merge_ctx=None,
+    )
     runner.worktree_manager = wm
-    runner.tracking_enabled = True
     runner.global_config = type("G", (), {"default_backend": "opencode"})()
-    runner.state = AgitState(info.path, default_backend="opencode")
-    runner.backend = make_proxy_agent("opencode")
-    runner.actions = AgitActions(work, runner.state)
     runner.verbose = False
-    runner.child_pid = None
-    runner.master_fd = None
-    runner.file_observer = None
-    runner.passthrough_prompt = bytearray()
-    runner.agent_in_flight = False
-    runner.turn = 0
     runner.sessions = [None]
     runner.active_index = 0
-    runner.merge_ctx = None
-    runner.tracking_enabled = True
 
     messages = []
     runner._set_message = lambda msg, **kw: messages.append(msg)
@@ -950,3 +938,116 @@ def test_ensure_worktree_alive_falls_back_on_open_session_failure(tmp_path):
     assert runner.name == "main"
     assert runner.repo is runner.base_repo
     assert any("base repo" in m for m in messages), f"messages={messages}"
+
+def test_finalize_agent_merge_refuses_unresolved_conflict_markers(tmp_path):
+    # Issue #13: `add_all()` used to run before the marker check, which cleared
+    # the unmerged index state and made `git diff --check` (worktree vs index)
+    # blind — so a merge the agent FAILED to resolve was committed with raw
+    # <<<<<<< / ======= / >>>>>>> markers and fast-forwarded into the base.
+    main = _init_repo(tmp_path)
+    base = main.current_branch()
+    info, work = _make_session(main, "s1", base, backend="claude")
+    _commit(work, "f.txt", "worktree change\n", "wt change")
+    _commit(main, "f.txt", "base change\n", "base change")
+    base_head = main.rev_parse(base)
+
+    runner = _integration_runner(main, work, base, "s1")
+    runner.state = AgitState(info.path)
+    runner.backend = type("B", (), {"name": "claude"})()
+    runner._integrate_session_turn()  # -> conflict, merge in progress
+    assert runner.merge_ctx is not None
+    assert "<<<<<<<" in (info.path / "f.txt").read_text()
+
+    # The agent failed to resolve: markers are still in the file.
+    messages = []
+    runner._set_message = lambda text, **k: messages.append(text)
+
+    assert runner._finalize_agent_merge() is False
+    # No merge commit, base untouched, the merge stays open for resolution.
+    assert main.rev_parse(base) == base_head
+    assert work.merge_in_progress() is True
+    assert runner.merge_ctx is not None
+    assert any("Conflict markers remain" in message for message in messages)
+
+    # Once the markers ARE resolved a retry finalizes — even though the failed
+    # attempt's add_all() already staged the marker-ridden version.
+    (info.path / "f.txt").write_text("resolved: base + worktree\n")
+    assert runner._finalize_agent_merge() is True
+    assert (main.repo / "f.txt").read_text() == "resolved: base + worktree\n"
+    assert main.rev_parse(base) != base_head
+
+
+def test_has_conflict_markers_sees_staged_markers(tmp_path):
+    # `git add -A` must not blind the marker check (issue #13).
+    repo = _init_repo(tmp_path)
+    (repo.repo / "f.txt").write_text("a\n<<<<<<< HEAD\nb\n=======\nc\n>>>>>>> side\n")
+    assert repo.has_conflict_markers() is True
+    repo.add_all()
+    assert repo.has_conflict_markers() is True
+
+def test_ensure_turn_branch_never_resets_existing_branch_with_work(tmp_path):
+    # Issue #16: recovery paths restart the turn counter (a recreated worktree
+    # is detached at base, so _turn_from_branch yields 0) while an earlier turn
+    # branch may still exist holding unintegrated commits. The next
+    # _ensure_turn_branch must not reuse its name — `git switch -C` used to
+    # silently reset the branch and destroy that work.
+    main = _init_repo(tmp_path)
+    base = main.current_branch()
+    info, work = _make_session(main, "s1", base, backend="claude")
+    _commit(work, "kept.txt", "unintegrated work\n", "<agent> kept work")
+    kept_head = work.rev_parse("HEAD")  # tip of agit/claude/s1/t1
+
+    # Simulate recovery: detached at base again, turn counter back at 0.
+    work.switch_detach(base)
+    runner = _integration_runner(main, work, base, "s1")
+    runner.backend = type("B", (), {"name": "claude"})()
+    runner.turn = 0
+
+    runner._ensure_turn_branch()
+
+    # The old branch and its commit survive; the session took the next free
+    # turn number instead of resetting t1.
+    assert main.rev_parse("agit/claude/s1/t1") == kept_head
+    assert work.current_branch() == "agit/claude/s1/t2"
+    assert runner.turn == 2
+
+
+def test_switch_create_refuses_to_reset_existing_branch(tmp_path):
+    from agit.git import GitError
+
+    repo = _init_repo(tmp_path)
+    repo.create_branch("topic", "HEAD")
+    _commit(repo, "x.txt", "x\n", "advance main past topic")
+    with pytest.raises(GitError):
+        repo.switch("topic", create=True)  # -c, not -C: never resets
+    # The branch is untouched and still where it was created.
+    assert repo.rev_parse("topic") != repo.rev_parse("HEAD")
+
+def test_agent_made_commits_integrate_when_idle(tmp_path):
+    # The agent ran `git commit` itself, leaving the worktree clean — the
+    # auto-commit path never fires, so integration must happen on idle instead
+    # of waiting for exit/restart ("agit stopped merging commits").
+    import time as time_mod
+
+    main = _init_repo(tmp_path)
+    base = main.current_branch()
+    info, work = _make_session(main, "s1", base)
+    _commit(work, "agent.txt", "committed by the agent itself\n", "agent's own commit")
+    base_head = main.rev_parse(base)
+
+    runner = _integration_runner(main, work, base, "s1")
+    runner._integration_paused = False
+    runner.agent_parse_thread = None
+    runner.last_child_output = 0.0
+    runner.CHILD_IDLE_SECONDS = 4.0
+    runner.BASE_POLL_SECONDS = 3.0
+    runner._idle_integrate_at = 0.0
+
+    runner._integrate_agent_made_commits_if_idle(time_mod.monotonic())
+
+    # Base fast-forwarded to the agent's manual commit; worktree detached at
+    # base with the turn branch cleaned up, exactly like a normal integration.
+    assert main.rev_parse(base) != base_head
+    assert (main.repo / "agent.txt").read_text() == "committed by the agent itself\n"
+    assert work.is_detached()
+    assert main.list_branches("agit/") == []

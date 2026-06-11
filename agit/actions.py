@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from agit.backends.base import TokenUsage
-from agit.commit_message import build_agent_commit_message, build_user_commit_message
+from agit.commit_message import build_user_commit_message
 from agit.git import GitRepo
 from agit.opencode_session import SessionTurn
 from agit.state import AgitState
@@ -39,38 +38,34 @@ class AgitActions:
         model: str | None,
         quiet: bool = False,
     ) -> bool:
-        if not turns:
-            return False
-        for turn in turns:
-            if turn.user_prompt:
-                self.state.append_trace("user", turn.user_prompt)
-            if turn.final_response:
-                self.state.append_trace("agent", turn.final_response)
-            self.state.add_token_usage(turn.tokens)
+        """Delegate to CommitEngine so proxy mode and actions/shell share one pipeline.
 
-        self.repo.add_tracked()
-        self.review_untracked(include_declined=False)
-        if not self.repo.has_staged_changes():
-            return False
+        The interactive difference (input()-based untracked review vs popup) is
+        injected as ``stage_untracked_fn``.  Token and trace accounting follows
+        the same d041d10 semantics as the proxy path: accumulated only once the
+        commit actually happens.
+        """
+        def stage_untracked_fn(repo, state):
+            self.review_untracked(include_declined=False)
 
-        # Subject lists every prompt that led to this commit, joined by " / ".
-        prompts = [turn.user_prompt for turn in turns if turn.user_prompt]
-        subject_text = " / ".join(prompts) if prompts else f"{backend} changes"
-        message = build_agent_commit_message(
-            latest_prompt=subject_text,
-            trace=self.state.pending_trace(),
+        def on_commit_fn(sha):
+            if not quiet:
+                print("Created <agent> commit.")
+
+        # Imported lazily: agit.proxy's package __init__ imports runner, which
+        # imports this module — a top-level import here is circular and breaks
+        # any process importing agit.actions/agit.shell before agit.proxy.
+        from agit.proxy.commit_engine import CommitEngine
+
+        return CommitEngine(self.repo, self.state).commit_turns(
+            turns=turns,
             backend=backend,
             backend_session_id=backend_session_id,
-            agit_session_id=self.state.session_id,
-            model=model or self.state.model,
-            token_usage=self.state.pending_token_usage(),
-            trace_turn_limit=self.state.trace_turn_limit,
+            model=model,
+            stage_untracked_fn=stage_untracked_fn,
+            on_commit_fn=on_commit_fn,
+            accumulate_trace_only_on_commit=True,
         )
-        self.repo.commit(message)
-        self.state.clear_trace()
-        if not quiet:
-            print("Created <agent> commit.")
-        return True
 
     def review_untracked(self, *, include_declined: bool) -> None:
         untracked = self.repo.untracked_files()

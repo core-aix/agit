@@ -98,7 +98,7 @@ aGiT stands for agent + git. It is a Python library and interactive CLI that com
 
 ## Concurrent Sessions (worktrees + auto-integration)
 
-This is the design aGiT targets for running several sessions at once. Foundations (`agit/lock.py`, `agit/worktree.py`, the worktree/branch/merge helpers in `agit/git.py`, and the `agit/merge_queue.py` coordinator) are implemented and unit-tested; the multiplexer wiring in `agit/proxy.py` is the remaining integration.
+This is the design aGiT targets for running several sessions at once. Foundations (`agit/lock.py`, `agit/worktree.py`, the worktree/branch/merge helpers in `agit/git.py`, and the `agit/merge_queue.py` coordinator) are implemented and unit-tested; the multiplexer wiring in `agit/proxy/runner.py` is the remaining integration.
 
 - A single aGiT process multiplexes several live sessions; one is displayed, the others keep running and integrating in the background.
 - The main working tree / base branch is mutated only by the serialized merge coordinator; every session runs in its own worktree under `.agit/worktrees/<name>`.

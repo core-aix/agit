@@ -125,3 +125,94 @@ def test_claude_backend_tolerates_leading_logs():
     response, session_id, _model, _tokens = backend._parse_output(output)
     assert response == "hi"
     assert session_id == "s"
+
+
+def test_claude_backend_picks_main_model_from_multi_model_usage():
+    # Issue #24: modelUsage can contain several models for one invocation (e.g.
+    # a Haiku sub-agent alongside the main model). The recorded model — which
+    # also becomes --model on later runs — must be the main conversation model
+    # (most output), not whichever dict key happens to come first.
+    backend = ClaudeBackend(Path("."))
+    output = json.dumps(
+        {
+            "type": "result",
+            "result": "done",
+            "session_id": "sess-1",
+            "modelUsage": {
+                "claude-haiku-4-5-20251001": {"inputTokens": 900, "outputTokens": 80},
+                "claude-opus-4-8": {"inputTokens": 5000, "outputTokens": 2200},
+            },
+        }
+    )
+    _response, _session_id, model, _tokens = backend._parse_output(output)
+    assert model == "claude-opus-4-8"
+
+    # And it is not just "the larger usage dict last": reverse the ordering.
+    output = json.dumps(
+        {
+            "type": "result",
+            "result": "done",
+            "session_id": "sess-1",
+            "modelUsage": {
+                "claude-opus-4-8": {"inputTokens": 5000, "outputTokens": 2200},
+                "claude-haiku-4-5-20251001": {"inputTokens": 900, "outputTokens": 80},
+            },
+        }
+    )
+    _response, _session_id, model, _tokens = backend._parse_output(output)
+    assert model == "claude-opus-4-8"
+
+
+def test_claude_backend_prefers_explicit_top_level_model():
+    backend = ClaudeBackend(Path("."))
+    output = json.dumps(
+        {
+            "type": "result",
+            "result": "done",
+            "session_id": "sess-1",
+            "model": "claude-opus-4-8",
+            "modelUsage": {"claude-haiku-4-5-20251001": {"outputTokens": 999}},
+        }
+    )
+    _response, _session_id, model, _tokens = backend._parse_output(output)
+    assert model == "claude-opus-4-8"
+
+
+def test_claude_backend_model_falls_back_to_total_volume():
+    # No output recorded (e.g. cached/aborted turn): fall back to overall
+    # token volume rather than dict order.
+    backend = ClaudeBackend(Path("."))
+    output = json.dumps(
+        {
+            "type": "result",
+            "result": "done",
+            "session_id": "sess-1",
+            "modelUsage": {
+                "claude-haiku-4-5-20251001": {"inputTokens": 10},
+                "claude-opus-4-8": {"inputTokens": 800},
+            },
+        }
+    )
+    _response, _session_id, model, _tokens = backend._parse_output(output)
+    assert model == "claude-opus-4-8"
+
+
+def test_menu_key_defaults_and_validation(tmp_path):
+    from agit.global_config import GlobalConfig
+
+    config = GlobalConfig(tmp_path / "config.json")
+    assert config.menu_key == "ctrl-g"
+    assert config.menu_key_byte == b"\x07"
+    assert config.menu_key_label == "Ctrl-G"
+
+    # A configured key is normalized and converted to its control byte.
+    config.data["menu_key"] = "Ctrl+P"
+    assert config.menu_key == "ctrl-p"
+    assert config.menu_key_byte == b"\x10"
+    assert config.menu_key_label == "Ctrl-P"
+
+    # Conflicting or invalid values fall back to the default, so a config
+    # typo can never lock the user out of the menu.
+    for bad in ("ctrl-c", "ctrl-m", "ctrl-i", "ctrl-j", "ctrl-h", "shift-g", "g", 7, None):
+        config.data["menu_key"] = bad
+        assert config.menu_key == "ctrl-g"

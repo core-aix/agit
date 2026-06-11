@@ -1,5 +1,7 @@
 import json
 import os
+import subprocess
+import sys
 
 from agit.lock import RepoLock, already_running_message
 
@@ -18,21 +20,24 @@ def test_acquire_and_release(tmp_path):
     assert (tmp_path / "lock").exists()
     assert lock.owner_pid() == os.getpid()
     lock.release()
-    assert not (tmp_path / "lock").exists()
     assert lock.is_held_by_self() is False
+    # The file persists (it carries no authority — the flock does) but the
+    # owner info is cleared, so nothing looks held.
+    assert lock.owner_pid() is None
 
 
 def test_second_holder_is_blocked_by_live_owner(tmp_path):
     path = tmp_path / "lock"
     first = RepoLock(path)
     assert first.acquire() is True
-    # A live owner (this very process) blocks a second acquirer.
+    # A live owner blocks a second acquirer (flock conflicts across fds).
     second = RepoLock(path)
     assert second.acquire() is False
     assert second.is_held_by_self() is False
     first.release()
     # Once released, the second can take it.
     assert second.acquire() is True
+    second.release()
 
 
 def test_different_repos_get_independent_locks(tmp_path):
@@ -47,30 +52,47 @@ def test_different_repos_get_independent_locks(tmp_path):
     repo_b.release()
 
 
-def test_stale_lock_from_dead_pid_is_reclaimed(tmp_path):
+def test_stale_lock_file_from_dead_pid_does_not_wedge(tmp_path):
+    # Issue #23: a leftover file naming a dead (or recycled) pid must never
+    # refuse startup — nobody holds the flock, so the lock is simply free.
     path = tmp_path / "lock"
-    # Write a lock owned by a almost-certainly-dead pid.
     path.write_text(json.dumps({"pid": 2_147_400_000, "started_at": 0}))
     lock = RepoLock(path)
     assert lock.acquire() is True
     assert lock.owner_pid() == os.getpid()
+    lock.release()
 
 
-def test_corrupt_lock_file_is_reclaimed(tmp_path):
+def test_leftover_file_naming_a_live_pid_does_not_wedge(tmp_path):
+    # Issue #23 (PID reuse): even a file naming a LIVE process is not a lock
+    # unless that process actually holds the flock. Before, os.kill(pid, 0)
+    # succeeding made a recycled pid hold the repo hostage forever.
+    path = tmp_path / "lock"
+    path.write_text(json.dumps({"pid": os.getppid(), "started_at": 0}))
+    lock = RepoLock(path)
+    assert lock.acquire() is True
+    lock.release()
+
+
+def test_corrupt_lock_file_is_ignored(tmp_path):
     path = tmp_path / "lock"
     path.write_text("not json")
     lock = RepoLock(path)
     assert lock.acquire() is True
+    lock.release()
 
 
-def test_release_only_removes_own_lock(tmp_path):
+def test_release_without_ownership_is_a_noop(tmp_path):
     path = tmp_path / "lock"
-    # Lock owned by another (live) pid — our process must not delete it.
-    path.write_text(json.dumps({"pid": os.getppid(), "started_at": 0}))
-    lock = RepoLock(path)
-    assert lock.acquire() is False
-    lock.release()  # no-op; we never owned it
-    assert path.exists()
+    first = RepoLock(path)
+    assert first.acquire() is True
+    second = RepoLock(path)
+    assert second.acquire() is False
+    second.release()  # no-op; never owned it
+    # The first holder is unaffected: a third acquirer is still refused.
+    assert RepoLock(path).acquire() is False
+    assert first.owner_pid() == os.getpid()
+    first.release()
 
 
 def test_context_manager(tmp_path):
@@ -78,4 +100,38 @@ def test_context_manager(tmp_path):
     with RepoLock(path) as lock:
         assert lock.is_held_by_self() is True
         assert path.exists()
-    assert not path.exists()
+    assert lock.is_held_by_self() is False
+    assert RepoLock(path).acquire() is True  # free again
+
+
+def test_lock_released_by_os_when_owner_dies(tmp_path):
+    # Issue #23: the kernel must free the lock the instant the holder dies —
+    # no stale file, no reclaim step, no second-writer race.
+    path = tmp_path / "lock"
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import pathlib, sys, time\n"
+                "from agit.lock import RepoLock\n"
+                "lock = RepoLock(pathlib.Path(sys.argv[1]))\n"
+                "assert lock.acquire()\n"
+                "print('held', flush=True)\n"
+                "time.sleep(30)\n"
+            ),
+            str(path),
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert child.stdout.readline().strip() == "held"
+        lock = RepoLock(path)
+        assert lock.acquire() is False  # blocked by the live holder...
+        assert lock.owner_pid() == child.pid  # ...which the message can name
+    finally:
+        child.kill()
+        child.wait()
+    assert lock.acquire() is True  # freed by the OS on death, instantly
+    lock.release()

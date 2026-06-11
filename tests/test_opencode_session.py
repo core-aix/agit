@@ -221,3 +221,71 @@ def test_list_worktree_sessions_filters_to_worktrees_newest_first(monkeypatch, t
     # name, newest first.
     assert [(key, ref.id) for key, ref in result] == [("session-2", "b"), ("session-1", "a")]
     assert result[0][1].label == "second"
+
+
+# --- issue #19: never fall back to other repos' sessions ------------------------
+
+
+def test_no_matching_directory_returns_no_sessions(monkeypatch, tmp_path):
+    # All sessions belong to OTHER directories: returning them would make aGiT
+    # adopt and resume an unrelated project's conversation at startup.
+    other = tmp_path / "other-project"
+    other.mkdir()
+    sessions = [
+        {"id": "foreign-1", "directory": str(other), "updated": 300},
+        {"id": "foreign-2", "directory": str(other), "updated": 200},
+    ]
+
+    def fake_run(*args, **kwargs):
+        return subprocess.CompletedProcess(args[0], 0, stdout=json.dumps(sessions), stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    from agit.opencode_session import list_sessions
+
+    assert list_sessions(tmp_path) == []
+    assert latest_session_id(tmp_path) is None
+
+
+def test_directoryless_output_still_falls_back(monkeypatch, tmp_path):
+    # Older OpenCode versions don't report `directory` at all; only then is the
+    # unfiltered list acceptable (there is nothing to filter on).
+    sessions = [
+        {"id": "ses-old-format", "updated": 100},
+        {"id": "ses-newer", "updated": 200},
+    ]
+
+    def fake_run(*args, **kwargs):
+        return subprocess.CompletedProcess(args[0], 0, stdout=json.dumps(sessions), stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert latest_session_id(tmp_path) == "ses-newer"
+
+
+def test_mixed_output_with_any_directory_field_does_not_fall_back(monkeypatch, tmp_path):
+    # If even one session carries `directory`, the format clearly supports it —
+    # an empty match means this repo truly has no sessions.
+    other = tmp_path / "other-project"
+    other.mkdir()
+    sessions = [
+        {"id": "foreign", "directory": str(other), "updated": 300},
+        {"id": "directoryless", "updated": 400},
+    ]
+
+    def fake_run(*args, **kwargs):
+        return subprocess.CompletedProcess(args[0], 0, stdout=json.dumps(sessions), stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert latest_session_id(tmp_path) is None
+
+
+def test_run_export_pty_failed_exec_exits_child(tmp_path):
+    # Issue #20: a failed chdir/exec in the forked export child must terminate
+    # it (127), not let it keep executing the test suite as a duplicate process.
+    from agit.opencode_session import _run_export_pty
+
+    output, exit_code = _run_export_pty(tmp_path / "missing-dir", "ses-x")
+
+    assert exit_code == 127

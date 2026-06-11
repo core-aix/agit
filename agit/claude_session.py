@@ -4,6 +4,7 @@ import json
 import os
 import re
 import shutil
+from datetime import datetime
 from pathlib import Path
 
 from agit.backends.base import TokenUsage
@@ -287,15 +288,25 @@ def parse_rows(session_id: str, rows: list[dict]) -> ExportedSession:
     model: str | None = None
     updated: int | None = None
 
-    def flush() -> None:
+    def flush(*, dangling: bool = False) -> None:
         nonlocal current
         if current is not None:
-            turns.append(_finalize_turn(current))
+            turns.append(_finalize_turn(current, dangling=dangling))
             current = None
 
     for row in rows:
+        stamp = _row_timestamp(row)
+        if stamp is not None:
+            updated = stamp if updated is None else max(updated, stamp)
         row_type = row.get("type")
         if row_type == "user":
+            if _is_interrupt_marker(row):
+                # Esc: the turn is finished as far as commits are concerned —
+                # it will never receive more messages — and Claude discarded
+                # any queued prompts. The marker itself is not a user prompt.
+                if current is not None:
+                    current["interrupted"] = True
+                continue
             prompt = _user_prompt(row)
             if prompt is None:
                 continue
@@ -331,11 +342,31 @@ def parse_rows(session_id: str, rows: list[dict]) -> ExportedSession:
             if text:
                 current["final"] = text
                 current["assistant_id"] = str(message.get("id") or "")
-    flush()
+    flush(dangling=True)
     return ExportedSession(session_id=session_id, model=model, updated=updated, turns=turns)
 
 
-def _finalize_turn(turn: dict) -> SessionTurn:
+def _row_timestamp(row: dict) -> int | None:
+    # Transcript rows carry an ISO-8601 `timestamp`; the newest one is the
+    # session's last-updated time.
+    value = row.get("timestamp")
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp())
+    except ValueError:
+        return None
+
+
+def _finalize_turn(turn: dict, *, dangling: bool = False) -> SessionTurn:
+    interrupted = bool(turn.get("interrupted"))
+    # Only the transcript's LAST (dangling) turn can still be mid-flight, and
+    # only when it ends in `tool_use` (the one non-terminal stop reason; a
+    # missing reason in older transcripts counts as complete). A turn flushed
+    # because a new prompt began — or one the user interrupted — can never
+    # receive more messages, so treating it as in-progress would stall the
+    # commit loop forever.
+    in_flight = dangling and not interrupted and turn.get("stop_reason") == "tool_use"
     return SessionTurn(
         user_message_id=turn["user_id"],
         assistant_message_id=turn["assistant_id"],
@@ -343,10 +374,28 @@ def _finalize_turn(turn: dict) -> SessionTurn:
         final_response=turn["final"],
         tokens=turn["tokens"],
         model=turn["model"],
-        # `tool_use` is the only non-terminal stop reason; a missing reason (older
-        # transcripts) is treated as complete so we never stall the commit loop.
-        complete=turn.get("stop_reason") != "tool_use",
+        complete=not in_flight,
+        interrupted=interrupted,
     )
+
+
+_INTERRUPT_MARKER = "[Request interrupted by user"
+
+
+def _is_interrupt_marker(row: dict) -> bool:
+    # Esc leaves a user row whose text is "[Request interrupted by user]" (or
+    # the "... for tool use" variant); it marks the abort, it is not a prompt.
+    message = row.get("message") if isinstance(row.get("message"), dict) else {}
+    content = message.get("content")
+    if isinstance(content, str):
+        text = content.strip()
+    elif isinstance(content, list):
+        text = "".join(
+            block.get("text", "") for block in content if isinstance(block, dict) and block.get("type") == "text"
+        ).strip()
+    else:
+        return False
+    return text.startswith(_INTERRUPT_MARKER)
 
 
 def _user_prompt(row: dict) -> str | None:
@@ -366,7 +415,7 @@ def _user_prompt(row: dict) -> str | None:
         text = "".join(parts).strip()
     else:
         return None
-    if not text or text.startswith(_COMMAND_TAGS):
+    if not text or text.startswith(_COMMAND_TAGS) or text.startswith(_INTERRUPT_MARKER):
         return None
     return text
 

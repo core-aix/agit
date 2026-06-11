@@ -341,3 +341,83 @@ def test_encode_repo_matches_claude_naming():
     from pathlib import Path
 
     assert claude_session._encode_repo(Path("/a.b/c_d")) == "-a-b-c-d"
+
+
+def test_parse_rows_records_session_updated_from_row_timestamps():
+    # Issue #26 cleanup: `updated` was declared but never assigned, so every
+    # Claude ExportedSession reported None. It now reflects the newest row.
+    rows = [
+        _user("u1", "first prompt"),
+        _assistant("m1", "answer", usage={"input_tokens": 1, "output_tokens": 1}),
+    ]
+    rows[0]["timestamp"] = "2026-06-10T10:00:00.000Z"
+    rows[1]["timestamp"] = "2026-06-10T10:05:30.000Z"
+
+    session = parse_rows("sess-1", rows)
+
+    from datetime import datetime, timezone
+
+    expected = int(datetime(2026, 6, 10, 10, 5, 30, tzinfo=timezone.utc).timestamp())
+    assert session.updated == expected
+
+
+def test_parse_rows_updated_none_without_timestamps():
+    rows = [_user("u1", "p"), _assistant("m1", "a", usage={})]
+    assert parse_rows("sess-1", rows).updated is None
+
+
+# --- Esc interrupts: the turn completes and the marker is not a prompt ----------
+
+
+def test_parse_rows_interrupt_marker_completes_turn_and_is_not_a_prompt():
+    # Esc mid-tool-use leaves stop_reason=tool_use followed by a user row
+    # "[Request interrupted by user]". The turn will never get more messages,
+    # so it must parse as complete (or the commit gate defers forever), be
+    # flagged interrupted (queued prompts were discarded), and the marker must
+    # not become a turn of its own or pollute the subject/trace.
+    rows = [
+        _user("u1", "fix the parser"),
+        _assistant("m1", "Let me look at the file.", usage={"input_tokens": 5, "output_tokens": 5}, stop_reason="tool_use"),
+        _user("int-1", "[Request interrupted by user]"),
+    ]
+
+    session = parse_rows("sess-1", rows)
+
+    assert len(session.turns) == 1
+    turn = session.turns[0]
+    assert turn.user_prompt == "fix the parser"
+    assert turn.complete is True
+    assert turn.interrupted is True
+
+
+def test_parse_rows_tool_use_interrupt_variant_is_recognized():
+    rows = [
+        _user("u1", "do it"),
+        _assistant("m1", "working", usage={}, stop_reason="tool_use"),
+        _user("int-1", "[Request interrupted by user for tool use]"),
+        _user("u2", "actually do something else"),
+        _assistant("m2", "done", usage={}, stop_reason="end_turn"),
+    ]
+
+    session = parse_rows("sess-1", rows)
+
+    assert [turn.user_prompt for turn in session.turns] == ["do it", "actually do something else"]
+    assert session.turns[0].interrupted is True
+    assert session.turns[0].complete is True
+    assert session.turns[1].interrupted is False
+
+
+def test_parse_rows_superseded_tool_use_turn_is_complete():
+    # A turn flushed because a NEW prompt began can never receive more
+    # messages — only the transcript's last (dangling) turn may be in-flight.
+    rows = [
+        _user("u1", "first"),
+        _assistant("m1", "starting first", usage={}, stop_reason="tool_use"),
+        _user("u2", "second"),
+        _assistant("m2", "answering second", usage={}, stop_reason="tool_use"),
+    ]
+
+    session = parse_rows("sess-1", rows)
+
+    assert session.turns[0].complete is True   # superseded: finished for good
+    assert session.turns[1].complete is False  # dangling tool_use: still mid-flight

@@ -22,7 +22,7 @@ Run in the current repository:
 agit
 ```
 
-By default, `agit` runs in proxy mode: it launches the real backend TUI (OpenCode or Claude) in a pseudo-terminal, renders it through an internal terminal screen, and reserves a bottom status line for aGiT. Press `Ctrl-G` to enter aGiT command mode.
+By default, `agit` runs in proxy mode: it launches the real backend TUI (OpenCode or Claude) in a pseudo-terminal, renders it through an internal terminal screen, and reserves a bottom status line for aGiT. Press `Ctrl-G` to enter aGiT command mode (configurable via `menu_key` in `~/.agit/config.json` — see Configuration).
 
 Run against another repository:
 
@@ -50,6 +50,7 @@ In proxy mode (default), press `Ctrl-G`, then type one of these aGiT commands:
 ```text
 session                   switch / start (own worktree) / stop a live session
 agent-backend             switch backend (opencode|claude); shows a picker
+git-base-branch           switch the branch sessions integrate into
 git-status                show git status
 git-stage                 review and stage untracked files
 git-unstaged              show intentionally unstaged files
@@ -81,7 +82,7 @@ Use the `session` command to start a new session, switch the tracked session to 
 
 ### Worktrees and branches
 
-To let sessions run without stepping on each other or on your working tree, each aGiT session runs in its own git worktree under `.agit/worktrees/<name>`, checked out on its own `agit/<name>` branch. Work within a session is committed on per-turn branches derived from it (`agit/<name>/t<turn>`). All aGiT-managed branches live under the `agit/` prefix so they are easy to recognize for cleanup and never collide with your own branches.
+To let sessions run without stepping on each other or on your working tree, each aGiT session runs in its own git worktree under `.agit/worktrees/<name>`, created *detached* at the base branch — a session has no branch of its own. Work within a session is committed on per-turn branches named `agit/<backend>/<name>/t<turn>`, created lazily on the first commit of each turn; once a turn is integrated its branch is deleted and the worktree is detached at the new base again. All aGiT-managed branches live under the `agit/` prefix so they are easy to recognize for cleanup and never collide with your own branches.
 
 The base working tree (the branch you launched from) is only ever advanced by **integration**: aGiT merges a session's pending commits back into the base branch rather than committing onto it directly. A single-writer lock ensures only one aGiT process auto-commits or integrates at a time, so concurrent sessions stay consistent.
 
@@ -163,6 +164,7 @@ User-wide settings live in `~/.agit/config.json` (override the directory with `A
 ```json
 {
   "default_backend": "opencode",
+  "menu_key": "ctrl-g",
   "timings": {
     "base_poll_seconds": 3.0
   }
@@ -170,6 +172,8 @@ User-wide settings live in `~/.agit/config.json` (override the directory with `A
 ```
 
 `default_backend` (`opencode` or `claude`) is used for repositories that have no backend recorded yet. It is updated whenever you pass `--backend` or switch backends with `agent-backend`.
+
+`menu_key` sets the key that opens aGiT's command menu in proxy mode. The default is `ctrl-g`; any `ctrl-<letter>` works except keys the terminal or aGiT already uses (`ctrl-c` exit flow, `ctrl-h` Backspace, `ctrl-i` Tab, `ctrl-j`/`ctrl-m` Enter). An invalid value falls back to `ctrl-g`, so a typo can never lock you out of the menu. The status line and aGiT's messages show whichever key is configured.
 
 `timings` tunes aGiT's polling and debounce intervals (all in seconds). Specify only the keys you want to change; anything omitted — or set to a non-positive / non-numeric value — keeps its default:
 
@@ -182,3 +186,4 @@ User-wide settings live in `~/.agit/config.json` (override the directory with `A
 | `parse_cooldown_seconds` | `10.0` | Minimum gap between agent-turn parses. |
 | `base_edit_check_seconds` | `3.0` | How often aGiT warns about edits to the base repo when the sandbox is unavailable. |
 | `cwd_check_seconds` | `3.0` | How often aGiT checks for the Claude resume-cwd drift bug. |
+| `base_drift_check_seconds` | `2.0` | How often aGiT checks whether the base repo was switched to another branch outside aGiT. |

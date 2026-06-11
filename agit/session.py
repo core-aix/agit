@@ -19,6 +19,10 @@ class SessionTurn:
     # answered and never split one prompt across several commits. Defaults True so
     # backends that don't report a finish reason keep committing on idle as before.
     complete: bool = True
+    # True when the user interrupted this turn (Esc): it will never receive more
+    # messages, and any prompts the user had queued behind it were discarded by
+    # the backend — so nothing should keep waiting for them.
+    interrupted: bool = False
 
 
 @dataclass
