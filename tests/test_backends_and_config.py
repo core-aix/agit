@@ -229,3 +229,17 @@ def test_menu_key_defaults_and_validation(tmp_path):
     for bad in ("ctrl-c", "ctrl-m", "ctrl-i", "ctrl-j", "ctrl-h", "shift-g", "g", 7, None):
         config.data["menu_key"] = bad
         assert config.menu_key == "ctrl-g"
+
+
+# --- use_worktrees config (#9) ----------------------------------------------
+
+
+def test_use_worktrees_defaults_true(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGIT_CONFIG_DIR", str(tmp_path))
+    assert GlobalConfig().use_worktrees is True
+
+
+def test_use_worktrees_config_opt_out(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGIT_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "config.json").write_text('{"use_worktrees": false}')
+    assert GlobalConfig().use_worktrees is False

@@ -90,6 +90,19 @@ class GlobalConfig:
         self.save()
 
     @property
+    def use_worktrees(self) -> bool:
+        # Run each session in its own git worktree (on by default). When off,
+        # the agent edits the current branch directly (#9) — visible live, but
+        # no isolation/integration and unsafe with concurrent sessions.
+        value = self.data.get("use_worktrees")
+        return True if value is None else bool(value)
+
+    @use_worktrees.setter
+    def use_worktrees(self, value: bool) -> None:
+        self.data["use_worktrees"] = bool(value)
+        self.save()
+
+    @property
     def menu_key(self) -> str:
         # Normalized "ctrl-<letter>" spec for the aGiT menu key. Invalid or
         # conflicting values fall back to the default so a config typo can

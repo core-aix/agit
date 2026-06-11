@@ -95,3 +95,56 @@ def test_discover_or_init_non_interactive_does_not_prompt(tmp_path, monkeypatch)
     monkeypatch.setattr("builtins.input", lambda *a: (_ for _ in ()).throw(AssertionError("should not prompt")))
 
     assert cli._discover_or_init(tmp_path) is None
+
+
+# --- --no-worktree (#9) -----------------------------------------------------
+
+
+def test_no_worktree_flag_disables_worktrees(monkeypatch):
+    captured = {}
+
+    class Fake:
+        def __init__(self, repo, **kw):
+            captured.update(kw)
+
+        def run(self):
+            return 0
+
+    monkeypatch.setattr(cli, "ProxyRunner", Fake)
+    monkeypatch.setattr(cli, "_discover_or_init", lambda p: object())
+
+    class Config:
+        def has_default_backend(self):
+            return True
+
+        default_backend = "claude"
+        use_worktrees = True
+
+    monkeypatch.setattr(cli, "GlobalConfig", lambda: Config())
+    cli.main(["--no-worktree"])
+    assert captured["use_worktrees"] is False
+
+
+def test_default_uses_config_use_worktrees(monkeypatch):
+    captured = {}
+
+    class Fake:
+        def __init__(self, repo, **kw):
+            captured.update(kw)
+
+        def run(self):
+            return 0
+
+    monkeypatch.setattr(cli, "ProxyRunner", Fake)
+    monkeypatch.setattr(cli, "_discover_or_init", lambda p: object())
+
+    class Config:
+        def has_default_backend(self):
+            return True
+
+        default_backend = "claude"
+        use_worktrees = False  # config opt-out, no flag
+
+    monkeypatch.setattr(cli, "GlobalConfig", lambda: Config())
+    cli.main([])
+    assert captured["use_worktrees"] is False

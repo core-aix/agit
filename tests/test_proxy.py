@@ -4054,3 +4054,30 @@ def test_real_init_defines_all_lifecycle_flags(tmp_path):
     ):
         assert flag in runner.__dict__ or hasattr(type(runner), flag), flag
         getattr(runner, flag)  # must not raise
+
+
+def test_no_worktree_mode_skips_worktree_setup(tmp_path):
+    # With worktrees off, setup leaves worktree=None and creates no worktree dir.
+    import subprocess
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-q", "--allow-empty", "-m", "init"], check=True)
+    from agit.git import GitRepo
+    from agit.proxy.runner import ProxyRunner
+
+    runner = ProxyRunner(GitRepo(tmp_path), use_worktrees=False)
+    runner._base_branch = "main"
+    runner._setup_base_merge_only_session()
+    assert runner.worktree is None
+    assert not (tmp_path / ".agit" / "worktrees").exists()
+
+
+def test_no_worktree_mode_refuses_new_session():
+    runner = make_runner()
+    runner._use_worktrees = False
+    msgs = []
+    runner._set_message = lambda m, **k: msgs.append(m)
+    runner._render = lambda: None
+    runner._new_session("session-2")
+    assert runner.worktree is None
+    assert any("worktree" in m.lower() for m in msgs)

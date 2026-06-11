@@ -54,6 +54,14 @@ By default aGiT resumes the previous conversation for the repository. Start a fr
 agit --new-session
 ```
 
+Run without a worktree (the agent edits the current branch directly, so changes are visible live as it works):
+
+```bash
+agit --no-worktree
+```
+
+This is for single-session use: there's no isolation or auto-integration, and concurrent sessions are unsafe in this mode (starting a new session is blocked). Set `"use_worktrees": false` in `~/.agit/config.json` to make it the default; `--no-worktree` always wins.
+
 On the first run, aGiT asks which backend should be the default (listed alphabetically, with each backend's install status). If the chosen backend's CLI is not installed, aGiT shows install instructions and lets you install it or pick a different one. The choice is saved in `~/.agit/config.json` (`default_backend`) and reused for future runs. You can also switch backends mid-session with the `agent-backend` command below.
 
 In proxy mode (default), press `Ctrl-G`, then type one of these aGiT commands:

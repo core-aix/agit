@@ -28,12 +28,21 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="start a fresh backend conversation instead of resuming the last one",
     )
+    parser.add_argument(
+        "--no-worktree",
+        action="store_true",
+        help="run the agent against the current branch instead of an isolated worktree "
+        "(edits are visible live; no isolation/integration; unsafe with concurrent sessions)",
+    )
     args = parser.parse_args(argv)
 
     # First run: ask the user to choose a default backend before launching.
     config = GlobalConfig()
     if args.backend is None and not config.has_default_backend() and sys.stdin.isatty() and sys.stdout.isatty():
         select_default_backend(config)
+
+    # Worktrees on unless the config opts out or --no-worktree is passed (flag wins).
+    use_worktrees = False if args.no_worktree else config.use_worktrees
 
     try:
         repo = _discover_or_init(Path(args.repo).expanduser())
@@ -42,7 +51,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.mode == "json":
             AgitShell(repo, verbose=args.verbose, backend=args.backend, new_session=args.new_session).run()
         else:
-            return ProxyRunner(repo, verbose=args.verbose, backend=args.backend, new_session=args.new_session).run()
+            return ProxyRunner(
+                repo,
+                verbose=args.verbose,
+                backend=args.backend,
+                new_session=args.new_session,
+                use_worktrees=use_worktrees,
+            ).run()
     except (GitError, RuntimeError) as error:
         print(error)
         return 1
