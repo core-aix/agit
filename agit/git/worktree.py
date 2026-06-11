@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import List
+
 import re
 import shutil
 from dataclasses import dataclass
@@ -80,7 +82,7 @@ class WorktreeManager:
             if len(parts) >= 3 and parts[-2] == sanitized:
                 self.main_repo.delete_branch(branch, force=True)
 
-    def list(self) -> list[WorktreeInfo]:
+    def list(self) -> List[WorktreeInfo]:
         infos: list[WorktreeInfo] = []
         root = self.root.resolve()
         for entry in self.main_repo.worktree_list():
@@ -93,7 +95,7 @@ class WorktreeManager:
                 infos.append(WorktreeInfo(name=path.name, path=path, branch=entry.get("branch", "")))
         return infos
 
-    def stale(self) -> list[WorktreeInfo]:
+    def stale(self) -> List[WorktreeInfo]:
         """aGiT worktrees left behind by a previous run (used at startup for
         recovery). With no live manager, every aGiT worktree is stale."""
         return self.list()

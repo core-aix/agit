@@ -183,10 +183,10 @@ class CommitEngine:
             # Proxy mode: rebuild trace from scratch, preserving any pending user
             # entries that hadn't yet landed as a turn (e.g. a queued prompt from
             # before this parse cycle).
-            pending_users = [
-                item.get("content")
+            pending_users: list[str] = [
+                content
                 for item in self.state.pending_trace()
-                if item.get("role") == "user" and item.get("content")
+                if item.get("role") == "user" and (content := item.get("content"))
             ]
             remaining_pending_users = list(pending_users)
             self.state.data["pending_trace"] = []

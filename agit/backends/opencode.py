@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
-from typing import TextIO
+from typing import IO
 
 from agit.backends.base import AgentResult, TokenUsage
 
@@ -50,7 +50,7 @@ class OpenCodeBackend:
             tokens=tokens,
         )
 
-    def _read_events(self, output: TextIO | None) -> tuple[str, str | None, str | None, TokenUsage]:
+    def _read_events(self, output: IO[str] | None) -> tuple[str, str | None, str | None, TokenUsage]:
         if output is None:
             return "", None, None, TokenUsage()
 
@@ -155,7 +155,9 @@ class OpenCodeBackend:
         if not isinstance(tokens, dict):
             return TokenUsage()
 
-        cache = tokens.get("cache") if isinstance(tokens.get("cache"), dict) else {}
+        cache = tokens.get("cache")
+        if not isinstance(cache, dict):
+            cache = {}
         input_tokens = self._int_value(tokens.get("input"))
         output_tokens = self._int_value(tokens.get("output"))
         reasoning_tokens = self._int_value(tokens.get("reasoning"))

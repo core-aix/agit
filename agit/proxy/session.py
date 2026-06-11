@@ -15,6 +15,11 @@ removes that layer and moves call sites to ``runner.active.<field>``.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from agit.config import AgitState
+
 import threading
 
 from agit.proxy.process import BackendProcess
@@ -83,6 +88,11 @@ class Session:
     # ``child_pid`` / ``master_fd`` are owned by the session's BackendProcess
     # (P2) and exposed as properties below, so they are excluded from slots.
     __slots__ = tuple(f for f in FIELDS if f not in ("child_pid", "master_fd")) + ("process",)
+
+    if TYPE_CHECKING:
+        # Per-session fields are set dynamically from FIELDS; annotate the one
+        # accessed with a concrete type so mypy can check it.
+        state: "AgitState | None"
 
     def __init__(self, **fields) -> None:
         self.process = BackendProcess(
