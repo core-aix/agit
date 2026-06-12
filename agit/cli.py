@@ -34,6 +34,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--verbose", action="store_true", help="show aGiT diagnostic messages")
     parser.add_argument("--mode", choices=["proxy", "json"], default="proxy", help="interactive mode")
     parser.add_argument(
+        "--prompt",
+        action="append",
+        dest="prompts",
+        metavar="TEXT",
+        help="run this prompt non-interactively (implies --mode json) and exit; "
+        "repeatable, prompts run in order. Lines starting with ':' are aGiT "
+        "commands, e.g. --prompt ':status'",
+    )
+    parser.add_argument(
         "--backend",
         choices=available_backends(),
         default=None,
@@ -86,7 +95,17 @@ def main(argv: list[str] | None = None) -> int:
         result = subprocess.run([backend_cmd] + backend_args, check=False)
         return result.returncode
 
-    if args.backend is None and not config.has_default_backend() and sys.stdin.isatty() and sys.stdout.isatty():
+    scripted = bool(args.prompts)
+    if scripted:
+        args.mode = "json"  # --prompt drives the non-interactive shell (#53)
+
+    if (
+        args.backend is None
+        and not config.has_default_backend()
+        and not scripted
+        and sys.stdin.isatty()
+        and sys.stdout.isatty()
+    ):
         select_default_backend(config)
 
     # Worktrees on unless the config opts out or --no-worktree is passed (flag wins).
@@ -95,7 +114,7 @@ def main(argv: list[str] | None = None) -> int:
     if backend_args:
         _warn_reserved_passthrough(args.backend or config.default_backend, backend_args)
 
-    if not _acknowledge_privacy_warning():
+    if not _acknowledge_privacy_warning(scripted=scripted):
         return 1
 
     try:
@@ -109,6 +128,7 @@ def main(argv: list[str] | None = None) -> int:
                 backend=args.backend,
                 new_session=args.new_session,
                 backend_args=backend_args,
+                prompts=args.prompts,
             ).run()
         else:
             return ProxyRunner(
@@ -185,20 +205,21 @@ def _show_combined_help(
 
 
 PRIVACY_WARNING = (
-    "WARNING: aGiT records the conversation in git commit messages — every\n"
+    "\nWARNING: aGiT records the conversation in git commit messages — every\n"
     "message you enter in the chat can become part of the repository history.\n"
     "Do not enter passwords, API keys, or other sensitive information in the\n"
     "chat. (Keeping secrets out of prompts is good practice anyway.)"
 )
 
 
-def _acknowledge_privacy_warning() -> bool:
+def _acknowledge_privacy_warning(*, scripted: bool = False) -> bool:
     """Show the privacy warning at startup; the user must acknowledge it to
-    continue. Without a TTY there is no way to acknowledge, so the warning is
-    printed and aGiT proceeds — never block automation on an ``input()`` that
-    cannot be answered."""
+    continue. Without a TTY there is no way to acknowledge, and a scripted run
+    (``--prompt``) already has its input on the command line, so in both cases
+    the warning is printed and aGiT proceeds — never block automation on an
+    ``input()`` that cannot be answered."""
     print(PRIVACY_WARNING)
-    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+    if scripted or not (sys.stdin.isatty() and sys.stdout.isatty()):
         return True
     try:
         answer = input("Press Enter to acknowledge and continue (q to quit): ").strip().lower()

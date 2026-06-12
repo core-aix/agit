@@ -44,7 +44,7 @@ Run in the current repository:
 agit
 ```
 
-By default, `agit` runs in proxy mode: it launches the real backend TUI (OpenCode or Claude) in a pseudo-terminal, renders it through an internal terminal screen, and reserves a bottom status line for aGiT showing the session (and the base branch it merges into), the backend, the summarizer state, and the directory the agent is working in (its session worktree, home-abbreviated and elided from the left when space is tight). Press `Ctrl-G` to enter aGiT command mode (configurable via `menu_key` in `~/.agit/config.json` — see Configuration).
+By default, `agit` runs in proxy mode: it launches the real backend TUI (OpenCode or Claude) in a pseudo-terminal, renders it through an internal terminal screen, and reserves a bottom status line for aGiT showing the session (and the base branch it merges into), the backend, the summarizer state, and the repository the agent is working on (the base repository path, home-abbreviated and elided from the left when space is tight). Press `Ctrl-G` to enter aGiT command mode (configurable via `menu_key` in `~/.agit/config.json` — see Configuration).
 
 Run against another repository:
 
@@ -216,6 +216,27 @@ JSON mode aGiT commands use `:` so backend-native `/` input is not intercepted:
 ```
 
 In JSON mode, aGiT shows a bottom status bar with the active backend, target repo, model, and unstaged-new-file count. Typing `:` shows aGiT command completions. Typing `/` shows common backend command completions, and slash commands are forwarded to the backend rather than handled by aGiT.
+
+### Scripted runs and the demo
+
+`--prompt` runs JSON mode fully scripted: each prompt is sent to the backend in order (lines starting with `:` are aGiT commands), every turn that changes files becomes a commit, and aGiT exits when the prompts are done.
+
+```bash
+agit --repo path/to/repo --backend claude \
+  --prompt "add input validation to parse()" \
+  --prompt ":status" \
+  --permission-mode acceptEdits
+```
+
+Scripted runs never block on a question: the privacy warning is printed without waiting for acknowledgment, and new untracked files are staged automatically (with a notice) instead of being reviewed interactively. The same non-interactive defaults apply when prompts are piped to `agit --mode json` on stdin. Note that headless Claude needs permission to edit files — forward `--permission-mode acceptEdits` (or your preferred permission flags) through aGiT as shown above; OpenCode's `run` mode edits by default.
+
+`scripts/demo.sh` is a self-contained showcase built on this: it creates a fresh repository in a temporary directory, has the agent write a small program and its tests through aGiT, and leaves the repository behind so you can inspect the `<aGiT>` commit history or continue interactively.
+
+```bash
+scripts/demo.sh                      # drive the demo with claude
+scripts/demo.sh --backend opencode   # ... or with opencode
+scripts/demo.sh --model haiku --dir /tmp/agit-demo
+```
 
 
 ## Configuration

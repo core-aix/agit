@@ -7,10 +7,13 @@ from agit.config import AgitState
 
 
 class AgitActions:
-    def __init__(self, repo: GitRepo, state: AgitState, *, verbose: bool = False) -> None:
+    def __init__(self, repo: GitRepo, state: AgitState, *, verbose: bool = False, interactive: bool = True) -> None:
         self.repo = repo
         self.state = state
         self.verbose = verbose
+        # Scripted runs (`agit --prompt`, piped stdin) cannot answer questions;
+        # every input() below then falls back to a safe default instead (#53).
+        self.interactive = interactive
 
     def create_user_commit(self) -> bool:
         self.repo.add_tracked()
@@ -19,7 +22,7 @@ class AgitActions:
             if self.verbose:
                 print("No staged user changes to commit.")
             return False
-        message = ""
+        message = "" if self.interactive else "Save user changes"
         while not message.strip():
             message = input("User commit message: ")
             if not message.strip():
@@ -73,6 +76,14 @@ class AgitActions:
         declined = set(self.state.declined_untracked())
         candidates = untracked if include_declined else [path for path in untracked if path not in declined]
         if not candidates:
+            return
+
+        if not self.interactive:
+            # No way to ask: stage everything new so the commit captures the
+            # agent's work instead of silently dropping it.
+            self.repo.stage_paths(candidates)
+            self.state.remove_declined(candidates)
+            print("Staged untracked files: " + ", ".join(candidates))
             return
 
         print("Untracked files:")

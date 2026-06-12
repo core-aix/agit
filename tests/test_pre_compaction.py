@@ -108,6 +108,30 @@ def test_pre_compaction_captures_summary_to_state_and_notes(tmp_path, monkeypatc
     assert [t.user_prompt for t in summarizer.exported_session.turns] == ["build the feature"]
 
 
+def test_pre_compaction_summary_applies_to_owning_session_after_switch(tmp_path, monkeypatch):
+    # The summary worker can finish after the user switched sessions; the
+    # result must land on the session that requested it, and the popup must
+    # name that session.
+    runner, repo = _pre_compaction_runner(tmp_path, monkeypatch, turns=[_turn()])
+    runner.state.backend_session_id = "ses-1"
+    runner.name = "feature-x"
+    owning_state = runner.state
+
+    runner._handle_pre_compaction()
+    assert "session 'feature-x'" in (runner.message or "")
+    assert runner._precompact_thread is not None
+    runner._precompact_thread.join(timeout=10)
+
+    # The user switched sessions before the summary landed.
+    runner.name = "other"
+    runner.state = SimpleNamespace(session_summary=None, session_summary_commit=None)
+    runner._service_precompact_summary()
+
+    assert owning_state.session_summary == "captured design context"
+    assert runner.state.session_summary is None  # the other session is untouched
+    assert "session 'feature-x'" in (runner.message or "")
+
+
 def test_pre_compaction_without_tracked_session_is_a_noop(tmp_path, monkeypatch):
     runner, repo = _pre_compaction_runner(tmp_path, monkeypatch, turns=[_turn()])
     runner.state.backend_session_id = None

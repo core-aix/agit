@@ -381,6 +381,74 @@ def test_backend_other_args_still_launch_tui(monkeypatch):
     assert captured["backend_args"] == ["--port", "12345"]
 
 
+# --- scripted prompts: --prompt (#53) -----------------------------------------
+
+
+def test_prompt_flag_implies_json_mode_and_passes_prompts(monkeypatch):
+    captured: dict = {}
+
+    class FakeShell:
+        def __init__(self, repo, **kw):
+            captured.update(kw)
+
+        def run(self):
+            return None
+
+    monkeypatch.setattr(cli, "AgitShell", FakeShell)
+    monkeypatch.setattr(
+        cli, "ProxyRunner", lambda *a, **k: (_ for _ in ()).throw(AssertionError("proxy must not launch"))
+    )
+    monkeypatch.setattr(cli, "_discover_or_init", lambda p: object())
+
+    class Config:
+        def has_default_backend(self):
+            return True
+
+        default_backend = "claude"
+        use_worktrees = True
+
+    monkeypatch.setattr(cli, "GlobalConfig", lambda: Config())
+
+    rc = cli.main(["--prompt", "build it", "--prompt", ":status"])
+
+    assert rc == 0
+    assert captured["prompts"] == ["build it", ":status"]
+
+
+def test_prompt_flag_never_blocks_on_input_even_with_a_tty(monkeypatch):
+    # A scripted run must sail past the privacy acknowledgment and the
+    # first-run backend selection — both would otherwise input() on a TTY.
+    captured: dict = {}
+
+    class FakeShell:
+        def __init__(self, repo, **kw):
+            captured.update(kw)
+
+        def run(self):
+            return None
+
+    monkeypatch.setattr(cli, "AgitShell", FakeShell)
+    monkeypatch.setattr(cli, "_discover_or_init", lambda p: object())
+
+    class Config:
+        def has_default_backend(self):
+            return False  # would trigger the interactive first-run selection
+
+        default_backend = None
+        use_worktrees = True
+
+    monkeypatch.setattr(cli, "GlobalConfig", lambda: Config())
+    _force_tty(monkeypatch, stdin=True)
+    monkeypatch.setattr(
+        "builtins.input", lambda *a: (_ for _ in ()).throw(AssertionError("scripted run must not prompt"))
+    )
+
+    rc = cli.main(["--backend", "claude", "--prompt", "build it"])
+
+    assert rc == 0
+    assert captured["prompts"] == ["build it"]
+
+
 # --- startup privacy warning --------------------------------------------------
 
 

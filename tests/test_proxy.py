@@ -603,13 +603,15 @@ def test_finish_agent_parse_does_not_block_on_cancelled_followup(tmp_path):
     assert runner._awaited_followups == []
 
 
-def test_agent_commit_popup_includes_commit_id(tmp_path):
+def test_agent_commit_popup_includes_commit_id_and_session(tmp_path):
     # The auto-commit confirmation names the short SHA so the user can find the
-    # commit aGiT just made.
+    # commit aGiT just made, and the session it belongs to — background sessions
+    # auto-commit too, so the popup alone must say whose work it announces.
     runner = make_runner(
         repo=FakeCommitRepo(),
         state=AgitState(tmp_path),
         verbose=False,
+        name="feature-x",
     )
     runner._review_untracked_popup = lambda include_declined: "No untracked files to review."
 
@@ -622,7 +624,7 @@ def test_agent_commit_popup_includes_commit_id(tmp_path):
     )
 
     assert committed is True
-    assert runner.message == "Created <aGiT> commit abc1234."
+    assert runner.message == "Created <aGiT> commit abc1234 in session 'feature-x'."
 
 
 def _make_cell(data=" ", **attrs):
@@ -1391,6 +1393,54 @@ def test_backend_session_change_warns_once(tmp_path):
     runner.state.backend_session_id = "new"
     runner._note_backend_session_change("newer")
     assert messages == []
+
+
+def _name_persisting_runner(tmp_path, name):
+    base = tmp_path / "base"
+    base.mkdir()
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    return make_runner(
+        worktree=object(),
+        _warned_backend_session=True,
+        name=name,
+        state=AgitState(worktree),
+        base_repo=types.SimpleNamespace(repo=base),
+        global_config=types.SimpleNamespace(default_backend="opencode"),
+    ), base
+
+
+def test_backend_session_change_persists_name_in_root_state(tmp_path):
+    # The user-given name is linked to the conversation id as soon as the
+    # runner observes it — not only on clean exit — so it survives crashes,
+    # kept worktrees, and restarts.
+    runner, base = _name_persisting_runner(tmp_path, "my-feature")
+
+    runner._note_backend_session_change("sess-1")
+
+    assert AgitState(base).session_name_for("sess-1") == "my-feature"
+
+
+def test_backend_session_change_follows_id_drift(tmp_path):
+    # When the backend forks a new conversation id (e.g. on resume), the name
+    # follows it so the resume list still shows the session under its name.
+    runner, base = _name_persisting_runner(tmp_path, "my-feature")
+
+    runner._note_backend_session_change("sess-1")
+    runner.state.backend_session_id = "sess-1"
+    runner._note_backend_session_change("sess-2")
+
+    assert AgitState(base).session_name_for("sess-2") == "my-feature"
+
+
+def test_auto_session_names_are_not_persisted(tmp_path):
+    # Auto session-N names are placeholders, not names; recording them would
+    # mislabel unrelated conversations across runs.
+    runner, base = _name_persisting_runner(tmp_path, "session-3")
+
+    runner._note_backend_session_change("sess-1")
+
+    assert AgitState(base).session_name_for("sess-1") is None
 
 
 def test_new_session_not_applied_without_flag(tmp_path):
@@ -2890,6 +2940,9 @@ def test_startup_name_uses_user_given_prior_worktree():
 
     # A non-auto prior worktree name counts as a name; an auto one does not.
     assert runner._resolve_startup_session_name(runner.root, "sess-1", "my-feature") == "my-feature"
+    # And it is keyed by the conversation id so the link survives once the
+    # last-session record moves on to another conversation.
+    assert runner.root._names["sess-1"] == "my-feature"
 
 
 def test_startup_name_prompts_when_unnamed_and_records_it():
@@ -4116,7 +4169,38 @@ def test_screen_renderer_status_line_elides_long_cwd_from_left():
     assert visible.rstrip().endswith("session-1")
 
 
-def test_status_line_includes_agent_working_directory(tmp_path):
+def test_status_line_shows_base_repo_directory_not_the_worktree(tmp_path):
+    # The path identifies the PROJECT (base repo), not the internal
+    # .agit/worktrees/<name> sandbox — the session name next to it already
+    # says which worktree is active.
+    import subprocess
+
+    from agit.git import GitRepo
+    from agit.config import AgitState
+
+    base = tmp_path / "project"
+    worktree = base / ".agit" / "worktrees" / "session-1"
+    worktree.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q"], cwd=base, check=True)
+    subprocess.run(["git", "init", "-q"], cwd=worktree, check=True)
+    runner = make_runner(
+        repo=GitRepo(worktree),
+        base_repo=GitRepo(base),
+        state=AgitState(worktree),
+        name="session-1",
+        backend=type("B", (), {"name": "claude"})(),
+        scroll_back=0,
+        cols=200,
+    )
+
+    line = runner._status_line()
+    assert f"{tmp_path}/project " in line
+    assert ".agit/worktrees" not in line
+
+
+def test_status_line_falls_back_to_repo_directory_without_base(tmp_path):
+    # --no-worktree mode (and bare test runners) have no separate base repo:
+    # the repo the agent works in is the project.
     import subprocess
 
     from agit.git import GitRepo
@@ -4133,7 +4217,7 @@ def test_status_line_includes_agent_working_directory(tmp_path):
     )
 
     line = runner._status_line()
-    assert tmp_path.name in line  # the directory the agent works in is shown
+    assert tmp_path.name in line
 
 
 def test_screen_renderer_status_line_scrollback():

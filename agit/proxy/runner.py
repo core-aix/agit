@@ -1059,6 +1059,23 @@ class ProxyRunner:
         except Exception as error:
             self._debug(f"remember backend session failed: {error!r}")
 
+    def _persist_session_name(self, session_id: str | None) -> None:
+        # Link this session's user-given name to its backend conversation id in
+        # the durable repo-root record as soon as the id is known — and again
+        # whenever the backend forks a new id — not only on clean exit. Waiting
+        # for exit strands the name under a stale id (or never records it) when
+        # the worktree is kept, aGiT crashes, or the conversation id drifts
+        # across resumes, leaving the session unnamed in the resume list.
+        name = self.name
+        if not session_id or not name or self._AUTO_NAME_RE.match(name):
+            return
+        try:
+            root = AgitState(self.base_repo.repo, default_backend=self.global_config.default_backend)
+            if root.session_name_for(session_id) != name:
+                root.name_session(session_id, name)
+        except Exception as error:
+            self._debug(f"persist session name failed: {error!r}")
+
     # --- live-session multiplexer ---
 
     def _worktrees(self) -> WorktreeManager:
@@ -1146,7 +1163,11 @@ class ProxyRunner:
         # prompt when there is no real name yet. Auto `session-N` names don't count.
         existing = root_state.session_name_for(resume_id)
         if not existing and prior_worktree and not self._AUTO_NAME_RE.match(prior_worktree):
+            # The name only lived in the last-session record; key it by the
+            # conversation id too so it stays linked once that record moves on.
             existing = prior_worktree
+            if resume_id:
+                root_state.name_session(resume_id, existing)
         if existing:
             return existing
         name = self._prompt_startup_name(resume_id is not None)
@@ -1523,6 +1544,9 @@ class ProxyRunner:
         self._render()
 
     def _note_backend_session_change(self, new_session_id: str | None) -> None:
+        # Keep the durable name record pointing at the conversation this session
+        # is actually running (ids drift when the backend forks on resume).
+        self._persist_session_name(new_session_id)
         # If the worktree's active conversation changed to a different backend
         # session that aGiT didn't start, the user likely started it from inside
         # the backend. Warn once that such sessions share this branch.
@@ -2234,6 +2258,7 @@ class ProxyRunner:
             # Resume this exact backend conversation (its transcript lives under
             # the worktree path, which we have just recreated/reused).
             self.state.backend_session_id = resume_session_id
+            self._persist_session_name(resume_session_id)
         self.backend = make_proxy_agent(self.state.backend)
         self.actions = AgitActions(self.repo, self.state, verbose=self.verbose)
         self._sanitize_state_trace()
@@ -3034,9 +3059,12 @@ class ProxyRunner:
             short_session_fn=_short_session,
             menu_label=self._menu_label(),
             summarizer_on=self._summarization_enabled(),
-            # The directory the agent works in: its session worktree, or the
-            # repo itself in --no-worktree mode.
-            cwd=str(repo_path) if (repo_path := getattr(self.repo, "repo", None)) else None,
+            # The project the agent works on: the BASE repository, not the
+            # session worktree under .agit/worktrees/ (an internal detail whose
+            # long path mostly repeats the session name shown next to it).
+            cwd=str(repo_path)
+            if (repo_path := getattr(self.base_repo, "repo", None) or getattr(self.repo, "repo", None))
+            else None,
         )
 
     def _summarization_enabled(self) -> bool:
@@ -3378,11 +3406,22 @@ class ProxyRunner:
             self._debug(f"uncovered backend commit check failed: {error!r}")
             return []
 
+    def _session_label(self) -> str:
+        """The name of the session the runner is currently operating on — the
+        one popups should attribute work to. Inside temp-swap windows
+        (_with_session) this is the serviced background session, which is
+        exactly the session whose commit/summary the popup announces."""
+        return self.name or "main"
+
     def _agent_commit_message(self) -> str:
         # The auto-commit confirmation, including the short SHA of the commit aGiT
-        # just made so the user can find it (e.g. `git show <id>`).
+        # just made so the user can find it (e.g. `git show <id>`). Background
+        # sessions auto-commit too, so the popup must say whose work it announces.
         commit_id = self._last_agent_commit_id
-        return f"Created <aGiT> commit {commit_id}." if commit_id else "Created <aGiT> commit."
+        session = self._session_label()
+        if commit_id:
+            return f"Created <aGiT> commit {commit_id} in session '{session}'."
+        return f"Created <aGiT> commit in session '{session}'."
 
     # ------------------------------------------------------------------
     # Background commit summarization (#8)
@@ -3437,8 +3476,15 @@ class ProxyRunner:
             return
         session_summary = self.state.session_summary
         # The summary may finish after the user switches sessions: remember the
-        # owning repo/state so it is never applied to a different session.
-        result: dict = {"sha": full_sha, "short_sha": sha, "repo": self.repo, "state": self.state}
+        # owning repo/state/name so it is never applied to — or reported
+        # against — a different session.
+        result: dict = {
+            "sha": full_sha,
+            "short_sha": sha,
+            "repo": self.repo,
+            "state": self.state,
+            "session_name": self._session_label(),
+        }
         self._summary_result = None
         self._summary_pending = {"sha": full_sha, "since": time.monotonic()}
 
@@ -3468,7 +3514,10 @@ class ProxyRunner:
 
         self._summary_thread = threading.Thread(target=worker, daemon=True, name="agit-summary")
         self._summary_thread.start()
-        self._set_message(f"aGiT is summarizing commit {sha}...", seconds=self.SUMMARY_WAIT_SECONDS)
+        self._set_message(
+            f"aGiT is summarizing commit {sha} in session '{self._session_label()}'...",
+            seconds=self.SUMMARY_WAIT_SECONDS,
+        )
 
     def _service_commit_summary(self) -> None:
         """Main-loop tick: apply a finished background summary (#8). All git
@@ -3478,12 +3527,15 @@ class ProxyRunner:
             return
         self._summary_result = None
         self._summary_pending = None
+        session = result.get("session_name") or "main"
         if "error" in result:
             # Includes UnusableSummaryError (backend returned "You've hit your
             # session limit..." or similar, issue #8): the commit keeps its
             # prompt-led message instead of getting the error as a subject.
             self._debug(f"commit summarization failed: {result['error']}")
-            self._set_message("aGiT: commit summarization failed; keeping the prompt-based message.")
+            self._set_message(
+                f"aGiT: commit summarization failed in session '{session}'; keeping the prompt-based message."
+            )
             return
         sha, summary, repo, state = result["sha"], result["summary"], result["repo"], result["state"]
         try:
@@ -3491,7 +3543,7 @@ class ProxyRunner:
             # added before an amend would hang off the orphaned pre-amend object.
             target = self._amend_summary_into_head(repo, sha, summary, result.get("metadata"))
             if target:
-                self._set_message(f"Summary added to commit {result['short_sha']}.")
+                self._set_message(f"Summary added to commit {result['short_sha']} in session '{session}'.")
             else:
                 # Already integrated or superseded: the summary lives in the
                 # commit's git notes instead of its message.
@@ -3703,6 +3755,7 @@ class ProxyRunner:
             self._debug(f"adopting backend session {latest} (was {self.state.backend_session_id})")
             self.state.backend_session_id = latest
             self.state.last_backend_message_id = None  # recomputed from the transcript on resume
+            self._persist_session_name(latest)
 
     def _persist_last_session_record(self) -> None:
         # Save just the resume pointer for the current (primary) session into the
@@ -3881,7 +3934,10 @@ class ProxyRunner:
             self._debug("pre-compaction summary worker busy; skipping")
             return
         current_summary = self.state.session_summary
-        result: dict = {}
+        # The summary may finish after the user switches sessions: remember the
+        # owning repo/state/name so it is applied to — and reported against —
+        # the session that requested it, not whichever is active by then.
+        result: dict = {"repo": self.repo, "state": self.state, "session_name": self._session_label()}
         self._precompact_result = None
 
         def worker() -> None:
@@ -3896,25 +3952,28 @@ class ProxyRunner:
 
         self._precompact_thread = threading.Thread(target=worker, daemon=True, name="agit-precompact")
         self._precompact_thread.start()
-        self._set_message("aGiT: Capturing session summary before compaction...")
+        self._set_message(f"aGiT: Capturing session summary before compaction (session '{self._session_label()}')...")
 
     def _service_precompact_summary(self) -> None:
         result = self._precompact_result
         if result is None:
             return
         self._precompact_result = None
+        session = result.get("session_name") or "main"
         if "error" in result:
             self._debug(f"pre-compaction summary failed: {result['error']}")
-            self._set_message("aGiT: Pre-compaction summary failed.")
+            self._set_message(f"aGiT: Pre-compaction summary failed (session '{session}').")
             return
+        repo = result.get("repo") or self.repo
+        state = result.get("state") or self.state
         try:
             summary = result["summary"]
-            self.state.session_summary = summary
-            head_sha = self.repo.rev_parse("HEAD")
+            state.session_summary = summary
+            head_sha = repo.rev_parse("HEAD")
             if head_sha:
-                self.state.session_summary_commit = head_sha
-                self.repo.notes_add(head_sha, summary, namespace="agit/session-summary")
-            self._set_message("aGiT: Session summary captured.")
+                state.session_summary_commit = head_sha
+                repo.notes_add(head_sha, summary, namespace="agit/session-summary")
+            self._set_message(f"aGiT: Session summary captured (session '{session}').")
         except Exception as error:
             self._debug(f"applying pre-compaction summary failed: {error!r}")
 

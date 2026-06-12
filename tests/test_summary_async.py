@@ -283,6 +283,36 @@ def test_failed_rolling_summary_does_not_discard_commit_summary(tmp_path, monkey
     assert runner.state.session_summary == "previous narrative"
 
 
+def test_summary_popups_name_the_owning_session(tmp_path, monkeypatch):
+    # Background sessions summarize too, and a summary can land after the user
+    # switched away: every popup must say which session it is about.
+    runner, repo = _summary_runner(tmp_path, monkeypatch)
+    runner.name = "feature-x"
+    sha = _commit_change(repo, "a.txt", "<aGiT> prompt subject")
+
+    runner._start_commit_summary(sha, [_turn()])
+    assert "in session 'feature-x'" in (runner.message or "")
+
+    runner.name = "other"  # the user switched sessions before the summary landed
+    _finish_summary(runner)
+    assert (runner.message or "").endswith("in session 'feature-x'.")
+
+
+def test_failed_summary_popup_names_the_owning_session(tmp_path, monkeypatch):
+    from agit.summaries import UnusableSummaryError
+
+    runner, repo = _summary_runner(tmp_path, monkeypatch)
+    runner.name = "feature-x"
+    FakeSummarizer.fail = UnusableSummaryError("You've hit your session limit.")
+    sha = _commit_change(repo, "a.txt", "<aGiT> prompt subject")
+
+    runner._start_commit_summary(sha, [_turn()])
+    runner.name = "other"
+    _finish_summary(runner)
+
+    assert "failed in session 'feature-x'" in (runner.message or "")
+
+
 def test_integration_waits_for_summary_until_deadline():
     runner = make_runner()
     runner.SUMMARY_WAIT_SECONDS = 45.0

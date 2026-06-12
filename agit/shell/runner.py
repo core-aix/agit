@@ -30,9 +30,15 @@ class AgitShell:
         backend: str | None = None,
         new_session: bool = False,
         backend_args: list[str] | None = None,
+        prompts: list[str] | None = None,
     ) -> None:
         self.repo = repo
         self.backend_args = list(backend_args or [])  # forwarded to the backend CLI (#32)
+        # Scripted mode (#53): run these prompts in order, then exit. No
+        # question can be answered in a scripted or piped run, so everything
+        # that would ask one falls back to a safe non-interactive default.
+        self.prompts = list(prompts) if prompts is not None else None
+        self.interactive = self.prompts is None and sys.stdin.isatty()
         self.global_config = GlobalConfig()
         self.state = AgitState(repo.repo, default_backend=self.global_config.default_backend)
         if backend and backend in BACKENDS and backend != self.state.backend:
@@ -47,12 +53,12 @@ class AgitShell:
             self.state.new_agit_session_id()
         self.verbose = verbose
         self.prompt = AgitPrompt(self._prompt_state)
-        self.actions = AgitActions(repo, self.state, verbose=verbose)
+        self.actions = AgitActions(repo, self.state, verbose=verbose, interactive=self.interactive)
         self.management_lock = RepoLock(repo.repo / ".agit" / "lock")
 
     def run(self) -> None:
         try:
-            resolved = ensure_installed_backend(self.state.backend, self.global_config, interactive=sys.stdin.isatty())
+            resolved = ensure_installed_backend(self.state.backend, self.global_config, interactive=self.interactive)
         except BackendUnavailable as error:
             print(error)
             return
@@ -68,6 +74,9 @@ class AgitShell:
             print(f"Backend: {self.state.backend}")
             print("Type :help for aGiT commands. Backend / commands are passed through.")
         try:
+            if self.prompts is not None:
+                self._run_scripted(self.prompts)
+                return
             while True:
                 try:
                     text = self.prompt.prompt().strip()
@@ -83,6 +92,21 @@ class AgitShell:
                     self._handle_agent_prompt(text)
         finally:
             self.management_lock.release()
+
+    def _run_scripted(self, prompts: list[str]) -> None:
+        """`agit --prompt ...` (#53): run the prompts in order, then exit.
+        ':' commands work exactly as at the interactive prompt; each prompt is
+        echoed so the output reads like a session transcript."""
+        for text in prompts:
+            text = text.strip()
+            if not text:
+                continue
+            print(f"> {text}")
+            if text.startswith(AGIT_PREFIX):
+                if self._handle_command(text):
+                    return
+            else:
+                self._handle_agent_prompt(text)
 
     def _handle_command(self, text: str) -> bool:
         command, _, arg = text.partition(" ")
