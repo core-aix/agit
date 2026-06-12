@@ -30,7 +30,9 @@ def test_agent_commit_message_contains_trace_and_metadata():
     assert "backend: opencode" in message
     assert "backend_session_id: ses-1" in message
     assert "context_tokens: 100" in message
-    assert "tokens_since_last_commit_input: 130" in message
+    # Input counts uncached input PLUS cache-creation tokens (130 + 5): cache
+    # writes are fresh input processed once (#14). Cache reads stay separate.
+    assert "tokens_since_last_commit_input: 135" in message
     assert "tokens_since_last_commit_output: 10" in message
     assert "tokens_since_last_commit_cache_read: 20" in message
     assert "tokens_since_last_commit_cache_write: 5" in message
@@ -134,6 +136,62 @@ def test_agent_commit_message_includes_nonzero_reasoning():
     )
 
     assert "tokens_since_last_commit_reasoning: 6" in message
+
+
+def test_first_run_input_counts_cache_creation_tokens():
+    # First commit in a fresh repo (#14): the backend reports almost the whole
+    # context as cache_creation_input_tokens and only a sliver as input_tokens.
+    # All of it was processed as input exactly once, so the input line must
+    # reflect input + cache_write — not look near zero next to the cache.
+    message = build_agent_commit_message(
+        latest_prompt="fix it",
+        trace=[],
+        backend="claude",
+        backend_session_id="ses-1",
+        agit_session_id="agit-1",
+        model="m",
+        token_usage={
+            "context": 18250,
+            "total": 200,
+            "input": 250,
+            "output": 200,
+            "reasoning": 0,
+            "cache_read": 0,
+            "cache_write": 18000,
+        },
+    )
+
+    assert "tokens_since_last_commit_input: 18250" in message
+    assert "tokens_since_last_commit_cache_write: 18000" in message
+    assert "tokens_since_last_commit_cache_read" not in message
+
+
+def test_subagent_input_counts_subagent_cache_creation_tokens():
+    message = build_agent_commit_message(
+        latest_prompt="fix it",
+        trace=[],
+        backend="claude",
+        backend_session_id="ses-1",
+        agit_session_id="agit-1",
+        model="m",
+        token_usage={
+            "context": 100,
+            "total": 5,
+            "input": 100,
+            "output": 5,
+            "reasoning": 0,
+            "cache_read": 0,
+            "cache_write": 0,
+            "subagent_input": 40,
+            "subagent_output": 60,
+            "subagent_reasoning": 0,
+            "subagent_cache_read": 0,
+            "subagent_cache_write": 500,
+        },
+    )
+
+    assert "tokens_since_last_commit_subagent_input: 540" in message
+    assert "tokens_since_last_commit_subagent_cache_write: 500" in message
 
 
 def test_agent_commit_message_records_subagent_token_categories():

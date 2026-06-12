@@ -382,6 +382,11 @@ def _append_positive(lines: list[str], key: str, value: object) -> None:
         lines.append(f"{key}: {amount}")
 
 
+def _int_value(token_usage: dict[str, int | None], key: str) -> int:
+    value = token_usage.get(key)
+    return value if isinstance(value, int) else 0
+
+
 def _token_metadata_lines(token_usage: dict[str, int | None] | None) -> list[str]:
     lines = [f"context_tokens: {_token_value(token_usage, 'context')}"]
     if not token_usage:
@@ -391,14 +396,28 @@ def _token_metadata_lines(token_usage: dict[str, int | None] | None) -> list[str
     # Main-line conversation consumption, broken out by category. Input and
     # output are always recorded; cache and reasoning only when non-zero so the
     # metadata stays compact for backends that do not report them.
-    lines.append(f"tokens_since_last_commit_input: {int(token_usage.get('input') or 0)}")
+    #
+    # Backends report cache-creation tokens separately from input_tokens, but
+    # they ARE fresh input — processed once and written to the cache. Counting
+    # only the uncached remainder made a first run's input look near zero next
+    # to its cache_write (issue #14), so the input line counts both; the
+    # cache_write line below remains the "of which was written to the cache"
+    # breakdown. Cache READS stay separate: those tokens were already counted
+    # as input when first processed.
+    lines.append(
+        f"tokens_since_last_commit_input: {_int_value(token_usage, 'input') + _int_value(token_usage, 'cache_write')}"
+    )
     _append_positive(lines, "tokens_since_last_commit_cache_read", token_usage.get("cache_read"))
     _append_positive(lines, "tokens_since_last_commit_cache_write", token_usage.get("cache_write"))
     lines.append(f"tokens_since_last_commit_output: {int(token_usage.get('output') or 0)}")
     _append_positive(lines, "tokens_since_last_commit_reasoning", token_usage.get("reasoning"))
-    # Sub-agent / sidechain consumption, recorded separately and only when the
-    # backend exposes it.
-    _append_positive(lines, "tokens_since_last_commit_subagent_input", token_usage.get("subagent_input"))
+    # Sub-agent / sidechain consumption, recorded separately (same input
+    # accounting as the main line) and only when the backend exposes it.
+    _append_positive(
+        lines,
+        "tokens_since_last_commit_subagent_input",
+        _int_value(token_usage, "subagent_input") + _int_value(token_usage, "subagent_cache_write"),
+    )
     _append_positive(lines, "tokens_since_last_commit_subagent_cache_read", token_usage.get("subagent_cache_read"))
     _append_positive(lines, "tokens_since_last_commit_subagent_cache_write", token_usage.get("subagent_cache_write"))
     _append_positive(lines, "tokens_since_last_commit_subagent_output", token_usage.get("subagent_output"))
