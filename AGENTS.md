@@ -12,14 +12,14 @@ aGiT stands for agent + git. It is a Python library and interactive CLI that com
 
 ## Commit Types
 
-- Agent commits use the `<agent>` tag.
+- Agent commits use the `<aGiT>` tag.
 - User-triggered commits use the user-provided subject without an aGiT subject tag.
 - Before an agent acts, if user changes already exist, aGiT creates a separate user commit first.
 - A commit is created only when code has changed and staged changes exist.
 
 ## Commit Messages
 
-- Agent commit subjects start with `<agent>` followed immediately by the latest user query for readability.
+- Agent commit subjects start with `<aGiT>` followed immediately by the latest user query for readability.
 - User commit subjects use the user-provided commit message.
 - User commit messages are required; blank user commit messages are rejected.
 - Agent commit bodies include the full interaction trace since the last code-changing commit.

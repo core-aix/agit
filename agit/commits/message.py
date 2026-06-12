@@ -274,7 +274,7 @@ def _trace_and_metadata_lines(
     return lines
 
 
-AGENT_MERGE_SUBJECT_PREFIX = "<agent-merge> "
+AGENT_MERGE_SUBJECT_PREFIX = "<aGiT-merge> "
 
 
 def build_agent_merge_message(

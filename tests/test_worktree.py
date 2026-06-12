@@ -220,7 +220,7 @@ def test_finalize_agent_merge_commits_and_advances(tmp_path):
     assert main.list_branches("agit/") == []
     assert runner.merge_ctx is None
     # The merge commit is tagged for an agent-resolved merge.
-    assert "<agent-merge>" in main._run(["git", "log", "-1", "--format=%s"]).stdout
+    assert "<aGiT-merge>" in main._run(["git", "log", "-1", "--format=%s"]).stdout
 
 
 def test_turn_from_branch():

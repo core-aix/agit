@@ -367,7 +367,7 @@ def test_agent_merge_message_format():
         backend_session_id="ses-9",
         conflicting_commits="abc123 base edit",
     )
-    assert message.splitlines()[0].startswith("<agent-merge> ")
+    assert message.splitlines()[0].startswith("<aGiT-merge> ")
     assert "commit_type: agent-merge" in message
     assert "session_name: feature-x" in message
     assert "source_branch: agit/feature-x/t2" in message

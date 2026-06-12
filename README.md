@@ -137,13 +137,13 @@ The base working tree (the branch you launched from) is only ever advanced by **
 
 ### Integration and startup recovery
 
-When a session's commits are merged into the base branch and the merge has conflicts, the agent backend resolves them, and the resolution is recorded as an `<agent-merge>` commit listing the base commits it was resolved against.
+When a session's commits are merged into the base branch and the merge has conflicts, the agent backend resolves them, and the resolution is recorded as an `<aGiT-merge>` commit listing the base commits it was resolved against.
 
 On startup, aGiT reconciles worktrees left behind by previous runs: it integrates any pending commits into the base branch and then deletes the worktree. Worktrees that cannot be integrated cleanly (a conflict, or uncommitted changes) are kept so no work is lost. The backend conversation itself persists (keyed by the worktree path) and stays resumable.
 
 ### Commit message format
 
-aGiT commit messages use a consistent Markdown-style structure. The first line is the subject (prefixed with `<aGiT>` for agent commits — including backend-made commits aGiT amends, see `tag_backend_commits` under Configuration — `<agent-merge>` for agent-resolved merges, or left plain for user commits). When summarization is enabled the summary leads the message: its first line is the subject and the rest is the first paragraph of the body. The rest of the body is organized into `#` sections — `# Prompts` (when a summary takes the subject), `# Interaction Trace`, `# aGiT Metadata` — with `## User` / `## Agent` subsections inside the interaction trace. Commits are written with `git commit -F -` (no editor), so the `#` lines are preserved rather than stripped as git comments. Secrets and terminal escape sequences are masked out of subjects and trace bodies before committing.
+aGiT commit messages use a consistent Markdown-style structure. The first line is the subject (prefixed with `<aGiT>` for agent commits — including backend-made commits aGiT amends, see `tag_backend_commits` under Configuration — `<aGiT-merge>` for agent-resolved merges, or left plain for user commits). When summarization is enabled the summary leads the message: its first line is the subject and the rest is the first paragraph of the body. The rest of the body is organized into `#` sections — `# Prompts` (when a summary takes the subject), `# Interaction Trace`, `# aGiT Metadata` — with `## User` / `## Agent` subsections inside the interaction trace. Commits are written with `git commit -F -` (no editor), so the `#` lines are preserved rather than stripped as git comments. Secrets and terminal escape sequences are masked out of subjects and trace bodies before committing.
 
 Because the conversation is recorded in commit messages, aGiT shows a privacy warning at startup — never enter passwords, API keys, or other sensitive information in the chat — which must be acknowledged to continue (skipped when there is no terminal to acknowledge from).
 
