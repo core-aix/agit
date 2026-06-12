@@ -1059,6 +1059,23 @@ class ProxyRunner:
         except Exception as error:
             self._debug(f"remember backend session failed: {error!r}")
 
+    def _persist_session_name(self, session_id: str | None) -> None:
+        # Link this session's user-given name to its backend conversation id in
+        # the durable repo-root record as soon as the id is known — and again
+        # whenever the backend forks a new id — not only on clean exit. Waiting
+        # for exit strands the name under a stale id (or never records it) when
+        # the worktree is kept, aGiT crashes, or the conversation id drifts
+        # across resumes, leaving the session unnamed in the resume list.
+        name = self.name
+        if not session_id or not name or self._AUTO_NAME_RE.match(name):
+            return
+        try:
+            root = AgitState(self.base_repo.repo, default_backend=self.global_config.default_backend)
+            if root.session_name_for(session_id) != name:
+                root.name_session(session_id, name)
+        except Exception as error:
+            self._debug(f"persist session name failed: {error!r}")
+
     # --- live-session multiplexer ---
 
     def _worktrees(self) -> WorktreeManager:
@@ -1146,7 +1163,11 @@ class ProxyRunner:
         # prompt when there is no real name yet. Auto `session-N` names don't count.
         existing = root_state.session_name_for(resume_id)
         if not existing and prior_worktree and not self._AUTO_NAME_RE.match(prior_worktree):
+            # The name only lived in the last-session record; key it by the
+            # conversation id too so it stays linked once that record moves on.
             existing = prior_worktree
+            if resume_id:
+                root_state.name_session(resume_id, existing)
         if existing:
             return existing
         name = self._prompt_startup_name(resume_id is not None)
@@ -1523,6 +1544,9 @@ class ProxyRunner:
         self._render()
 
     def _note_backend_session_change(self, new_session_id: str | None) -> None:
+        # Keep the durable name record pointing at the conversation this session
+        # is actually running (ids drift when the backend forks on resume).
+        self._persist_session_name(new_session_id)
         # If the worktree's active conversation changed to a different backend
         # session that aGiT didn't start, the user likely started it from inside
         # the backend. Warn once that such sessions share this branch.
@@ -2234,6 +2258,7 @@ class ProxyRunner:
             # Resume this exact backend conversation (its transcript lives under
             # the worktree path, which we have just recreated/reused).
             self.state.backend_session_id = resume_session_id
+            self._persist_session_name(resume_session_id)
         self.backend = make_proxy_agent(self.state.backend)
         self.actions = AgitActions(self.repo, self.state, verbose=self.verbose)
         self._sanitize_state_trace()
@@ -3730,6 +3755,7 @@ class ProxyRunner:
             self._debug(f"adopting backend session {latest} (was {self.state.backend_session_id})")
             self.state.backend_session_id = latest
             self.state.last_backend_message_id = None  # recomputed from the transcript on resume
+            self._persist_session_name(latest)
 
     def _persist_last_session_record(self) -> None:
         # Save just the resume pointer for the current (primary) session into the

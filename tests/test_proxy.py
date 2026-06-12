@@ -1395,6 +1395,54 @@ def test_backend_session_change_warns_once(tmp_path):
     assert messages == []
 
 
+def _name_persisting_runner(tmp_path, name):
+    base = tmp_path / "base"
+    base.mkdir()
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    return make_runner(
+        worktree=object(),
+        _warned_backend_session=True,
+        name=name,
+        state=AgitState(worktree),
+        base_repo=types.SimpleNamespace(repo=base),
+        global_config=types.SimpleNamespace(default_backend="opencode"),
+    ), base
+
+
+def test_backend_session_change_persists_name_in_root_state(tmp_path):
+    # The user-given name is linked to the conversation id as soon as the
+    # runner observes it — not only on clean exit — so it survives crashes,
+    # kept worktrees, and restarts.
+    runner, base = _name_persisting_runner(tmp_path, "my-feature")
+
+    runner._note_backend_session_change("sess-1")
+
+    assert AgitState(base).session_name_for("sess-1") == "my-feature"
+
+
+def test_backend_session_change_follows_id_drift(tmp_path):
+    # When the backend forks a new conversation id (e.g. on resume), the name
+    # follows it so the resume list still shows the session under its name.
+    runner, base = _name_persisting_runner(tmp_path, "my-feature")
+
+    runner._note_backend_session_change("sess-1")
+    runner.state.backend_session_id = "sess-1"
+    runner._note_backend_session_change("sess-2")
+
+    assert AgitState(base).session_name_for("sess-2") == "my-feature"
+
+
+def test_auto_session_names_are_not_persisted(tmp_path):
+    # Auto session-N names are placeholders, not names; recording them would
+    # mislabel unrelated conversations across runs.
+    runner, base = _name_persisting_runner(tmp_path, "session-3")
+
+    runner._note_backend_session_change("sess-1")
+
+    assert AgitState(base).session_name_for("sess-1") is None
+
+
 def test_new_session_not_applied_without_flag(tmp_path):
     runner = make_runner(
         _force_new_session=False,
@@ -2892,6 +2940,9 @@ def test_startup_name_uses_user_given_prior_worktree():
 
     # A non-auto prior worktree name counts as a name; an auto one does not.
     assert runner._resolve_startup_session_name(runner.root, "sess-1", "my-feature") == "my-feature"
+    # And it is keyed by the conversation id so the link survives once the
+    # last-session record moves on to another conversation.
+    assert runner.root._names["sess-1"] == "my-feature"
 
 
 def test_startup_name_prompts_when_unnamed_and_records_it():
