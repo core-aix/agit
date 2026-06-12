@@ -77,7 +77,7 @@ def test_amend_message_keeps_original_and_appends_trace_and_metadata():
         session_name="s1",
         covered_commits=["abc123", "def456"],
     )
-    assert message.startswith("<agent> fix the parser\n")
+    assert message.startswith("<aGiT> fix the parser\n")
     assert "Details the agent wrote itself." in message
     assert "# Interaction Trace" in message
     assert "## User" in message and "fix it" in message
@@ -87,17 +87,37 @@ def test_amend_message_keeps_original_and_appends_trace_and_metadata():
 
 
 def test_amend_message_does_not_double_prefix_subject():
+    for already in ("<aGiT> already prefixed", "<agent> already prefixed"):
+        message = build_backend_amend_message(
+            original_message=already,
+            trace=[],
+            backend="claude",
+            backend_session_id=None,
+            agit_session_id="agit-1",
+            model=None,
+            covered_commits=["abc123"],
+        )
+        assert message.startswith(f"{already}\n")
+        assert "<aGiT> <aGiT>" not in message and "<aGiT> <agent>" not in message
+
+
+def test_amend_message_tag_can_be_disabled():
+    # The tag_backend_commits config option (README: default true) removes the
+    # <aGiT> subject tag while keeping the trace/metadata in the body.
     message = build_backend_amend_message(
-        original_message="<agent> already prefixed",
-        trace=[],
+        original_message="fix the parser",
+        trace=[{"role": "user", "content": "fix it"}],
         backend="claude",
         backend_session_id=None,
         agit_session_id="agit-1",
         model=None,
         covered_commits=["abc123"],
+        tag=False,
     )
-    assert message.startswith("<agent> already prefixed\n")
-    assert "<agent> <agent>" not in message
+    assert message.startswith("fix the parser\n")
+    assert "<aGiT>" not in message
+    assert "# aGiT Metadata" in message
+    assert "covered_commits: abc123" in message
 
 
 def test_agent_commit_message_covered_commits_line():
@@ -128,7 +148,7 @@ def test_clean_tree_amends_latest_backend_commit(tmp_path):
 
     assert committed is True
     head_message = repo.commit_message("HEAD")
-    assert head_message.startswith("<agent> backend commit two")
+    assert head_message.startswith("<aGiT> backend commit two")
     assert "# Interaction Trace" in head_message
     assert "add the feature" in head_message
     assert f"covered_commits: {first} {last}" in head_message
@@ -176,6 +196,40 @@ def test_staged_changes_commit_lists_backend_commits_as_covered(tmp_path):
     # The backend's own commit is preserved below, message intact.
     assert repo.rev_parse("HEAD^") == backend_sha
     assert repo.commit_message("HEAD^").startswith("backend commit")
+
+
+def test_commit_turns_honors_tag_backend_commits_off(tmp_path):
+    repo, _base = _repo_on_turn_branch(tmp_path)
+    state = AgitState(tmp_path)
+    sha = _backend_commit(repo, "a.txt", "backend commit")
+
+    committed = _commit_turns(repo, state, [sha], tag_backend_commits=False)
+
+    assert committed is True
+    head_message = repo.commit_message("HEAD")
+    assert head_message.startswith("backend commit\n")
+    assert "<aGiT>" not in head_message
+    assert f"covered_commits: {sha}" in head_message  # metadata still attached
+
+
+def test_summary_amend_preserves_agit_tag():
+    # When a summary is later amended into an amended backend commit, the
+    # subject keeps its <aGiT> tag instead of being relabeled <agent>.
+    from agit.commits import apply_summary_to_message
+
+    message = build_backend_amend_message(
+        original_message="fix the parser",
+        trace=[{"role": "user", "content": "fix it"}],
+        backend="claude",
+        backend_session_id=None,
+        agit_session_id="agit-1",
+        model=None,
+        covered_commits=["abc123"],
+    )
+    summarized = apply_summary_to_message(message, "Rework the parser error paths")
+    assert summarized.startswith("<aGiT> Rework the parser error paths\n")
+    # The original subject is preserved under # Prompts, without its tag.
+    assert "fix the parser" in summarized.split("# Prompts")[1]
 
 
 def test_amend_in_actions_mode_accumulates_trace_first(tmp_path):

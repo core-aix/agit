@@ -3353,6 +3353,9 @@ class ProxyRunner:
             on_commit_fn=on_commit_fn,
             session_name=self.name,
             backend_commits=self._uncovered_backend_commits(),
+            tag_backend_commits=getattr(self.global_config, "tag_backend_commits", True)
+            if self.global_config is not None
+            else True,
         )
 
     def _uncovered_backend_commits(self) -> list[str]:

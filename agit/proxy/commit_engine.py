@@ -134,6 +134,7 @@ class CommitEngine:
         session_name: str | None = None,
         accumulate_trace_only_on_commit: bool = False,
         backend_commits: list[str] | None = None,
+        tag_backend_commits: bool = True,
     ) -> bool:
         """Core of every agent-commit path.
 
@@ -164,6 +165,10 @@ class CommitEngine:
             oldest first), issue #35.  With nothing staged, the latest of them
             is amended to carry the trace/metadata; with staged changes, the
             normal commit lists them in its ``covered_commits`` metadata.
+        tag_backend_commits:
+            Prefix an amended backend commit's subject with ``<aGiT> ``
+            (issue #35; the ``tag_backend_commits`` config option, on by
+            default).
 
         Commits are created immediately, without any LLM call: summarization
         runs in the background afterwards and is attached by amending the
@@ -274,6 +279,7 @@ class CommitEngine:
                     trace_turn_limit=self.state.trace_turn_limit,
                     session_name=session_name,
                     covered_commits=backend_commits,
+                    tag=tag_backend_commits,
                 )
             )
         else:

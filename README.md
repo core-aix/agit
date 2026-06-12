@@ -143,7 +143,7 @@ On startup, aGiT reconciles worktrees left behind by previous runs: it integrate
 
 ### Commit message format
 
-aGiT commit messages use a consistent Markdown-style structure. The first line is the subject (prefixed with `<agent>`, `<agent-merge>`, or left plain for user commits). The body is organized into `#` sections — `# Full Subject`, `# Summary` (when summarization is enabled), `# Interaction Trace`, `# aGiT Metadata` — with `## User` / `## Agent` subsections inside the interaction trace. Commits are written with `git commit -F -` (no editor), so the `#` lines are preserved rather than stripped as git comments. Secrets and terminal escape sequences are masked out of subjects and trace bodies before committing.
+aGiT commit messages use a consistent Markdown-style structure. The first line is the subject (prefixed with `<agent>`, `<agent-merge>`, or left plain for user commits; commits the backend made itself and aGiT amended with its trace/metadata are prefixed `<aGiT>` — see `tag_backend_commits` under Configuration). The body is organized into `#` sections — `# Full Subject`, `# Summary` (when summarization is enabled), `# Interaction Trace`, `# aGiT Metadata` — with `## User` / `## Agent` subsections inside the interaction trace. Commits are written with `git commit -F -` (no editor), so the `#` lines are preserved rather than stripped as git comments. Secrets and terminal escape sequences are masked out of subjects and trace bodies before committing.
 
 ### Summarization
 
@@ -240,6 +240,7 @@ User-wide settings live in `~/.agit/config.json` (override the directory with `A
   "menu_key": "ctrl-g",
   "sandbox": true,
   "use_worktrees": true,
+  "tag_backend_commits": true,
   "timings": {
     "base_poll_seconds": 3.0
   }
@@ -251,6 +252,8 @@ User-wide settings live in `~/.agit/config.json` (override the directory with `A
 `sandbox` (default `true`) confines the agent's writes to its own session worktree (via `sandbox-exec` on macOS), keeping the base repository and sibling worktrees read-only to the agent. Set it to `false` to disable confinement; when sandboxing is unavailable, aGiT instead warns when the base repository is edited while a session runs.
 
 `use_worktrees` (default `true`) controls whether sessions run in isolated worktrees. Set it to `false` to run the agent directly on the current branch by default — the same behavior as `--no-worktree` (which always wins over the config). See the `--no-worktree` notes under Usage for the trade-offs.
+
+`tag_backend_commits` (default `true`) prefixes the subject of commits the backend made itself with `<aGiT>` when aGiT amends them to attach its interaction trace and metadata, so the log shows which commits were backend-made and aGiT-amended. Set it to `false` to keep the backend's original subject untouched (the trace/metadata are still appended to the message body either way).
 
 `menu_key` sets the key that opens aGiT's command menu in proxy mode. The default is `ctrl-g`; any `ctrl-<letter>` works except keys the terminal or aGiT already uses (`ctrl-c` exit flow, `ctrl-h` Backspace, `ctrl-i` Tab, `ctrl-j`/`ctrl-m` Enter). An invalid value falls back to `ctrl-g`, so a typo can never lock you out of the menu. The status line and aGiT's messages show whichever key is configured.
 

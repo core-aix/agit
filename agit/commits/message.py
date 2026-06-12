@@ -12,6 +12,11 @@ DEFAULT_SUBJECT = "No subject provided"
 MAX_SUBJECT_WIDTH = 72
 MAX_BODY_WIDTH = 72
 AGENT_SUBJECT_PREFIX = "<agent> "
+# Subject tag for commits the backend made itself and aGiT amended with its
+# trace/metadata (issue #35). Distinct from "<agent> " (commits aGiT created)
+# so the log shows who actually made each commit. Removable via the
+# "tag_backend_commits" config option (on by default).
+AGIT_SUBJECT_PREFIX = "<aGiT> "
 SECRET_MASK = "[REDACTED]"
 SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)\b(api[_-]?key|access[_-]?token|auth[_-]?token|token|secret|password|passwd|authorization)\b(\s*[:=]\s*)([^\s,;]+)"
@@ -113,11 +118,17 @@ def apply_summary_to_message(
     except ValueError:
         subject_end = len(lines)
     original_subject = "\n".join(lines[:subject_end])
-    if original_subject.startswith(AGENT_SUBJECT_PREFIX):
-        original_subject = original_subject[len(AGENT_SUBJECT_PREFIX) :]
+    # Keep the commit's own tag: an amended backend commit stays "<aGiT> ..."
+    # after its summary lands, an aGiT-made commit stays "<agent> ...".
+    subject_prefix = AGENT_SUBJECT_PREFIX
+    for prefix in (AGIT_SUBJECT_PREFIX, AGENT_SUBJECT_PREFIX):
+        if original_subject.startswith(prefix):
+            original_subject = original_subject[len(prefix) :]
+            subject_prefix = prefix
+            break
     rest = lines[subject_end + 1 :]
 
-    new_lines = _summary_subject_lines(summary)
+    new_lines = _summary_subject_lines(summary, prefix=subject_prefix)
     new_lines.extend(["", "# Summary", "", *_body_lines(_mask_secrets(summary)), ""])
     if original_subject.strip():
         new_lines.extend(["# Prompts", "", *_body_lines(original_subject), ""])
@@ -137,10 +148,10 @@ def summary_metadata_lines(*, model: str | None, tokens_input: int = 0, tokens_o
     return lines
 
 
-def _summary_subject_lines(summary: str) -> list[str]:
+def _summary_subject_lines(summary: str, *, prefix: str = AGENT_SUBJECT_PREFIX) -> list[str]:
     first_line = next((line for line in summary.strip().splitlines() if line.strip()), DEFAULT_SUBJECT)
-    subject, full = _subject_parts(_mask_secrets(first_line), width=MAX_SUBJECT_WIDTH - len(AGENT_SUBJECT_PREFIX))
-    lines = [f"{AGENT_SUBJECT_PREFIX}{subject}"]
+    subject, full = _subject_parts(_mask_secrets(first_line), width=MAX_SUBJECT_WIDTH - len(prefix))
+    lines = [f"{prefix}{subject}"]
     if full:
         lines.extend(_body_lines(full))
     return lines
@@ -166,21 +177,25 @@ def build_backend_amend_message(
     session_name: str | None = None,
     summary: str | None = None,
     covered_commits: list[str] | None = None,
+    tag: bool = True,
 ) -> str:
     """Message for amending a commit the backend made itself (issue #35).
 
-    Keeps the backend's own subject and body (prefixing the subject with
-    ``<agent> `` so the log reads like any other agent commit), then appends
-    the interaction trace and aGiT metadata. ``covered_commits`` records the
-    pre-amend hashes of every backend-made commit this metadata accounts for —
-    the amended commit itself plus any earlier ones in the same turn.
+    Keeps the backend's own subject and body, prefixing the subject with
+    ``<aGiT> `` (unless *tag* is False — the ``tag_backend_commits`` config
+    option) so the log shows the commit was backend-made and aGiT-amended,
+    then appends the interaction trace and aGiT metadata.
+    ``covered_commits`` records the pre-amend hashes of every backend-made
+    commit this metadata accounts for — the amended commit itself plus any
+    earlier ones in the same turn.
     """
     original = _mask_secrets(original_message).strip()
     subject, _, body = original.partition("\n")
     if not subject.strip():
         subject = DEFAULT_SUBJECT
-    if not subject.startswith(AGENT_SUBJECT_PREFIX.strip()):
-        subject = f"{AGENT_SUBJECT_PREFIX}{subject.strip()}"
+    already_tagged = subject.strip().startswith((AGIT_SUBJECT_PREFIX.strip(), AGENT_SUBJECT_PREFIX.strip()))
+    if tag and not already_tagged:
+        subject = f"{AGIT_SUBJECT_PREFIX}{subject.strip()}"
     lines = [subject]
     if body.strip():
         lines.extend(["", body.strip()])

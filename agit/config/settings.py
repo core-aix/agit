@@ -138,6 +138,19 @@ class GlobalConfig:
         return result
 
     @property
+    def tag_backend_commits(self) -> bool:
+        # Prefix commits the backend made itself with "<aGiT> " when aGiT
+        # amends them with its trace/metadata (issue #35). On by default; set
+        # "tag_backend_commits": false to keep the backend's subject untouched.
+        value = self.data.get("tag_backend_commits")
+        return True if value is None else bool(value)
+
+    @tag_backend_commits.setter
+    def tag_backend_commits(self, value: bool) -> None:
+        self.data["tag_backend_commits"] = bool(value)
+        self.save()
+
+    @property
     def summarization_model(self) -> str | None:
         value = self.data.get("summarization_model")
         return str(value) if value else None
