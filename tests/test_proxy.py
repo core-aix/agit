@@ -603,13 +603,15 @@ def test_finish_agent_parse_does_not_block_on_cancelled_followup(tmp_path):
     assert runner._awaited_followups == []
 
 
-def test_agent_commit_popup_includes_commit_id(tmp_path):
+def test_agent_commit_popup_includes_commit_id_and_session(tmp_path):
     # The auto-commit confirmation names the short SHA so the user can find the
-    # commit aGiT just made.
+    # commit aGiT just made, and the session it belongs to — background sessions
+    # auto-commit too, so the popup alone must say whose work it announces.
     runner = make_runner(
         repo=FakeCommitRepo(),
         state=AgitState(tmp_path),
         verbose=False,
+        name="feature-x",
     )
     runner._review_untracked_popup = lambda include_declined: "No untracked files to review."
 
@@ -622,7 +624,7 @@ def test_agent_commit_popup_includes_commit_id(tmp_path):
     )
 
     assert committed is True
-    assert runner.message == "Created <aGiT> commit abc1234."
+    assert runner.message == "Created <aGiT> commit abc1234 in session 'feature-x'."
 
 
 def _make_cell(data=" ", **attrs):

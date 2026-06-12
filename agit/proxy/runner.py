@@ -3378,11 +3378,22 @@ class ProxyRunner:
             self._debug(f"uncovered backend commit check failed: {error!r}")
             return []
 
+    def _session_label(self) -> str:
+        """The name of the session the runner is currently operating on — the
+        one popups should attribute work to. Inside temp-swap windows
+        (_with_session) this is the serviced background session, which is
+        exactly the session whose commit/summary the popup announces."""
+        return self.name or "main"
+
     def _agent_commit_message(self) -> str:
         # The auto-commit confirmation, including the short SHA of the commit aGiT
-        # just made so the user can find it (e.g. `git show <id>`).
+        # just made so the user can find it (e.g. `git show <id>`). Background
+        # sessions auto-commit too, so the popup must say whose work it announces.
         commit_id = self._last_agent_commit_id
-        return f"Created <aGiT> commit {commit_id}." if commit_id else "Created <aGiT> commit."
+        session = self._session_label()
+        if commit_id:
+            return f"Created <aGiT> commit {commit_id} in session '{session}'."
+        return f"Created <aGiT> commit in session '{session}'."
 
     # ------------------------------------------------------------------
     # Background commit summarization (#8)
@@ -3437,8 +3448,15 @@ class ProxyRunner:
             return
         session_summary = self.state.session_summary
         # The summary may finish after the user switches sessions: remember the
-        # owning repo/state so it is never applied to a different session.
-        result: dict = {"sha": full_sha, "short_sha": sha, "repo": self.repo, "state": self.state}
+        # owning repo/state/name so it is never applied to — or reported
+        # against — a different session.
+        result: dict = {
+            "sha": full_sha,
+            "short_sha": sha,
+            "repo": self.repo,
+            "state": self.state,
+            "session_name": self._session_label(),
+        }
         self._summary_result = None
         self._summary_pending = {"sha": full_sha, "since": time.monotonic()}
 
@@ -3468,7 +3486,10 @@ class ProxyRunner:
 
         self._summary_thread = threading.Thread(target=worker, daemon=True, name="agit-summary")
         self._summary_thread.start()
-        self._set_message(f"aGiT is summarizing commit {sha}...", seconds=self.SUMMARY_WAIT_SECONDS)
+        self._set_message(
+            f"aGiT is summarizing commit {sha} in session '{self._session_label()}'...",
+            seconds=self.SUMMARY_WAIT_SECONDS,
+        )
 
     def _service_commit_summary(self) -> None:
         """Main-loop tick: apply a finished background summary (#8). All git
@@ -3478,12 +3499,15 @@ class ProxyRunner:
             return
         self._summary_result = None
         self._summary_pending = None
+        session = result.get("session_name") or "main"
         if "error" in result:
             # Includes UnusableSummaryError (backend returned "You've hit your
             # session limit..." or similar, issue #8): the commit keeps its
             # prompt-led message instead of getting the error as a subject.
             self._debug(f"commit summarization failed: {result['error']}")
-            self._set_message("aGiT: commit summarization failed; keeping the prompt-based message.")
+            self._set_message(
+                f"aGiT: commit summarization failed in session '{session}'; keeping the prompt-based message."
+            )
             return
         sha, summary, repo, state = result["sha"], result["summary"], result["repo"], result["state"]
         try:
@@ -3491,7 +3515,7 @@ class ProxyRunner:
             # added before an amend would hang off the orphaned pre-amend object.
             target = self._amend_summary_into_head(repo, sha, summary, result.get("metadata"))
             if target:
-                self._set_message(f"Summary added to commit {result['short_sha']}.")
+                self._set_message(f"Summary added to commit {result['short_sha']} in session '{session}'.")
             else:
                 # Already integrated or superseded: the summary lives in the
                 # commit's git notes instead of its message.
@@ -3881,7 +3905,10 @@ class ProxyRunner:
             self._debug("pre-compaction summary worker busy; skipping")
             return
         current_summary = self.state.session_summary
-        result: dict = {}
+        # The summary may finish after the user switches sessions: remember the
+        # owning repo/state/name so it is applied to — and reported against —
+        # the session that requested it, not whichever is active by then.
+        result: dict = {"repo": self.repo, "state": self.state, "session_name": self._session_label()}
         self._precompact_result = None
 
         def worker() -> None:
@@ -3896,25 +3923,28 @@ class ProxyRunner:
 
         self._precompact_thread = threading.Thread(target=worker, daemon=True, name="agit-precompact")
         self._precompact_thread.start()
-        self._set_message("aGiT: Capturing session summary before compaction...")
+        self._set_message(f"aGiT: Capturing session summary before compaction (session '{self._session_label()}')...")
 
     def _service_precompact_summary(self) -> None:
         result = self._precompact_result
         if result is None:
             return
         self._precompact_result = None
+        session = result.get("session_name") or "main"
         if "error" in result:
             self._debug(f"pre-compaction summary failed: {result['error']}")
-            self._set_message("aGiT: Pre-compaction summary failed.")
+            self._set_message(f"aGiT: Pre-compaction summary failed (session '{session}').")
             return
+        repo = result.get("repo") or self.repo
+        state = result.get("state") or self.state
         try:
             summary = result["summary"]
-            self.state.session_summary = summary
-            head_sha = self.repo.rev_parse("HEAD")
+            state.session_summary = summary
+            head_sha = repo.rev_parse("HEAD")
             if head_sha:
-                self.state.session_summary_commit = head_sha
-                self.repo.notes_add(head_sha, summary, namespace="agit/session-summary")
-            self._set_message("aGiT: Session summary captured.")
+                state.session_summary_commit = head_sha
+                repo.notes_add(head_sha, summary, namespace="agit/session-summary")
+            self._set_message(f"aGiT: Session summary captured (session '{session}').")
         except Exception as error:
             self._debug(f"applying pre-compaction summary failed: {error!r}")
 
