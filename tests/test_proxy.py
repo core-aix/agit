@@ -4118,7 +4118,38 @@ def test_screen_renderer_status_line_elides_long_cwd_from_left():
     assert visible.rstrip().endswith("session-1")
 
 
-def test_status_line_includes_agent_working_directory(tmp_path):
+def test_status_line_shows_base_repo_directory_not_the_worktree(tmp_path):
+    # The path identifies the PROJECT (base repo), not the internal
+    # .agit/worktrees/<name> sandbox — the session name next to it already
+    # says which worktree is active.
+    import subprocess
+
+    from agit.git import GitRepo
+    from agit.config import AgitState
+
+    base = tmp_path / "project"
+    worktree = base / ".agit" / "worktrees" / "session-1"
+    worktree.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q"], cwd=base, check=True)
+    subprocess.run(["git", "init", "-q"], cwd=worktree, check=True)
+    runner = make_runner(
+        repo=GitRepo(worktree),
+        base_repo=GitRepo(base),
+        state=AgitState(worktree),
+        name="session-1",
+        backend=type("B", (), {"name": "claude"})(),
+        scroll_back=0,
+        cols=200,
+    )
+
+    line = runner._status_line()
+    assert f"{tmp_path}/project " in line
+    assert ".agit/worktrees" not in line
+
+
+def test_status_line_falls_back_to_repo_directory_without_base(tmp_path):
+    # --no-worktree mode (and bare test runners) have no separate base repo:
+    # the repo the agent works in is the project.
     import subprocess
 
     from agit.git import GitRepo
@@ -4135,7 +4166,7 @@ def test_status_line_includes_agent_working_directory(tmp_path):
     )
 
     line = runner._status_line()
-    assert tmp_path.name in line  # the directory the agent works in is shown
+    assert tmp_path.name in line
 
 
 def test_screen_renderer_status_line_scrollback():

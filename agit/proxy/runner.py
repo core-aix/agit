@@ -3034,9 +3034,12 @@ class ProxyRunner:
             short_session_fn=_short_session,
             menu_label=self._menu_label(),
             summarizer_on=self._summarization_enabled(),
-            # The directory the agent works in: its session worktree, or the
-            # repo itself in --no-worktree mode.
-            cwd=str(repo_path) if (repo_path := getattr(self.repo, "repo", None)) else None,
+            # The project the agent works on: the BASE repository, not the
+            # session worktree under .agit/worktrees/ (an internal detail whose
+            # long path mostly repeats the session name shown next to it).
+            cwd=str(repo_path)
+            if (repo_path := getattr(self.base_repo, "repo", None) or getattr(self.repo, "repo", None))
+            else None,
         )
 
     def _summarization_enabled(self) -> bool:
