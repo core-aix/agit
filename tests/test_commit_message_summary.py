@@ -1,3 +1,11 @@
+"""Summary placement in commit messages (#8).
+
+The summary leads the message like a regular subject does: its first line is
+the subject, the rest of it is the first paragraph of the body — there is no
+separate ``# Summary`` section. The prompts that would otherwise head the
+message move to ``# Prompts``.
+"""
+
 from agit.commits.message import build_agent_commit_message
 
 
@@ -12,12 +20,18 @@ def test_build_agent_commit_message_with_summary() -> None:
         backend_session_id="session-123",
         agit_session_id="agit-456",
         model="gpt-4",
-        summary="This commit adds a new feature that improves performance.",
+        summary="Add a faster feature pipeline.\n\nThe new path caches lookups, improving performance.",
     )
-    assert "# Summary" in message
-    assert "This commit adds a new feature that improves performance." in message
+    # First line of the summary is the subject; the rest is the body's first
+    # paragraph, with no # Summary section.
+    assert message.startswith("<aGiT> Add a faster feature pipeline.\n")
+    assert "# Summary" not in message
+    body = message.split("\n", 1)[1]
+    assert body.lstrip("\n").startswith("The new path caches lookups, improving performance.")
     assert "# Interaction Trace" in message
-    assert message.index("# Summary") < message.index("# Interaction Trace")
+    assert body.index("The new path caches lookups") < body.index("# Prompts") < body.index("# Interaction Trace")
+    # The prompts that used to head the message are preserved under # Prompts.
+    assert "Add new feature" in body.split("# Prompts")[1]
 
 
 def test_build_agent_commit_message_without_summary() -> None:
@@ -33,17 +47,16 @@ def test_build_agent_commit_message_without_summary() -> None:
         model="gpt-4",
         summary=None,
     )
+    assert message.startswith("<aGiT> Add new feature")
     assert "# Summary" not in message
+    assert "# Prompts" not in message
     assert "# Interaction Trace" in message
 
 
-def test_build_agent_commit_message_summary_ordering() -> None:
+def test_single_line_summary_has_no_dangling_body_paragraph() -> None:
     message = build_agent_commit_message(
         latest_prompt="Fix bug",
-        trace=[
-            {"role": "user", "content": "Fix bug"},
-            {"role": "agent", "content": "Bug fixed."},
-        ],
+        trace=[{"role": "user", "content": "Fix bug"}],
         backend="claude",
         backend_session_id="session-789",
         agit_session_id="agit-012",
@@ -51,17 +64,9 @@ def test_build_agent_commit_message_summary_ordering() -> None:
         summary="Fixed a critical bug in the authentication system.",
     )
     lines = message.split("\n")
-    summary_idx = None
-    trace_idx = None
-    metadata_idx = None
-    for i, line in enumerate(lines):
-        if line == "# Summary":
-            summary_idx = i
-        elif line == "# Interaction Trace":
-            trace_idx = i
-        elif line == "# aGiT Metadata":
-            metadata_idx = i
-    assert summary_idx is not None
-    assert trace_idx is not None
-    assert metadata_idx is not None
-    assert summary_idx < trace_idx < metadata_idx
+    assert lines[0] == "<aGiT> Fixed a critical bug in the authentication system."
+    # No leftover summary text floating before # Prompts: the body goes
+    # straight to the sections.
+    assert lines[1] == ""
+    assert lines[2] == "# Prompts"
+    assert message.index("# Prompts") < message.index("# Interaction Trace") < message.index("# aGiT Metadata")

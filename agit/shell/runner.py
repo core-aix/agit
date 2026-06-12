@@ -255,7 +255,7 @@ class AgitShell:
                     if self.verbose:
                         print(f"Session summary update failed: {error}")
 
-            print("Created <agent> commit.")
+            print("Created <aGiT> commit.")
         else:
             if self.verbose:
                 print("No code changes detected; interaction trace remains pending.")

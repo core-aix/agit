@@ -141,7 +141,7 @@ def test_integrate_clean_merge_advances_base(tmp_path):
     main = _init_repo(tmp_path)
     base = main.current_branch()
     info, work = _make_session(main, "session-1", base)
-    _commit(work, "agent.txt", "agent work\n", "<agent> work")
+    _commit(work, "agent.txt", "agent work\n", "<aGiT> work")
 
     runner = _integration_runner(main, work, base, "session-1")
     runner._integrate_session_turn()
@@ -350,7 +350,7 @@ def test_integrate_session_on_exit_merges_and_deletes_branch(tmp_path):
     main = _init_repo(tmp_path)
     base = main.current_branch()
     info, work = _make_session(main, "s1", base)
-    _commit(work, "a.txt", "x\n", "<agent> work")  # committed but not integrated
+    _commit(work, "a.txt", "x\n", "<aGiT> work")  # committed but not integrated
 
     runner = _integration_runner(main, work, base, "s1")
     runner._exiting = True
@@ -383,7 +383,7 @@ def test_active_has_pending_reflects_unintegrated_commits(tmp_path):
 
     runner = _integration_runner(main, work, base, "s1")
     assert runner._active_has_pending() is False
-    _commit(work, "a.txt", "x\n", "<agent> work")
+    _commit(work, "a.txt", "x\n", "<aGiT> work")
     assert runner._active_has_pending() is True
 
 
@@ -391,7 +391,7 @@ def test_integrate_active_session_clean_merge(tmp_path):
     main = _init_repo(tmp_path)
     base = main.current_branch()
     info, work = _make_session(main, "s1", base)
-    _commit(work, "a.txt", "x\n", "<agent> work")  # an unintegrated commit
+    _commit(work, "a.txt", "x\n", "<aGiT> work")  # an unintegrated commit
 
     runner = _integration_runner(main, work, base, "s1")
     runner._select_popup = lambda *a, **k: "Merge manually (you resolve here, then Complete merge)"
@@ -412,7 +412,7 @@ def test_session_unintegrated_detects_pending_commits(tmp_path):
 
     runner = _integration_runner(main, work, base, "s1")
     assert runner._session_unintegrated(work) is False
-    _commit(work, "a.txt", "x\n", "<agent> work")
+    _commit(work, "a.txt", "x\n", "<aGiT> work")
     assert runner._session_unintegrated(work) is True
     # After integration the worktree is detached and merged -> nothing pending.
     runner._integrate_session_turn()
@@ -635,7 +635,7 @@ def test_remove_worktree_on_exit_drops_merged_extra_session(tmp_path):
     main = _init_repo(tmp_path)
     base = main.current_branch()
     info, work = _make_session(main, "session-2", base)
-    _commit(work, "a.txt", "x\n", "<agent> work")
+    _commit(work, "a.txt", "x\n", "<aGiT> work")
 
     runner = _integration_runner(main, work, base, "session-2")
     runner.worktree = info  # real WorktreeInfo so removal can find the path
@@ -655,7 +655,7 @@ def test_remove_worktree_on_exit_persists_primary_record_then_removes(tmp_path):
     main = _init_repo(tmp_path)
     base = main.current_branch()
     info, work = _make_session(main, "session-1", base)
-    _commit(work, "a.txt", "x\n", "<agent> work")
+    _commit(work, "a.txt", "x\n", "<aGiT> work")
 
     runner = _integration_runner(main, work, base, "session-1")
     runner.worktree = info
@@ -703,7 +703,7 @@ def test_integrate_active_session_fast_forward_does_not_prompt(tmp_path):
     main = _init_repo(tmp_path)
     base = main.current_branch()
     info, work = _make_session(main, "session-1", base)
-    _commit(work, "a.txt", "x\n", "<agent> work")  # base unchanged -> fast-forwardable
+    _commit(work, "a.txt", "x\n", "<aGiT> work")  # base unchanged -> fast-forwardable
 
     runner = _integration_runner(main, work, base, "session-1")
     runner.worktree = info
@@ -761,7 +761,7 @@ def test_advance_base_to_flags_base_advanced(tmp_path):
     main = _init_repo(tmp_path)
     base = main.current_branch()
     info, work = _make_session(main, "session-1", base)
-    _commit(work, "a.txt", "x\n", "<agent> work")
+    _commit(work, "a.txt", "x\n", "<aGiT> work")
 
     runner = _integration_runner(main, work, base, "session-1")
     runner._base_advanced = False
@@ -993,7 +993,7 @@ def test_ensure_turn_branch_never_resets_existing_branch_with_work(tmp_path):
     main = _init_repo(tmp_path)
     base = main.current_branch()
     info, work = _make_session(main, "s1", base, backend="claude")
-    _commit(work, "kept.txt", "unintegrated work\n", "<agent> kept work")
+    _commit(work, "kept.txt", "unintegrated work\n", "<aGiT> kept work")
     kept_head = work.rev_parse("HEAD")  # tip of agit/claude/s1/t1
 
     # Simulate recovery: detached at base again, turn counter back at 0.

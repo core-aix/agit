@@ -272,7 +272,7 @@ def test_proxy_agent_commit_preserves_incomplete_initial_user_turn(tmp_path):
     assert committed is True
     message = runner.repo.message
     # The subject lists every prompt that led to the commit, joined by " / ".
-    assert message.startswith("<agent> fix it / also handle errors")
+    assert message.startswith("<aGiT> fix it / also handle errors")
     assert message.index("## User\n\nfix it") < message.index("## User\n\nalso handle errors")
     assert message.index("## User\n\nalso handle errors") < message.index("## Agent\n\ndone")
 
@@ -299,7 +299,7 @@ def test_proxy_agent_commit_does_not_repeat_whitespace_variant_prompt(tmp_path):
 
     assert committed is True
     message = runner.repo.message
-    assert message.splitlines()[0] == "<agent> fix the bug"
+    assert message.splitlines()[0] == "<aGiT> fix the bug"
     assert message.count("## User") == 1  # not repeated before the metadata
 
 
@@ -325,7 +325,7 @@ def test_proxy_agent_commit_collapses_double_recorded_prompt(tmp_path):
 
     assert committed is True
     message = runner.repo.message
-    assert message.splitlines()[0] == "<agent> do the thing"
+    assert message.splitlines()[0] == "<aGiT> do the thing"
     assert message.count("## User") == 1
 
 
@@ -421,7 +421,7 @@ def test_agent_commit_subject_joins_all_prompts_with_slash(tmp_path):
     assert committed is True
     subject = runner.repo.message.splitlines()[0]
     # Every prompt that led to the commit, in order, joined by " / ".
-    assert subject == "<agent> add the parser / now add tests / and fix the lint"
+    assert subject == "<aGiT> add the parser / now add tests / and fix the lint"
 
 
 def test_proxy_agent_commit_preserves_previous_no_change_trace(tmp_path):
@@ -622,7 +622,7 @@ def test_agent_commit_popup_includes_commit_id(tmp_path):
     )
 
     assert committed is True
-    assert runner.message == "Created <agent> commit abc1234."
+    assert runner.message == "Created <aGiT> commit abc1234."
 
 
 def _make_cell(data=" ", **attrs):
@@ -991,13 +991,13 @@ def test_sticky_message_renders_after_timeout(monkeypatch):
     writes = []
     monkeypatch.setattr(os, "write", lambda fd, data: writes.append(data) or len(data))
 
-    runner._set_message("Created <agent> commit.", sticky=True)
+    runner._set_message("Created <aGiT> commit.", sticky=True)
     runner.message_until = time.monotonic() - 100  # the timeout passed long ago
 
     runner._render()
 
     # A sticky message stays up past its timeout (until the next keypress).
-    assert "Created <agent> commit." in writes[0].decode()
+    assert "Created <aGiT> commit." in writes[0].decode()
 
 
 def test_nonsticky_message_hidden_after_timeout(monkeypatch):
@@ -1017,7 +1017,7 @@ def test_nonsticky_message_hidden_after_timeout(monkeypatch):
 
 def test_keypress_dismisses_sticky_message():
     runner = make_runner()
-    runner._set_message("Created <agent> commit.", sticky=True)
+    runner._set_message("Created <aGiT> commit.", sticky=True)
     assert runner._message_sticky is True
 
     assert runner._clear_sticky_message_on_input() is True
@@ -1042,7 +1042,7 @@ def test_set_message_requests_a_render():
     # the popup is never drawn.
     runner = make_runner(_render_pending=False)
 
-    runner._set_message("Created <agent> commit.", sticky=True)
+    runner._set_message("Created <aGiT> commit.", sticky=True)
 
     assert runner._render_pending is True
 

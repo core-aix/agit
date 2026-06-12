@@ -87,18 +87,17 @@ def test_amend_message_keeps_original_and_appends_trace_and_metadata():
 
 
 def test_amend_message_does_not_double_prefix_subject():
-    for already in ("<aGiT> already prefixed", "<agent> already prefixed"):
-        message = build_backend_amend_message(
-            original_message=already,
-            trace=[],
-            backend="claude",
-            backend_session_id=None,
-            agit_session_id="agit-1",
-            model=None,
-            covered_commits=["abc123"],
-        )
-        assert message.startswith(f"{already}\n")
-        assert "<aGiT> <aGiT>" not in message and "<aGiT> <agent>" not in message
+    message = build_backend_amend_message(
+        original_message="<aGiT> already prefixed",
+        trace=[],
+        backend="claude",
+        backend_session_id=None,
+        agit_session_id="agit-1",
+        model=None,
+        covered_commits=["abc123"],
+    )
+    assert message.startswith("<aGiT> already prefixed\n")
+    assert "<aGiT> <aGiT>" not in message
 
 
 def test_amend_message_tag_can_be_disabled():
@@ -192,7 +191,7 @@ def test_staged_changes_commit_lists_backend_commits_as_covered(tmp_path):
 
     assert committed is True
     head_message = repo.commit_message("HEAD")
-    assert head_message.startswith("<agent> add the feature")
+    assert head_message.startswith("<aGiT> add the feature")
     assert f"covered_commits: {repo.short_sha(backend_sha)}" in head_message
     # The backend's own commit is preserved below, message intact.
     assert repo.rev_parse("HEAD^") == backend_sha
@@ -215,7 +214,7 @@ def test_commit_turns_honors_tag_backend_commits_off(tmp_path):
 
 def test_summary_amend_preserves_agit_tag():
     # When a summary is later amended into an amended backend commit, the
-    # subject keeps its <aGiT> tag instead of being relabeled <agent>.
+    # subject keeps its <aGiT> tag instead of being relabeled <aGiT>.
     from agit.commits import apply_summary_to_message
 
     message = build_backend_amend_message(

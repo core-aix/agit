@@ -120,7 +120,7 @@ def test_commit_turns_creates_commit_when_staged(tmp_path):
         is True
     )
     assert repo.message is not None
-    assert repo.message.startswith("<agent> fix the bug")
+    assert repo.message.startswith("<aGiT> fix the bug")
 
 
 def test_commit_turns_token_not_counted_on_failed_attempt(tmp_path):
@@ -176,7 +176,7 @@ def test_commit_turns_subject_joins_multiple_prompts(tmp_path):
         stage_untracked_fn=_noop_stage,
     )
     subject = repo.message.splitlines()[0]
-    assert subject == "<agent> add parser / add tests"
+    assert subject == "<aGiT> add parser / add tests"
 
 
 def test_commit_turns_pending_trace_cleared_after_commit(tmp_path):

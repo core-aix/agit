@@ -11,10 +11,9 @@ DEFAULT_SUBJECT = "No subject provided"
 # whole subject line (prefix included) to that limit so it's never cut off.
 MAX_SUBJECT_WIDTH = 72
 MAX_BODY_WIDTH = 72
-AGENT_SUBJECT_PREFIX = "<agent> "
-# Subject tag for commits the backend made itself and aGiT amended with its
-# trace/metadata (issue #35). Distinct from "<agent> " (commits aGiT created)
-# so the log shows who actually made each commit. Removable via the
+# Subject tag for agent commits: commits aGiT creates from the agent's work
+# AND backend-made commits aGiT amends with its trace/metadata (issue #35).
+# For amended backend commits the tag is removable via the
 # "tag_backend_commits" config option (on by default).
 AGIT_SUBJECT_PREFIX = "<aGiT> "
 SECRET_MASK = "[REDACTED]"
@@ -62,15 +61,16 @@ def build_agent_commit_message(
     covered_commits: list[str] | None = None,
 ) -> str:
     if summary:
-        # The summary leads (issue #8): its first line becomes the subject and
-        # the prompts move to a # Prompts section instead of heading the message.
-        lines = _summary_subject_lines(summary)
+        # The summary leads (issue #8): its first line becomes the subject, the
+        # rest of it is the first paragraph of the body (no # Summary section),
+        # and the prompts move to a # Prompts section.
+        lines = _summary_lead_lines(summary)
         prompts: str | None = latest_prompt
     else:
         subject_prompt, full_subject = _subject_parts(
-            _mask_secrets(latest_prompt), width=MAX_SUBJECT_WIDTH - len(AGENT_SUBJECT_PREFIX)
+            _mask_secrets(latest_prompt), width=MAX_SUBJECT_WIDTH - len(AGIT_SUBJECT_PREFIX)
         )
-        lines = [f"{AGENT_SUBJECT_PREFIX}{subject_prompt}"]
+        lines = [f"{AGIT_SUBJECT_PREFIX}{subject_prompt}"]
         if full_subject:
             # The truncated subject flows straight into its full text with no blank
             # line between them, so the extended subject reads as one continued line.
@@ -87,7 +87,6 @@ def build_agent_commit_message(
             token_usage=token_usage,
             trace_turn_limit=trace_turn_limit,
             session_name=session_name,
-            summary=summary,
             prompts=prompts,
             summary_metadata=summary_metadata,
             covered_commits=covered_commits,
@@ -104,13 +103,15 @@ def apply_summary_to_message(
 ) -> str:
     """Rewrite an existing agent commit message so the summary leads (#8).
 
-    The summary's first line becomes the subject, the full summary lands in a
-    ``# Summary`` section, and the original subject (the collected prompts) is
-    preserved under ``# Prompts``. ``summary_metadata`` lines are added to the
-    metadata section. Idempotent: a message that already carries a summary is
-    returned unchanged, so a redundant amend can never happen.
+    The summary's first line becomes the subject, the rest of the summary
+    becomes the first paragraph of the body (no ``# Summary`` section), and
+    the original subject (the collected prompts) is preserved under
+    ``# Prompts``. ``summary_metadata`` lines are added to the metadata
+    section. Idempotent: a message that already carries a summary (marked by
+    its ``# Prompts`` section) is returned unchanged, so a redundant amend can
+    never happen.
     """
-    if not summary.strip() or "\n# Summary\n" in message or message.startswith("# Summary"):
+    if not summary.strip() or "\n# Prompts\n" in message or message.startswith("# Prompts"):
         return message
     lines = message.splitlines()
     try:
@@ -118,18 +119,12 @@ def apply_summary_to_message(
     except ValueError:
         subject_end = len(lines)
     original_subject = "\n".join(lines[:subject_end])
-    # Keep the commit's own tag: an amended backend commit stays "<aGiT> ..."
-    # after its summary lands, an aGiT-made commit stays "<agent> ...".
-    subject_prefix = AGENT_SUBJECT_PREFIX
-    for prefix in (AGIT_SUBJECT_PREFIX, AGENT_SUBJECT_PREFIX):
-        if original_subject.startswith(prefix):
-            original_subject = original_subject[len(prefix) :]
-            subject_prefix = prefix
-            break
+    if original_subject.startswith(AGIT_SUBJECT_PREFIX):
+        original_subject = original_subject[len(AGIT_SUBJECT_PREFIX) :]
     rest = lines[subject_end + 1 :]
 
-    new_lines = _summary_subject_lines(summary, prefix=subject_prefix)
-    new_lines.extend(["", "# Summary", "", *_body_lines(_mask_secrets(summary)), ""])
+    new_lines = _summary_lead_lines(summary)
+    new_lines.append("")
     if original_subject.strip():
         new_lines.extend(["# Prompts", "", *_body_lines(original_subject), ""])
     new_lines.extend(rest)
@@ -148,12 +143,28 @@ def summary_metadata_lines(*, model: str | None, tokens_input: int = 0, tokens_o
     return lines
 
 
-def _summary_subject_lines(summary: str, *, prefix: str = AGENT_SUBJECT_PREFIX) -> list[str]:
-    first_line = next((line for line in summary.strip().splitlines() if line.strip()), DEFAULT_SUBJECT)
-    subject, full = _subject_parts(_mask_secrets(first_line), width=MAX_SUBJECT_WIDTH - len(prefix))
-    lines = [f"{prefix}{subject}"]
+def _summary_lead_lines(summary: str) -> list[str]:
+    """Subject + leading body for a summarized message.
+
+    Mirrors the prompt-led layout: the summary's first line is the subject
+    (a truncated subject flows straight into its full text, no blank line),
+    and the rest of the summary follows as the first paragraph of the body —
+    there is no separate ``# Summary`` section.
+    """
+    text_lines = _mask_secrets(summary).strip().splitlines()
+    first_index = next((i for i, line in enumerate(text_lines) if line.strip()), None)
+    first_line = text_lines[first_index] if first_index is not None else DEFAULT_SUBJECT
+    remainder = text_lines[first_index + 1 :] if first_index is not None else []
+    while remainder and not remainder[0].strip():
+        remainder.pop(0)
+
+    subject, full = _subject_parts(first_line, width=MAX_SUBJECT_WIDTH - len(AGIT_SUBJECT_PREFIX))
+    lines = [f"{AGIT_SUBJECT_PREFIX}{subject}"]
     if full:
         lines.extend(_body_lines(full))
+    if remainder:
+        lines.append("")
+        lines.extend(_body_lines("\n".join(remainder).rstrip()))
     return lines
 
 
@@ -175,7 +186,6 @@ def build_backend_amend_message(
     token_usage: dict[str, int | None] | None = None,
     trace_turn_limit: int = 5,
     session_name: str | None = None,
-    summary: str | None = None,
     covered_commits: list[str] | None = None,
     tag: bool = True,
 ) -> str:
@@ -193,7 +203,7 @@ def build_backend_amend_message(
     subject, _, body = original.partition("\n")
     if not subject.strip():
         subject = DEFAULT_SUBJECT
-    already_tagged = subject.strip().startswith((AGIT_SUBJECT_PREFIX.strip(), AGENT_SUBJECT_PREFIX.strip()))
+    already_tagged = subject.strip().startswith(AGIT_SUBJECT_PREFIX.strip())
     if tag and not already_tagged:
         subject = f"{AGIT_SUBJECT_PREFIX}{subject.strip()}"
     lines = [subject]
@@ -210,7 +220,6 @@ def build_backend_amend_message(
             token_usage=token_usage,
             trace_turn_limit=trace_turn_limit,
             session_name=session_name,
-            summary=summary,
             covered_commits=covered_commits,
         )
     )
@@ -227,16 +236,11 @@ def _trace_and_metadata_lines(
     token_usage: dict[str, int | None] | None,
     trace_turn_limit: int,
     session_name: str | None,
-    summary: str | None,
     covered_commits: list[str] | None,
     prompts: str | None = None,
     summary_metadata: list[str] | None = None,
 ) -> list[str]:
     lines: list[str] = []
-    if summary:
-        lines.extend(["# Summary", ""])
-        lines.extend(_body_lines(_mask_secrets(summary)))
-        lines.append("")
     if prompts and prompts.strip():
         # When the summary takes the subject (#8), the prompts that used to
         # head the message are preserved here.

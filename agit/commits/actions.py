@@ -51,7 +51,7 @@ class AgitActions:
 
         def on_commit_fn(sha):
             if not quiet:
-                print("Created <agent> commit.")
+                print("Created <aGiT> commit.")
 
         # Imported lazily: agit.proxy's package __init__ imports runner, which
         # imports this module — a top-level import here is circular and breaks

@@ -58,24 +58,27 @@ def _base_message(**overrides) -> str:
 
 def test_summary_leads_message_and_takes_subject():
     message = _base_message(summary=SUMMARY)
-    assert message.startswith("<agent> Implement the widget renderer with caching\n")
+    assert message.startswith("<aGiT> Implement the widget renderer with caching\n")
     body = message.split("\n", 1)[1]
-    # Section order: summary first, then the preserved prompts, then the trace.
-    assert body.index("# Summary") < body.index("# Prompts") < body.index("# Interaction Trace")
+    # The rest of the summary is the body's first paragraph (no # Summary
+    # section), followed by the preserved prompts, then the trace.
+    assert "# Summary" not in message
+    assert body.lstrip("\n").startswith("Also reworks the cache keys.")
+    assert body.index("Also reworks the cache keys.") < body.index("# Prompts") < body.index("# Interaction Trace")
     assert "please add the widget renderer / and cache it" in body.split("# Prompts")[1]
 
 
 def test_long_summary_first_line_is_truncated_to_subject_width():
     message = _base_message(summary="word " * 40)
     subject = message.splitlines()[0]
-    assert subject.startswith("<agent> ")
+    assert subject.startswith("<aGiT> ")
     assert len(subject) <= 72
     assert subject.endswith("...")
 
 
 def test_without_summary_prompts_still_head_the_message():
     message = _base_message()
-    assert message.startswith("<agent> please add the widget renderer / and cache it")
+    assert message.startswith("<aGiT> please add the widget renderer / and cache it")
     assert "# Summary" not in message
     assert "# Prompts" not in message
 
@@ -96,8 +99,10 @@ def test_apply_summary_rewrites_subject_and_preserves_everything():
     amended = apply_summary_to_message(
         original, SUMMARY, summary_metadata=summary_metadata_lines(model="m", tokens_input=5)
     )
-    assert amended.startswith("<agent> Implement the widget renderer with caching\n")
-    assert "# Summary" in amended
+    assert amended.startswith("<aGiT> Implement the widget renderer with caching\n")
+    # The rest of the summary is the first paragraph (no # Summary section).
+    assert "# Summary" not in amended
+    assert "Also reworks the cache keys." in amended.split("\n", 1)[1].split("# Prompts")[0]
     # The original subject (the prompts) is preserved under # Prompts.
     assert "please add the widget renderer / and cache it" in amended.split("# Prompts")[1]
     # Trace and metadata survive; metrics land before the version line.
@@ -174,19 +179,19 @@ def _finish_summary(runner):
 def test_commit_path_does_not_block_on_summarization(tmp_path, monkeypatch):
     runner, repo = _summary_runner(tmp_path, monkeypatch)
     FakeSummarizer.gate = threading.Event()  # summary hangs until released
-    sha = _commit_change(repo, "a.txt", "<agent> prompt subject")
+    sha = _commit_change(repo, "a.txt", "<aGiT> prompt subject")
 
     started = time.monotonic()
     runner._start_commit_summary(sha, [_turn()])
     assert time.monotonic() - started < 1.0  # returned while the LLM call hangs
     assert runner._summary_pending is not None
     assert "summarizing" in (runner.message or "")
-    assert repo.commit_message("HEAD").startswith("<agent> prompt subject")  # commit untouched so far
+    assert repo.commit_message("HEAD").startswith("<aGiT> prompt subject")  # commit untouched so far
 
     FakeSummarizer.gate.set()
     _finish_summary(runner)
     head = repo.commit_message("HEAD")
-    assert head.startswith("<agent> Implement the widget renderer with caching")
+    assert head.startswith("<aGiT> Implement the widget renderer with caching")
     assert "# Prompts" in head and "prompt subject" in head
     assert "summary_tokens_input: 7" in head and "summary_tokens_output: 3" in head
     assert runner._summary_pending is None
@@ -199,7 +204,7 @@ def test_commit_path_does_not_block_on_summarization(tmp_path, monkeypatch):
 
 def test_summary_after_integration_lands_as_notes_only(tmp_path, monkeypatch):
     runner, repo = _summary_runner(tmp_path, monkeypatch)
-    sha = _commit_change(repo, "a.txt", "<agent> prompt subject")
+    sha = _commit_change(repo, "a.txt", "<aGiT> prompt subject")
     runner._start_commit_summary(sha, [_turn()])
     runner._summary_thread.join(timeout=10)
     # The commit integrated (base advanced) before the summary arrived.
@@ -208,13 +213,13 @@ def test_summary_after_integration_lands_as_notes_only(tmp_path, monkeypatch):
 
     runner._service_commit_summary()
 
-    assert repo.commit_message("HEAD").startswith("<agent> prompt subject")  # no amend of integrated history
+    assert repo.commit_message("HEAD").startswith("<aGiT> prompt subject")  # no amend of integrated history
     assert "widget renderer" in (repo.notes_show(full, namespace="agit/commit-summary") or "")
 
 
 def test_summary_with_staged_changes_lands_as_notes_only(tmp_path, monkeypatch):
     runner, repo = _summary_runner(tmp_path, monkeypatch)
-    sha = _commit_change(repo, "a.txt", "<agent> prompt subject")
+    sha = _commit_change(repo, "a.txt", "<aGiT> prompt subject")
     runner._start_commit_summary(sha, [_turn()])
     runner._summary_thread.join(timeout=10)
     # The next turn already staged work: --amend would swallow it.
@@ -223,21 +228,21 @@ def test_summary_with_staged_changes_lands_as_notes_only(tmp_path, monkeypatch):
 
     runner._service_commit_summary()
 
-    assert repo.commit_message("HEAD").startswith("<agent> prompt subject")
+    assert repo.commit_message("HEAD").startswith("<aGiT> prompt subject")
 
 
 def test_summary_after_head_moved_lands_as_notes_only(tmp_path, monkeypatch):
     runner, repo = _summary_runner(tmp_path, monkeypatch)
-    sha = _commit_change(repo, "a.txt", "<agent> first")
+    sha = _commit_change(repo, "a.txt", "<aGiT> first")
     runner._start_commit_summary(sha, [_turn()])
     runner._summary_thread.join(timeout=10)
     first_full = repo.rev_parse("HEAD")
-    _commit_change(repo, "b.txt", "<agent> second")
+    _commit_change(repo, "b.txt", "<aGiT> second")
 
     runner._service_commit_summary()
 
-    assert repo.commit_message("HEAD").startswith("<agent> second")
-    assert repo.commit_message(first_full).startswith("<agent> first")
+    assert repo.commit_message("HEAD").startswith("<aGiT> second")
+    assert repo.commit_message(first_full).startswith("<aGiT> first")
     assert "widget renderer" in (repo.notes_show(first_full, namespace="agit/commit-summary") or "")
 
 
@@ -249,12 +254,12 @@ def test_unusable_summary_keeps_prompt_led_message(tmp_path, monkeypatch):
 
     runner, repo = _summary_runner(tmp_path, monkeypatch)
     FakeSummarizer.fail = UnusableSummaryError("You've hit your session limit.")
-    sha = _commit_change(repo, "a.txt", "<agent> prompt subject")
+    sha = _commit_change(repo, "a.txt", "<aGiT> prompt subject")
 
     runner._start_commit_summary(sha, [_turn()])
     _finish_summary(runner)
 
-    assert repo.commit_message("HEAD").startswith("<agent> prompt subject")
+    assert repo.commit_message("HEAD").startswith("<aGiT> prompt subject")
     full = repo.rev_parse("HEAD")
     assert repo.notes_show(full, namespace="agit/commit-summary") is None
     assert "keeping the prompt-based message" in (runner.message or "")
@@ -265,13 +270,13 @@ def test_failed_rolling_summary_does_not_discard_commit_summary(tmp_path, monkey
     runner, repo = _summary_runner(tmp_path, monkeypatch)
     FakeSummarizer.fail_session = RuntimeError("session summary failed")
     runner.state.session_summary = "previous narrative"
-    sha = _commit_change(repo, "a.txt", "<agent> prompt subject")
+    sha = _commit_change(repo, "a.txt", "<aGiT> prompt subject")
 
     runner._start_commit_summary(sha, [_turn()])
     _finish_summary(runner)
 
     # The commit summary still lands (subject + notes)...
-    assert repo.commit_message("HEAD").startswith("<agent> Implement the widget renderer")
+    assert repo.commit_message("HEAD").startswith("<aGiT> Implement the widget renderer")
     full = repo.rev_parse("HEAD")
     assert "widget renderer" in (repo.notes_show(full, namespace="agit/commit-summary") or "")
     # ...and the previous rolling summary stays current instead of being lost.

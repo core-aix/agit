@@ -3379,7 +3379,7 @@ class ProxyRunner:
         # The auto-commit confirmation, including the short SHA of the commit aGiT
         # just made so the user can find it (e.g. `git show <id>`).
         commit_id = self._last_agent_commit_id
-        return f"Created <agent> commit {commit_id}." if commit_id else "Created <agent> commit."
+        return f"Created <aGiT> commit {commit_id}." if commit_id else "Created <aGiT> commit."
 
     # ------------------------------------------------------------------
     # Background commit summarization (#8)
@@ -4153,7 +4153,7 @@ class ProxyRunner:
             self.agent_in_flight = False
             self.last_status = ""
             if not quiet:
-                # Paint the "Created <agent> commit." confirmation NOW, before the
+                # Paint the "Created <aGiT> commit." confirmation NOW, before the
                 # integrate below runs git merge/fast-forward on the main thread.
                 self._render()
             if integrate:

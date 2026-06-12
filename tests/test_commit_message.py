@@ -22,7 +22,7 @@ def test_agent_commit_message_contains_trace_and_metadata():
         },
     )
 
-    assert message.startswith("<agent> fix it")
+    assert message.startswith("<aGiT> fix it")
     assert "# Interaction Trace" in message
     assert "## User\n\nfix it" in message
     assert "## Agent\n\nfixed" in message
@@ -266,7 +266,7 @@ def test_agent_commit_subject_is_capped_for_github():
     lines = message.splitlines()
     subject = lines[0]
     assert len(subject) <= 72  # GitHub's subject-line truncation limit
-    assert subject.startswith("<agent> ")
+    assert subject.startswith("<aGiT> ")
     assert subject.endswith("...")
     # The full (untruncated) text follows the subject line directly — no separate
     # "# Full Subject" header, and no blank line between subject and continuation.
@@ -344,7 +344,7 @@ def test_agent_subject_strips_orphan_mouse_and_control_chars():
         model="claude-opus-4-8",
     )
     subject = message.splitlines()[0]
-    assert subject == "<agent> run tests now"
+    assert subject == "<aGiT> run tests now"
     assert "\x1b" not in message
     assert "\x07" not in message
 
