@@ -3034,6 +3034,9 @@ class ProxyRunner:
             short_session_fn=_short_session,
             menu_label=self._menu_label(),
             summarizer_on=self._summarization_enabled(),
+            # The directory the agent works in: its session worktree, or the
+            # repo itself in --no-worktree mode.
+            cwd=str(repo_path) if (repo_path := getattr(self.repo, "repo", None)) else None,
         )
 
     def _summarization_enabled(self) -> bool:

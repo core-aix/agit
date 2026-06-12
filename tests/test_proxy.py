@@ -4075,6 +4075,67 @@ def test_screen_renderer_status_line_basic():
     assert "claude" in line
 
 
+def test_screen_renderer_status_line_shows_home_abbreviated_cwd(monkeypatch):
+    monkeypatch.setenv("HOME", "/Users/dev")
+    r = ScreenRenderer(5, 100, color_mode="truecolor")
+    line = r.status_line(
+        cols=100,
+        name="session-1",
+        backend_name="claude",
+        session_id=None,
+        base_branch=None,
+        worktree=None,
+        scroll_back=0,
+        user_declined=[],
+        short_session_fn=lambda s: "(none)",
+        cwd="/Users/dev/code/repo/.agit/worktrees/session-1",
+    )
+    # The agent's working directory is visible, home-abbreviated.
+    assert "~/code/repo/.agit/worktrees/session-1" in line
+
+
+def test_screen_renderer_status_line_elides_long_cwd_from_left():
+    cols = 60
+    r = ScreenRenderer(5, cols, color_mode="truecolor")
+    line = r.status_line(
+        cols=cols,
+        name="session-1",
+        backend_name="claude",
+        session_id=None,
+        base_branch=None,
+        worktree=None,
+        scroll_back=0,
+        user_declined=[],
+        short_session_fn=lambda s: "(none)",
+        cwd="/very/long/path/that/cannot/possibly/fit/in/the/status/bar/worktrees/session-1",
+    )
+    visible = line.replace("\x1b[7m", "").replace("\x1b[0m", "")
+    assert len(visible) <= cols  # never overflows the row
+    # Elided from the left: the identifying tail of the path survives.
+    assert "…" in visible
+    assert visible.rstrip().endswith("session-1")
+
+
+def test_status_line_includes_agent_working_directory(tmp_path):
+    import subprocess
+
+    from agit.git import GitRepo
+    from agit.config import AgitState
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    runner = make_runner(
+        repo=GitRepo(tmp_path),
+        state=AgitState(tmp_path),
+        name="session-1",
+        backend=type("B", (), {"name": "claude"})(),
+        scroll_back=0,
+        cols=200,
+    )
+
+    line = runner._status_line()
+    assert tmp_path.name in line  # the directory the agent works in is shown
+
+
 def test_screen_renderer_status_line_scrollback():
     r = ScreenRenderer(5, 60, color_mode="truecolor")
     line = r.status_line(
