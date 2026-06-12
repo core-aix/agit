@@ -11,9 +11,10 @@ from agit.backends.base import AgentResult, TokenUsage
 class OpenCodeBackend:
     name = "opencode"
 
-    def __init__(self, repo: Path, *, verbose: bool = False) -> None:
+    def __init__(self, repo: Path, *, verbose: bool = False, backend_args: list[str] | None = None) -> None:
         self.repo = repo
         self.verbose = verbose
+        self.backend_args = list(backend_args or [])  # forwarded verbatim to the backend CLI (#32)
 
     def run(self, prompt: str, *, model: str | None, session_id: str | None) -> AgentResult:
         command = ["opencode", "run", "--format", "json"]
@@ -21,6 +22,8 @@ class OpenCodeBackend:
             command.extend(["--model", model])
         if session_id:
             command.extend(["--session", session_id])
+        # Passthrough options go before the prompt positional (#32).
+        command.extend(self.backend_args)
         if prompt.startswith("/"):
             slash_command, args = self._split_slash_command(prompt)
             if slash_command:

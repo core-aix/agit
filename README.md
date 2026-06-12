@@ -62,6 +62,22 @@ agit --no-worktree
 
 This is for single-session use: there's no isolation or auto-integration, and concurrent sessions are unsafe in this mode (starting a new session is blocked). Set `"use_worktrees": false` in `~/.agit/config.json` to make it the default; `--no-worktree` always wins.
 
+### Forwarding arguments to the backend
+
+aGiT does not reduce the backend's own functionality: any argument it doesn't recognize is forwarded verbatim to the backend CLI (`claude` / `opencode`).
+
+```bash
+agit --backend opencode --port 12345      # --port 12345 goes to opencode
+```
+
+Use `--` to forward an argument that aGiT also defines (e.g. `--verbose`), or to pass a bare prompt:
+
+```bash
+agit -- --verbose "fix the bug"           # everything after -- goes to the backend
+```
+
+aGiT's own flags (`--repo`, `--verbose`, `--mode`, `--backend`, `--new-session`, `--no-worktree`) bind to aGiT when they appear before `--`. Note that aGiT manages session selection itself, so forwarding session flags (`--resume`, `--session-id`, `--session`, `--continue`) may interfere with its session tracking — it warns when you do.
+
 On the first run, aGiT asks which backend should be the default (listed alphabetically, with each backend's install status). If the chosen backend's CLI is not installed, aGiT shows install instructions and lets you install it or pick a different one. The choice is saved in `~/.agit/config.json` (`default_backend`) and reused for future runs. You can also switch backends mid-session with the `agent-backend` command below.
 
 In proxy mode (default), press `Ctrl-G`, then type one of these aGiT commands:
