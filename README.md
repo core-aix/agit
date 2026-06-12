@@ -89,6 +89,8 @@ agit -- --verbose "fix the bug"           # everything after -- goes to the back
 
 aGiT's own flags (`--repo`, `--verbose`, `--mode`, `--backend`, `--new-session`, `--no-worktree`) bind to aGiT when they appear before `--`. Note that aGiT manages session selection itself, so forwarding session flags (`--resume`, `--session-id`, `--session`, `--continue`) may interfere with its session tracking — it warns when you do.
 
+Help follows the same model: `agit --help` (or `-h`) prints aGiT's own options followed by the active backend's help, so one command documents both layers. To run only the backend's help, forward it explicitly: `agit -- --help`.
+
 On the first run, aGiT asks which backend should be the default (listed alphabetically, with each backend's install status). If the chosen backend's CLI is not installed, aGiT shows install instructions and lets you install it or pick a different one. The choice is saved in `~/.agit/config.json` (`default_backend`) and reused for future runs. You can also switch backends mid-session with the `agent-backend` command below.
 
 In proxy mode (default), press `Ctrl-G`, then type one of these aGiT commands:
@@ -211,6 +213,8 @@ User-wide settings live in `~/.agit/config.json` (override the directory with `A
 {
   "default_backend": "opencode",
   "menu_key": "ctrl-g",
+  "sandbox": true,
+  "use_worktrees": true,
   "timings": {
     "base_poll_seconds": 3.0
   }
@@ -218,6 +222,10 @@ User-wide settings live in `~/.agit/config.json` (override the directory with `A
 ```
 
 `default_backend` (`opencode` or `claude`) is used for repositories that have no backend recorded yet. It is updated whenever you pass `--backend` or switch backends with `agent-backend`.
+
+`sandbox` (default `true`) confines the agent's writes to its own session worktree (via `sandbox-exec` on macOS), keeping the base repository and sibling worktrees read-only to the agent. Set it to `false` to disable confinement; when sandboxing is unavailable, aGiT instead warns when the base repository is edited while a session runs.
+
+`use_worktrees` (default `true`) controls whether sessions run in isolated worktrees. Set it to `false` to run the agent directly on the current branch by default — the same behavior as `--no-worktree` (which always wins over the config). See the `--no-worktree` notes under Usage for the trade-offs.
 
 `menu_key` sets the key that opens aGiT's command menu in proxy mode. The default is `ctrl-g`; any `ctrl-<letter>` works except keys the terminal or aGiT already uses (`ctrl-c` exit flow, `ctrl-h` Backspace, `ctrl-i` Tab, `ctrl-j`/`ctrl-m` Enter). An invalid value falls back to `ctrl-g`, so a typo can never lock you out of the menu. The status line and aGiT's messages show whichever key is configured.
 
