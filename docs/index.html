@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>aGiT — every agent turn, committed with its story</title>
+<title>aGiT: every agent turn, committed with its story</title>
 <meta name="description" content="aGiT wraps Claude Code and OpenCode with Git: every agent turn becomes a traceable commit with the full interaction trace, model, and token usage.">
 <link rel="icon" type="image/png" href="images/favicon-64.png">
 <link rel="apple-touch-icon" href="images/apple-touch-icon.png">
@@ -172,7 +172,7 @@ footer .sha{font-size:12px}
     <div class="brand reveal r1"><span class="a">a</span>GiT</div>
     <p class="tagline reveal r2"><span class="tag">&lt;agent&gt;</span> every agent turn, committed with its story<span class="cursor"></span></p>
     <p class="sub reveal r3">aGiT wraps <strong>Claude Code</strong> and <strong>OpenCode</strong> with Git. You use the agent's own
-    TUI exactly as before — aGiT watches the session and turns every completed turn into a commit
+    TUI exactly as before. aGiT watches the session and turns every completed turn into a commit
     carrying the full interaction trace, the model, and the token bill.</p>
     <div class="hero-actions reveal r4">
       <a class="btn" href="https://github.com/core-aix/agit">git clone the repo</a>
@@ -188,7 +188,7 @@ footer .sha{font-size:12px}
         <span class="subject"><span class="tag">&lt;agent&gt;</span> show, don't tell</span>
       </div>
       <div class="term" id="demo">
-        <div class="term-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">agit — claude · session-1 → main</span></div>
+        <div class="term-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">agit · claude · session-1 → main</span></div>
         <div class="term-body"><pre><span class="d">$</span> <span class="p">agit</span>
 <span class="d">┌ claude · session-1 ──────────────────────────────────┐</span>
 <span class="w">&gt; add a --version flag to the cli</span>
@@ -201,7 +201,7 @@ footer .sha{font-size:12px}
 <span class="d">a91c07e</span> <span class="w">Initial commit</span>
 <span class="d">$</span> <span class="p">git show 4b2f31a --stat</span>
 <span class="o">&lt;agent&gt;</span> <span class="w">add a --version flag to the cli</span>
-<span class="d"> agit/cli.py | 6 ++++++</span>  <span class="d">— trace + model + token cost in the body ↓</span></pre>
+<span class="d"> agit/cli.py | 6 ++++++</span>  <span class="d">trace + model + token cost in the body ↓</span></pre>
         </div>
       </div>
     </section>
@@ -214,10 +214,10 @@ footer .sha{font-size:12px}
       <h2>Agent code without provenance is unreviewable.</h2>
       <p>A coding agent edits twelve files while you get coffee. A week later nobody can say which
       prompt produced which change, what the model was told, or what it cost. <strong>aGiT makes the unit
-      of agent work a commit</strong> — so review, blame, bisect, and revert work on agent output the same
+      of agent work a commit</strong>, so review, blame, bisect, and revert work on agent output the same
       way they work on yours.</p>
       <div class="term specimen">
-        <div class="term-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">git show — an aGiT commit message</span></div>
+        <div class="term-bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">git show: an aGiT commit message</span></div>
         <div class="term-body"><pre><span class="o">&lt;agent&gt;</span> <span class="w">add a --version flag to the cli</span>
 
 <span class="h"># Interaction Trace</span>
@@ -246,7 +246,7 @@ Added --version using the package metadata; prints and exits.
       </div>
       <h2>Your branch only ever moves by merge.</h2>
       <p>Each session runs in its own <strong>git worktree</strong> on its own branch, so concurrent sessions never
-      stomp each other — or your working tree. Finished turns integrate back into the branch you
+      stomp each other or your working tree. Finished turns integrate back into the branch you
       launched from; conflicts are handed to the agent to resolve, and the resolution is itself a
       traceable <span class="tag">&lt;agent-merge&gt;</span> commit.</p>
       <div class="branches">
@@ -263,7 +263,7 @@ Added --version using the package metadata; prints and exits.
         <div class="branch" data-ref="tokens_since_last_commit">
           <h3>Costs on the record</h3>
           <p>Input, output, and cache token counts per commit, straight from the backend's session
-          record — a price tag on every change.</p>
+          record: a price tag on every change.</p>
         </div>
       </div>
     </section>
@@ -277,7 +277,7 @@ Added --version using the package metadata; prints and exits.
       <div class="steps">
         <div class="step"><div>
           <code>uv tool install git+https://github.com/core-aix/agit</code>
-          <div class="note">or: <span class="p">pip install -e .</span> from a clone — Python ≥ 3.10</div>
+          <div class="note">or: <span class="p">pip install -e .</span> from a clone (Python ≥ 3.10)</div>
         </div></div>
         <div class="step"><div>
           <code>cd your-repo && agit</code>
@@ -288,7 +288,7 @@ Added --version using the package metadata; prints and exits.
           <div class="note">opens the aGiT menu: sessions, backends, staging, user commits, base branch</div>
         </div></div>
       </div>
-      <p style="margin-top:18px">Prompt the agent as usual. When the turn settles, the commit is already there —
+      <p style="margin-top:18px">Prompt the agent as usual. When the turn settles, the commit is already there.
       <span class="p">git log</span> tells the rest.</p>
     </section>
 
@@ -298,7 +298,7 @@ Added --version using the package metadata; prints and exits.
         <span class="subject"><span class="tag">&lt;agent&gt;</span> your move</span>
       </div>
       <h2>Put your agents on the record.</h2>
-      <p>Apache-2.0. Issues, ideas, and first contributions welcome — the
+      <p>Apache-2.0. Issues, ideas, and first contributions welcome. The
       <a href="https://github.com/core-aix/agit/issues">issue tracker</a> has
       <strong>good first issue</strong> tags waiting.</p>
       <div class="hero-actions">
@@ -310,7 +310,7 @@ Added --version using the package metadata; prints and exits.
   </main>
 
   <footer>
-    <span><span class="sha">aGiT</span> — agent + git · Apache-2.0</span>
+    <span><span class="sha">aGiT</span> · agent + git · Apache-2.0</span>
     <span>this page is a git log · <a href="https://github.com/core-aix/agit/tree/main/docs">view source</a></span>
   </footer>
 </div>
