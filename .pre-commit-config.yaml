@@ -1,6 +1,9 @@
-# Fast local checks that mirror the CI lint/format gates (.github/workflows/ci.yml).
-# Opt-in: run `uv run pre-commit install` once. Heavier checks (pytest, coverage,
-# mypy) stay in CI so commits remain quick.
+# Local git hooks that mirror the CI gates (.github/workflows/ci.yml).
+# Opt-in: run `make install-hooks` once (installs both the commit and push hooks).
+#
+#   commit stage : ruff lint + format + file hygiene (fast, keeps commits quick)
+#   push stage   : the full gate via scripts/check.sh (ruff + mypy + tests),
+#                  so a push that would break CI fails locally first.
 #
 # ruff config is shared from pyproject.toml ([tool.ruff]).
 repos:
@@ -19,3 +22,14 @@ repos:
       - id: check-yaml
       - id: check-merge-conflict
       - id: check-added-large-files
+
+  # Full CI-equivalent gate, run only on push (too heavy for every commit).
+  - repo: local
+    hooks:
+      - id: full-check
+        name: full check (ruff, mypy, tests + coverage)
+        entry: scripts/check.sh
+        language: script
+        stages: [pre-push]
+        pass_filenames: false
+        always_run: true
