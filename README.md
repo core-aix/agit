@@ -143,7 +143,24 @@ On startup, aGiT reconciles worktrees left behind by previous runs: it integrate
 
 ### Commit message format
 
-aGiT commit messages use a consistent Markdown-style structure. The first line is the subject (prefixed with `<agent>`, `<agent-merge>`, or left plain for user commits). The body is organized into `#` sections — `# Full Subject`, `# Interaction Trace`, `# aGiT Metadata` — with `## User` / `## Agent` subsections inside the interaction trace. Commits are written with `git commit -F -` (no editor), so the `#` lines are preserved rather than stripped as git comments. Secrets and terminal escape sequences are masked out of subjects and trace bodies before committing.
+aGiT commit messages use a consistent Markdown-style structure. The first line is the subject (prefixed with `<agent>`, `<agent-merge>`, or left plain for user commits). The body is organized into `#` sections — `# Full Subject`, `# Summary` (when summarization is enabled), `# Interaction Trace`, `# aGiT Metadata` — with `## User` / `## Agent` subsections inside the interaction trace. Commits are written with `git commit -F -` (no editor), so the `#` lines are preserved rather than stripped as git comments. Secrets and terminal escape sequences are masked out of subjects and trace bodies before committing.
+
+### Summarization
+
+When summarization is enabled (the default), aGiT runs a second LLM stream alongside the coding session to preserve design context that would otherwise be lost to session compaction or terse commit subjects:
+
+- **Commit summaries** — each agent commit gets an LLM-written summary of what changed and why. It is included in the commit body under the `# Summary` section and stored as a git note in the `agit/commit-summary` namespace.
+- **Session summaries** — a rolling narrative of the session (goals, architectural decisions, design evolution) is updated on every commit and attached as a git note in the `agit/session-summary` namespace.
+- **Pre-compaction capture** — when you run `/compact` in the backend, aGiT first exports the full session transcript and folds it into the session summary, so compaction does not lose the conversation's context.
+
+Because summaries are git notes, they travel with the repository and can be read independently of commit messages:
+
+```bash
+git notes --ref agit/commit-summary show <commit>
+git notes --ref agit/session-summary show <commit>
+```
+
+The status bar shows whether summarization is active (`sum:on` / `sum:off`). Use the `summarizer` command (`Ctrl-G`, then `summarizer`, or `:summarizer` in JSON mode) to toggle it (`summarizer on|off`), set the summarization model (`summarizer model`), or show the current status; changes persist to the repository-local `.agit/config.json` (see Configuration).
 
 ## Commit Behavior
 
@@ -202,11 +219,15 @@ Repository-local configuration can be stored in `.agit/config.json`:
 
 ```json
 {
-  "trace_turn_limit": 5
+  "trace_turn_limit": 5,
+  "summarization_enabled": true,
+  "summarization_model": null
 }
 ```
 
 `trace_turn_limit` controls the maximum number of recent user turns included in an agent commit body. The default is `5`.
+
+`summarization_enabled` (default `true`) toggles the LLM summarization stream (see Summarization above). `summarization_model` sets the model the summarizer asks the backend to use; leave it unset (`null`) to use the backend's default model. Both keys can also be set user-wide in `~/.agit/config.json`; the repository-local value wins, and the `summarizer` command writes its changes here.
 
 User-wide settings live in `~/.agit/config.json` (override the directory with `AGIT_CONFIG_DIR`):
 
