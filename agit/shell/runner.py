@@ -23,9 +23,16 @@ BACKENDS = {
 
 class AgitShell:
     def __init__(
-        self, repo: GitRepo, *, verbose: bool = False, backend: str | None = None, new_session: bool = False
+        self,
+        repo: GitRepo,
+        *,
+        verbose: bool = False,
+        backend: str | None = None,
+        new_session: bool = False,
+        backend_args: list[str] | None = None,
     ) -> None:
         self.repo = repo
+        self.backend_args = list(backend_args or [])  # forwarded to the backend CLI (#32)
         self.global_config = GlobalConfig()
         self.state = AgitState(repo.repo, default_backend=self.global_config.default_backend)
         if backend and backend in BACKENDS and backend != self.state.backend:
@@ -163,7 +170,7 @@ class AgitShell:
         backend_class = BACKENDS.get(self.state.backend)
         if backend_class is None:
             raise RuntimeError(f"Unsupported backend: {self.state.backend}")
-        return backend_class(self.repo.repo, verbose=self.verbose)
+        return backend_class(self.repo.repo, verbose=self.verbose, backend_args=self.backend_args)
 
     def _print_help(self) -> None:
         print("Commands:")

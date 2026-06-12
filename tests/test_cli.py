@@ -95,3 +95,271 @@ def test_discover_or_init_non_interactive_does_not_prompt(tmp_path, monkeypatch)
     monkeypatch.setattr("builtins.input", lambda *a: (_ for _ in ()).throw(AssertionError("should not prompt")))
 
     assert cli._discover_or_init(tmp_path) is None
+
+
+# --- backend passthrough args (#32) -----------------------------------------
+
+
+def _stub_launch(monkeypatch):
+    """Stub the launch surface so cli.main only exercises arg routing.
+    Returns the dict the fake runner/shell records its kwargs into."""
+    captured: dict = {}
+
+    class Fake:
+        def __init__(self, repo, **kw):
+            captured.update(kw)
+
+        def run(self):
+            return 0
+
+    monkeypatch.setattr(cli, "ProxyRunner", Fake)
+    monkeypatch.setattr(cli, "AgitShell", Fake)
+    monkeypatch.setattr(cli, "_discover_or_init", lambda p: object())
+
+    class Config:
+        def has_default_backend(self):
+            return True
+
+        default_backend = "opencode"
+
+    monkeypatch.setattr(cli, "GlobalConfig", lambda: Config())
+    return captured
+
+
+def test_unknown_args_forwarded_to_backend(monkeypatch):
+    captured = _stub_launch(monkeypatch)
+    rc = cli.main(["--backend", "opencode", "--port", "12345"])
+    assert rc == 0
+    assert captured["backend_args"] == ["--port", "12345"]
+
+
+def test_double_dash_forwards_agit_defined_flags_and_prompt(monkeypatch):
+    captured = _stub_launch(monkeypatch)
+    cli.main(["--backend", "claude", "--", "--verbose", "fix the bug"])
+    # everything after -- goes to the backend, including a flag aGiT also owns
+    assert captured["backend_args"] == ["--verbose", "fix the bug"]
+
+
+def test_agit_flags_still_bind_before_separator(monkeypatch):
+    captured = _stub_launch(monkeypatch)
+    cli.main(["--verbose", "--backend", "claude", "--", "--model", "opus"])
+    # --verbose before -- is aGiT's; only post-separator args pass through
+    assert captured["backend_args"] == ["--model", "opus"]
+
+
+def test_no_passthrough_args_is_empty_list(monkeypatch):
+    captured = _stub_launch(monkeypatch)
+    cli.main(["--backend", "opencode"])
+    assert captured["backend_args"] == []
+
+
+def test_reserved_passthrough_flag_warns_but_forwards(monkeypatch, capsys):
+    captured = _stub_launch(monkeypatch)
+    cli.main(["--backend", "claude", "--resume", "abc123"])
+    out = capsys.readouterr().out
+    assert "--resume" in out and "session" in out.lower()
+    assert captured["backend_args"] == ["--resume", "abc123"]  # still forwarded
+
+
+def test_proxy_runner_stores_backend_args(tmp_path):
+    # Build a runner through the real __init__ (with a tmp git repo) and confirm
+    # passthrough args are stored for _spawn to append.
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-q", "--allow-empty", "-m", "init"], check=True)
+    from agit.proxy.runner import ProxyRunner
+
+    runner = ProxyRunner(GitRepo(tmp_path), backend_args=["--port", "9999"])
+    assert runner._backend_args == ["--port", "9999"]
+    # _spawn appends them after spawn_command; verify that composition directly.
+    base = ["opencode", str(tmp_path)]
+    assert base + runner._backend_args == ["opencode", str(tmp_path), "--port", "9999"]
+
+
+def test_json_backends_append_backend_args():
+    from agit.backends.claude import ClaudeBackend
+    from agit.backends.opencode import OpenCodeBackend
+
+    claude = ClaudeBackend("/repo", backend_args=["--max-budget-usd", "5"])
+    assert claude.backend_args == ["--max-budget-usd", "5"]
+
+    oc = OpenCodeBackend("/repo", backend_args=["--port", "0"])
+    assert oc.backend_args == ["--port", "0"]
+
+
+# --- combined help (#32) ----------------------------------------------------
+
+
+def test_help_shows_combined_help(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_discover_or_init", lambda p: object())
+    monkeypatch.setattr(cli.shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+
+    class FakeResult:
+        stdout = "opencode help output"
+        stderr = ""
+
+    monkeypatch.setattr(cli.subprocess, "run", lambda *args, **kwargs: FakeResult())
+
+    class Config:
+        def has_default_backend(self):
+            return True
+
+        default_backend = "opencode"
+
+    monkeypatch.setattr(cli, "GlobalConfig", lambda: Config())
+
+    rc = cli.main(["--help"])
+    assert rc == 0
+
+    out = capsys.readouterr().out
+    assert "Interactive agent + git commit orchestration" in out
+    assert "--backend" in out
+    assert "Backend help (opencode)" in out
+    assert "opencode help output" in out
+
+
+def test_help_short_flag(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_discover_or_init", lambda p: object())
+    monkeypatch.setattr(cli.shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+
+    class FakeResult:
+        stdout = "claude help output"
+        stderr = ""
+
+    monkeypatch.setattr(cli.subprocess, "run", lambda *args, **kwargs: FakeResult())
+
+    class Config:
+        def has_default_backend(self):
+            return True
+
+        default_backend = "claude"
+
+    monkeypatch.setattr(cli, "GlobalConfig", lambda: Config())
+
+    rc = cli.main(["-h"])
+    assert rc == 0
+
+    out = capsys.readouterr().out
+    assert "Backend help (claude)" in out
+    assert "claude help output" in out
+
+
+def test_help_with_explicit_backend(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_discover_or_init", lambda p: object())
+    monkeypatch.setattr(cli.shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+
+    class FakeResult:
+        stdout = "opencode help output"
+        stderr = ""
+
+    monkeypatch.setattr(cli.subprocess, "run", lambda *args, **kwargs: FakeResult())
+
+    class Config:
+        def has_default_backend(self):
+            return False
+
+        default_backend = None
+
+    monkeypatch.setattr(cli, "GlobalConfig", lambda: Config())
+
+    rc = cli.main(["--backend", "opencode", "--help"])
+    assert rc == 0
+
+    out = capsys.readouterr().out
+    assert "Backend help (opencode)" in out
+    assert "opencode help output" in out
+
+
+def test_help_no_backend_selected(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_discover_or_init", lambda p: object())
+
+    class Config:
+        def has_default_backend(self):
+            return False
+
+        default_backend = None
+
+    monkeypatch.setattr(cli, "GlobalConfig", lambda: Config())
+
+    rc = cli.main(["--help"])
+    assert rc == 0
+
+    out = capsys.readouterr().out
+    assert "No backend selected yet" in out
+
+
+def test_backend_help_via_double_dash_runs_directly(monkeypatch):
+    """Test that --backend X -- --help runs backend help directly, not combined help."""
+    monkeypatch.setattr(
+        cli, "_discover_or_init", lambda p: (_ for _ in ()).throw(AssertionError("TUI should not launch"))
+    )
+    monkeypatch.setattr(cli.shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+
+    class Config:
+        def has_default_backend(self):
+            return True
+
+        default_backend = "opencode"
+
+    monkeypatch.setattr(cli, "GlobalConfig", lambda: Config())
+
+    class FakeResult:
+        returncode = 0
+
+    run_calls = []
+
+    def fake_run(*args, **kwargs):
+        run_calls.append(args[0])
+        return FakeResult()
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    rc = cli.main(["--backend", "opencode", "--", "--help"])
+    assert rc == 0
+    assert run_calls == [["opencode", "--help"]]
+
+
+def test_backend_help_runs_directly_without_tui(monkeypatch):
+    monkeypatch.setattr(
+        cli, "_discover_or_init", lambda p: (_ for _ in ()).throw(AssertionError("TUI should not launch"))
+    )
+    monkeypatch.setattr(cli.shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+
+    class Config:
+        def has_default_backend(self):
+            return True
+
+        default_backend = "opencode"
+
+    monkeypatch.setattr(cli, "GlobalConfig", lambda: Config())
+
+    class FakeResult:
+        returncode = 0
+
+    monkeypatch.setattr(cli.subprocess, "run", lambda *args, **kwargs: FakeResult())
+
+    rc = cli.main(["--backend", "opencode", "--", "--help"])
+    assert rc == 0
+
+
+def test_backend_help_no_backend_selected(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_discover_or_init", lambda p: object())
+
+    class Config:
+        def has_default_backend(self):
+            return False
+
+        default_backend = None
+
+    monkeypatch.setattr(cli, "GlobalConfig", lambda: Config())
+
+    rc = cli.main(["--", "--help"])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "No backend selected" in out
+
+
+def test_backend_other_args_still_launch_tui(monkeypatch):
+    captured = _stub_launch(monkeypatch)
+    rc = cli.main(["--backend", "opencode", "--", "--port", "12345"])
+    assert rc == 0
+    assert captured["backend_args"] == ["--port", "12345"]
