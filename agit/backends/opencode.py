@@ -17,7 +17,7 @@ class OpenCodeBackend:
         self.backend_args = list(backend_args or [])  # forwarded verbatim to the backend CLI (#32)
 
     def run(self, prompt: str, *, model: str | None, session_id: str | None) -> AgentResult:
-        command = ["opencode", "run", "--format", "json"]
+        command = ["opencode", "run", "--format", "json", "--dir", str(self.repo)]
         if model:
             command.extend(["--model", model])
         if session_id:
@@ -94,6 +94,15 @@ class OpenCodeBackend:
         except json.JSONDecodeError:
             return None
 
+        # Debug: print event structure
+        if self.verbose:
+            event_type = event.get("type", "")
+            part = event.get("part", {})
+            part_type = part.get("type", "") if isinstance(part, dict) else ""
+            text = self._event_text(event)
+            if text or event_type:
+                print(f"  [DEBUG] event_type={event_type}, part_type={part_type}, has_text={bool(text)}")
+
         session_id = self._find_value(event, {"sessionID", "sessionId", "session_id"})
         model = self._event_model(event)
         tokens = self._event_tokens(event)
@@ -107,6 +116,8 @@ class OpenCodeBackend:
         text = self._event_text(event)
         if text:
             is_final = self._is_final_text(event, part)
+            if self.verbose and text:
+                print(f"  [DEBUG] is_final={is_final}, text_preview={text[:50]}...")
             return text, text if is_final else None, session_id, model, tokens
 
         status = self._event_status(event, part)
@@ -141,7 +152,8 @@ class OpenCodeBackend:
             return True
         event_type = str(event.get("type", "")).lower()
         part_type = str(part.get("type", "")).lower()
-        return event_type in {"final", "complete", "done"} or part_type in {"final", "complete", "done"}
+        # opencode sends final responses as "text" type events
+        return event_type in {"final", "complete", "done", "text"} or part_type in {"final", "complete", "done", "text"}
 
     def _event_status(self, event: dict, part: dict) -> str | None:
         event_type = str(event.get("type", "")).lower()

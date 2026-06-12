@@ -530,12 +530,14 @@ class ScreenRenderer:
         user_declined: list,
         short_session_fn,
         menu_label: str = "Ctrl-G",
+        summarizer_on: bool = True,
     ) -> str:
         declined = len(user_declined)
         session = f"{name or 'session'}" + (f" [{short_session_fn(session_id)}]" if session_id else "")
         if base_branch and worktree is not None:
             session += f" → {base_branch}"  # the branch this session's work merges into
-        left = f" aGiT {menu_label} | {session} | {backend_name} "
+        sum_indicator = "sum:on" if summarizer_on else "sum:off"
+        left = f" aGiT {menu_label} | {session} | {backend_name} | {sum_indicator} "
         if scroll_back > 0:
             right = f" SCROLLBACK -{scroll_back} (scroll down to resume) "
         else:

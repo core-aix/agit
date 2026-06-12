@@ -237,6 +237,27 @@ class GitRepo:
             command.extend(["--", *paths])
         return self._run(command, check=False).stdout.strip()
 
+    def notes_add(self, commit: str, message: str, *, namespace: str = "agit") -> None:
+        self._run(["git", "notes", "--ref", namespace, "add", "-f", "-m", message, commit])
+
+    def notes_show(self, commit: str, *, namespace: str = "agit") -> str | None:
+        result = self._run(["git", "notes", "--ref", namespace, "show", commit], check=False)
+        return result.stdout if result.returncode == 0 else None
+
+    def notes_list(self, *, namespace: str = "agit") -> list[tuple[str, str]]:
+        output = self._run(["git", "notes", "--ref", namespace, "list"], check=False).stdout
+        if not output.strip():
+            return []
+        entries = []
+        for line in output.splitlines():
+            parts = line.split(maxsplit=1)
+            if len(parts) == 2:
+                commit_sha = parts[1]
+                note = self.notes_show(commit_sha, namespace=namespace)
+                first_line = (note or "").strip().split("\n")[0] if note else ""
+                entries.append((commit_sha, first_line))
+        return entries
+
     def _run(
         self, command: list[str], *, input_text: str | None = None, check: bool = True
     ) -> subprocess.CompletedProcess[str]:

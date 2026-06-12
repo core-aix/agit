@@ -135,3 +135,23 @@ class GlobalConfig:
             if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
                 result[key] = float(value)
         return result
+
+    @property
+    def summarization_model(self) -> str | None:
+        value = self.data.get("summarization_model")
+        return str(value) if value else None
+
+    @summarization_model.setter
+    def summarization_model(self, value: str | None) -> None:
+        self.data["summarization_model"] = value
+        self.save()
+
+    @property
+    def summarization_enabled(self) -> bool:
+        value = self.data.get("summarization_enabled")
+        return True if value is None else bool(value)
+
+    @summarization_enabled.setter
+    def summarization_enabled(self, value: bool) -> None:
+        self.data["summarization_enabled"] = bool(value)
+        self.save()

@@ -46,6 +46,7 @@ def build_agent_commit_message(
     token_usage: dict[str, int | None] | None = None,
     trace_turn_limit: int = 5,
     session_name: str | None = None,
+    summary: str | None = None,
 ) -> str:
     subject_prompt, full_subject = _subject_parts(
         _mask_secrets(latest_prompt), width=MAX_SUBJECT_WIDTH - len(AGENT_SUBJECT_PREFIX)
@@ -56,6 +57,10 @@ def build_agent_commit_message(
         # line between them, so the extended subject reads as one continued line.
         lines.extend(_body_lines(full_subject))
     lines.append("")
+    if summary:
+        lines.extend(["# Summary", ""])
+        lines.extend(_body_lines(summary))
+        lines.append("")
     lines.extend(["# Interaction Trace", ""])
     for item in _limit_trace_turns(trace, trace_turn_limit):
         role = item.get("role", "").strip().lower()

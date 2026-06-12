@@ -68,10 +68,12 @@ class AgitState:
                 "subagent_cache_read": 0,
                 "subagent_cache_write": 0,
             },
+            "session_summary": None,
+            "session_summary_commit": None,
         }
 
     def _default_config(self) -> dict[str, Any]:
-        return {"trace_turn_limit": 5}
+        return {"trace_turn_limit": 5, "summarization_model": None, "summarization_enabled": True}
 
     def _load_config(self) -> dict[str, Any]:
         default = self._default_config()
@@ -288,6 +290,34 @@ class AgitState:
         value = self.config.get("trace_turn_limit", 5)
         return value if isinstance(value, int) and value > 0 else 5
 
+    @property
+    def summarization_model(self) -> str | None:
+        value = self.config.get("summarization_model")
+        return str(value) if value else None
+
+    @summarization_model.setter
+    def summarization_model(self, value: str | None) -> None:
+        self.config["summarization_model"] = value
+        self._save_config()
+
+    @property
+    def summarization_enabled(self) -> bool:
+        value = self.config.get("summarization_enabled")
+        return True if value is None else bool(value)
+
+    @summarization_enabled.setter
+    def summarization_enabled(self, value: bool) -> None:
+        self.config["summarization_enabled"] = bool(value)
+        self._save_config()
+
+    def _save_config(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.config_path.with_name(self.config_path.name + ".tmp")
+        with tmp.open("w", encoding="utf-8") as handle:
+            json.dump(self.config, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.replace(tmp, self.config_path)
+
     def append_trace(self, role: str, content: str) -> None:
         trace = self.pending_trace()
         trace.append({"role": role, "content": content})
@@ -323,4 +353,24 @@ class AgitState:
         ):
             current[key] = int(current.get(key) or 0) + int(getattr(usage, key, 0) or 0)
         self.data["pending_token_usage"] = current
+        self.save()
+
+    @property
+    def session_summary(self) -> str | None:
+        value = self.data.get("session_summary")
+        return str(value) if value else None
+
+    @session_summary.setter
+    def session_summary(self, value: str | None) -> None:
+        self.data["session_summary"] = value
+        self.save()
+
+    @property
+    def session_summary_commit(self) -> str | None:
+        value = self.data.get("session_summary_commit")
+        return str(value) if value else None
+
+    @session_summary_commit.setter
+    def session_summary_commit(self, value: str | None) -> None:
+        self.data["session_summary_commit"] = value
         self.save()

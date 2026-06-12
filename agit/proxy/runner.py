@@ -118,6 +118,7 @@ class ProxyInput:
     COMMANDS = [
         "session",
         "agent-backend",
+        "summarizer",
         "git-base-branch",
         "git-status",
         "git-stage",
@@ -1594,6 +1595,46 @@ class ProxyRunner:
         else:
             self._session_menu()
 
+    def _handle_summarizer_command(self, arg: str) -> None:
+        sub = arg.strip().lower()
+        if sub in ("on", "off"):
+            enabled = sub == "on"
+            self.state.summarization_enabled = enabled
+            self._set_message(f"Summarizer {'enabled' if enabled else 'disabled'}.")
+            self._render()
+            return
+        if sub == "model":
+            current = self.state.summarization_model or self.global_config.summarization_model or "(same as session)"
+            new_model = self._prompt_popup(
+                "Summarizer Model",
+                f"Current: {current}\nEnter model (empty to clear):",
+                default=self.state.summarization_model or "",
+            )
+            if new_model is not None:
+                self.state.summarization_model = new_model.strip() or None
+                self._set_message(f"Summarizer model: {self.state.summarization_model or '(same as session)'}")
+            self._render()
+            return
+        enabled = self._summarization_enabled()
+        model = self.state.summarization_model or self.global_config.summarization_model or "(same as session)"
+        choice = self._select_popup(
+            "Summarizer",
+            [
+                f"Toggle ({'ON' if enabled else 'OFF'})",
+                f"Set model (current: {model})",
+            ],
+        )
+        if choice is None:
+            self._render()
+            return
+        if choice.startswith("Toggle"):
+            self.state.summarization_enabled = not enabled
+            self._set_message(f"Summarizer {'enabled' if not enabled else 'disabled'}.")
+        elif choice.startswith("Set model"):
+            self._handle_summarizer_command("model")
+            return
+        self._render()
+
     # --- switch base branch ---
 
     def _base_switch_candidates(self) -> list[str]:
@@ -2481,6 +2522,8 @@ class ProxyRunner:
             submitted_prompt = ""
             if submit:
                 submitted_prompt = self.passthrough_prompt.decode(errors="ignore").strip()
+                if submitted_prompt.startswith("/compact"):
+                    self._handle_pre_compaction()
                 if not self._pre_agent_commit_if_needed(submitted_prompt):
                     self.pending_forwarded = [chunk for chunk in forwarded if chunk in {b"\r", b"\n"}]
                     self.pending_prompt_text = submitted_prompt
@@ -2966,7 +3009,18 @@ class ProxyRunner:
             user_declined=self._user_declined,
             short_session_fn=_short_session,
             menu_label=self._menu_label(),
+            summarizer_on=self._summarization_enabled(),
         )
+
+    def _summarization_enabled(self) -> bool:
+        state_enabled = getattr(self.state, "summarization_enabled", None)
+        if state_enabled is not None:
+            return state_enabled
+        if self.global_config is not None:
+            gc_enabled = getattr(self.global_config, "summarization_enabled", None)
+            if gc_enabled is not None:
+                return gc_enabled
+        return True
 
     def _render_status(self, text: str) -> None:
         prompt = text.replace("\r", "").replace("\n", "")
@@ -3025,6 +3079,9 @@ class ProxyRunner:
                 return
         elif name == "session":
             self._handle_session_command(arg)
+            return
+        elif name == "summarizer":
+            self._handle_summarizer_command(arg)
             return
         elif name == "git-base-branch":
             self._switch_base_command(arg)
@@ -3259,6 +3316,20 @@ class ProxyRunner:
             if not quiet:
                 self._set_message(self._agent_commit_message(), sticky=True)
 
+        summarizer = None
+        if self._summarization_enabled():
+            from agit.summaries import Summarizer
+            from agit.backends.claude import ClaudeBackend
+            from agit.backends.opencode import OpenCodeBackend
+
+            backend_class = OpenCodeBackend if self.state.backend == "opencode" else ClaudeBackend
+            summarizer_model = self.state.summarization_model
+            if summarizer_model is None and self.global_config is not None:
+                summarizer_model = self.global_config.summarization_model
+            repo_path = getattr(self.repo, "repo", None)
+            if repo_path is not None:
+                summarizer = Summarizer(backend_class(repo_path), model=summarizer_model)
+
         return CommitEngine(self.repo, self.state, debug_fn=self._debug).commit_turns(
             turns=turns,
             backend=backend,
@@ -3268,6 +3339,7 @@ class ProxyRunner:
             pre_commit_fn=self._ensure_turn_branch,
             on_commit_fn=on_commit_fn,
             session_name=self.name,
+            summarizer=summarizer,
         )
 
     def _agent_commit_message(self) -> str:
@@ -3580,6 +3652,40 @@ class ProxyRunner:
         # builder collapses this with the backend's own turn.user_prompt.
         self._record_user_prompt(prompt_text)
         return True
+
+    def _handle_pre_compaction(self) -> None:
+        self._set_message("aGiT: Capturing session summary before compaction...")
+        self._render()
+        try:
+            from agit.summaries import Summarizer
+            from agit.backends.claude import ClaudeBackend
+            from agit.backends.opencode import OpenCodeBackend
+
+            backend_class = OpenCodeBackend if self.state.backend == "opencode" else ClaudeBackend
+            backend = backend_class(self.repo.repo)
+            model = self.state.summarization_model
+            if model is None and self.global_config is not None:
+                model = self.global_config.summarization_model
+            summarizer = Summarizer(backend, model=model)
+            session_id = self.state.backend_session_id
+            if not session_id:
+                return
+            exported = self.backend.export_session(self.repo.repo, session_id)
+            if not exported or not exported.turns:
+                return
+            summary = summarizer.summarize_pre_compaction(
+                exported_session=exported,
+                current_summary=self.state.session_summary,
+            )
+            self.state.session_summary = summary
+            head_sha = self.repo.rev_parse("HEAD")
+            if head_sha:
+                self.state.session_summary_commit = head_sha
+                self.repo.notes_add(head_sha, summary, namespace="agit/session-summary")
+            self._set_message("aGiT: Session summary captured.")
+        except Exception as error:
+            self._debug(f"pre-compaction summary failed: {error!r}")
+            self._set_message("aGiT: Pre-compaction summary failed.")
 
     def _base_user_edits_pending(self) -> bool:
         # The user's own edits land in the BASE repo's working tree (the session

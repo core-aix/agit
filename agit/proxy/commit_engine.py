@@ -66,13 +66,16 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Callable
+from typing import Callable, TYPE_CHECKING
 
 from agit.commits import build_agent_commit_message
 from agit.git import GitRepo
 from agit.transcripts.opencode import SessionTurn
 from agit.transcripts import turns_after
 from agit.config import AgitState
+
+if TYPE_CHECKING:
+    from agit.summaries import Summarizer
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +130,7 @@ class CommitEngine:
         on_commit_fn: _OnCommitFn | None = None,
         session_name: str | None = None,
         accumulate_trace_only_on_commit: bool = False,
+        summarizer: "Summarizer | None" = None,
     ) -> bool:
         """Core of every agent-commit path.
 
@@ -157,6 +161,18 @@ class CommitEngine:
         """
         if not turns:
             return False
+
+        diff_before_commit = self.repo.diff_head() if summarizer else ""
+        commit_summary = None
+        if summarizer:
+            try:
+                commit_summary = summarizer.summarize_commit(
+                    turns=turns,
+                    diff=diff_before_commit,
+                    session_summary=self.state.session_summary,
+                )
+            except Exception as error:
+                self._debug(f"summarization failed: {error!r}")
 
         if accumulate_trace_only_on_commit:
             # Actions / shell mode: do the staged check first, accumulate only
@@ -236,9 +252,25 @@ class CommitEngine:
                 token_usage=self.state.pending_token_usage(),
                 trace_turn_limit=self.state.trace_turn_limit,
                 session_name=session_name,
+                summary=commit_summary,
             )
         )
         self.state.clear_trace()
+
+        if summarizer and commit_summary and commit_sha:
+            try:
+                self.repo.notes_add(commit_sha, commit_summary, namespace="agit/commit-summary")
+                new_session_summary = summarizer.update_session_summary(
+                    current_summary=self.state.session_summary,
+                    turns=turns,
+                    diff=diff_before_commit,
+                    commit_summary=commit_summary,
+                )
+                self.state.session_summary = new_session_summary
+                self.state.session_summary_commit = commit_sha
+                self.repo.notes_add(commit_sha, new_session_summary, namespace="agit/session-summary")
+            except Exception as error:
+                self._debug(f"session summary update failed: {error!r}")
 
         if on_commit_fn is not None:
             on_commit_fn(commit_sha)
