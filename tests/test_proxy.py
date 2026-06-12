@@ -272,9 +272,130 @@ def test_proxy_agent_commit_preserves_incomplete_initial_user_turn(tmp_path):
     assert committed is True
     message = runner.repo.message
     # The subject lists every prompt that led to the commit, joined by " / ".
-    assert message.startswith("<agent> fix it / also handle errors")
+    assert message.startswith("<aGiT> fix it / also handle errors")
     assert message.index("## User\n\nfix it") < message.index("## User\n\nalso handle errors")
     assert message.index("## User\n\nalso handle errors") < message.index("## Agent\n\ndone")
+
+
+def test_proxy_agent_commit_does_not_repeat_whitespace_variant_prompt(tmp_path):
+    # The prompt recorded at submit keeps the user's raw typing (trailing
+    # newline etc.) while the transcript normalizes it; the old exact-string
+    # match failed and re-appended the prompt at the end of the trace (#8).
+    runner = make_runner(
+        repo=FakeCommitRepo(),
+        state=AgitState(tmp_path),
+        verbose=False,
+    )
+    runner._review_untracked_popup = lambda include_declined: "No untracked files to review."
+    runner.state.append_trace("user", "fix the bug \n")
+
+    committed = runner._create_agent_commit_from_turns_popup(
+        turns=[SessionTurn("u1", "a1", "fix the bug", "done", TokenUsage(total=1, output=1), None)],
+        backend="claude",
+        backend_session_id="ses-1",
+        model="m",
+        quiet=True,
+    )
+
+    assert committed is True
+    message = runner.repo.message
+    assert message.splitlines()[0] == "<aGiT> fix the bug"
+    assert message.count("## User") == 1  # not repeated before the metadata
+
+
+def test_proxy_agent_commit_collapses_double_recorded_prompt(tmp_path):
+    # A prompt recorded twice in the pending trace (two submit paths firing for
+    # one prompt) must appear once, not once per recording (#8).
+    runner = make_runner(
+        repo=FakeCommitRepo(),
+        state=AgitState(tmp_path),
+        verbose=False,
+    )
+    runner._review_untracked_popup = lambda include_declined: "No untracked files to review."
+    runner.state.append_trace("user", "do the thing")
+    runner.state.append_trace("user", "do the thing ")
+
+    committed = runner._create_agent_commit_from_turns_popup(
+        turns=[SessionTurn("u1", "a1", "", "done", TokenUsage(total=1, output=1), None)],
+        backend="claude",
+        backend_session_id="ses-1",
+        model="m",
+        quiet=True,
+    )
+
+    assert committed is True
+    message = runner.repo.message
+    assert message.splitlines()[0] == "<aGiT> do the thing"
+    assert message.count("## User") == 1
+
+
+def test_proxy_agent_commit_drops_edit_garbled_duplicate_prompt(tmp_path):
+    # Real-world case (commit 62856c7): line editing while typing garbles the
+    # raw recorded prompt relative to the transcript's clean version — same
+    # words, joined/reordered differently — so equality matching re-added it
+    # to the trace as if it were a separate prompt (#8).
+    garbled = (
+        "Check the latest comments in issues 8, 35, and , and 14Fix them one by one "
+        "with one after another. Write test cases to confirm the fixes as needed.  "
+        "carefully Then include things that were not fixed before.Also add what you "
+        "fixed as a new comment in the issues. Don't close the issue yourself though., "
+        "then make a commit"
+    )
+    clean = (
+        "Check the latest comments in issues 8, 35, 56, and 14 carefully. Then include "
+        "things that were not fixed before. Fix them one by one with one after another. "
+        "Write test cases to confirm the fixes as needed. Also add what you fixed as a "
+        "new comment in the issues, then make a commit. Don't close the issue yourself though."
+    )
+    runner = make_runner(
+        repo=FakeCommitRepo(),
+        state=AgitState(tmp_path),
+        verbose=False,
+    )
+    runner._review_untracked_popup = lambda include_declined: "No untracked files to review."
+    runner.state.append_trace("user", garbled)
+
+    committed = runner._create_agent_commit_from_turns_popup(
+        turns=[SessionTurn("u1", "a1", clean, "all done", TokenUsage(total=1, output=1), None)],
+        backend="claude",
+        backend_session_id="ses-1",
+        model="m",
+        quiet=True,
+    )
+
+    assert committed is True
+    message = runner.repo.message
+    assert message.count("## User") == 1  # the garbled near-duplicate is dropped
+    assert "14Fix" not in message
+
+
+def test_proxy_agent_commit_places_followup_notes_before_the_response(tmp_path):
+    # Follow-up notes typed while the agent was working belong between the
+    # turn's prompt and its response — not appended after the response (#8).
+    runner = make_runner(
+        repo=FakeCommitRepo(),
+        state=AgitState(tmp_path),
+        verbose=False,
+    )
+    runner._review_untracked_popup = lambda include_declined: "No untracked files to review."
+    runner.state.append_trace("user", "also read all the comments")
+    runner.state.append_trace("user", "no need to verify the full thread")
+
+    committed = runner._create_agent_commit_from_turns_popup(
+        turns=[SessionTurn("u1", "a1", "fix the open issues", "all fixed", TokenUsage(total=1, output=1), None)],
+        backend="claude",
+        backend_session_id="ses-1",
+        model="m",
+        quiet=True,
+    )
+
+    assert committed is True
+    message = runner.repo.message
+    prompt = message.index("## User\n\nfix the open issues")
+    note_one = message.index("## User\n\nalso read all the comments")
+    note_two = message.index("## User\n\nno need to verify the full thread")
+    response = message.index("## Agent\n\nall fixed")
+    assert prompt < note_one < note_two < response
 
 
 def test_agent_commit_subject_joins_all_prompts_with_slash(tmp_path):
@@ -300,7 +421,7 @@ def test_agent_commit_subject_joins_all_prompts_with_slash(tmp_path):
     assert committed is True
     subject = runner.repo.message.splitlines()[0]
     # Every prompt that led to the commit, in order, joined by " / ".
-    assert subject == "<agent> add the parser / now add tests / and fix the lint"
+    assert subject == "<aGiT> add the parser / now add tests / and fix the lint"
 
 
 def test_proxy_agent_commit_preserves_previous_no_change_trace(tmp_path):
@@ -501,7 +622,7 @@ def test_agent_commit_popup_includes_commit_id(tmp_path):
     )
 
     assert committed is True
-    assert runner.message == "Created <agent> commit abc1234."
+    assert runner.message == "Created <aGiT> commit abc1234."
 
 
 def _make_cell(data=" ", **attrs):
@@ -870,13 +991,13 @@ def test_sticky_message_renders_after_timeout(monkeypatch):
     writes = []
     monkeypatch.setattr(os, "write", lambda fd, data: writes.append(data) or len(data))
 
-    runner._set_message("Created <agent> commit.", sticky=True)
+    runner._set_message("Created <aGiT> commit.", sticky=True)
     runner.message_until = time.monotonic() - 100  # the timeout passed long ago
 
     runner._render()
 
     # A sticky message stays up past its timeout (until the next keypress).
-    assert "Created <agent> commit." in writes[0].decode()
+    assert "Created <aGiT> commit." in writes[0].decode()
 
 
 def test_nonsticky_message_hidden_after_timeout(monkeypatch):
@@ -896,7 +1017,7 @@ def test_nonsticky_message_hidden_after_timeout(monkeypatch):
 
 def test_keypress_dismisses_sticky_message():
     runner = make_runner()
-    runner._set_message("Created <agent> commit.", sticky=True)
+    runner._set_message("Created <aGiT> commit.", sticky=True)
     assert runner._message_sticky is True
 
     assert runner._clear_sticky_message_on_input() is True
@@ -921,7 +1042,7 @@ def test_set_message_requests_a_render():
     # the popup is never drawn.
     runner = make_runner(_render_pending=False)
 
-    runner._set_message("Created <agent> commit.", sticky=True)
+    runner._set_message("Created <aGiT> commit.", sticky=True)
 
     assert runner._render_pending is True
 
@@ -3952,6 +4073,67 @@ def test_screen_renderer_status_line_basic():
     )
     assert "aGiT" in line
     assert "claude" in line
+
+
+def test_screen_renderer_status_line_shows_home_abbreviated_cwd(monkeypatch):
+    monkeypatch.setenv("HOME", "/Users/dev")
+    r = ScreenRenderer(5, 100, color_mode="truecolor")
+    line = r.status_line(
+        cols=100,
+        name="session-1",
+        backend_name="claude",
+        session_id=None,
+        base_branch=None,
+        worktree=None,
+        scroll_back=0,
+        user_declined=[],
+        short_session_fn=lambda s: "(none)",
+        cwd="/Users/dev/code/repo/.agit/worktrees/session-1",
+    )
+    # The agent's working directory is visible, home-abbreviated.
+    assert "~/code/repo/.agit/worktrees/session-1" in line
+
+
+def test_screen_renderer_status_line_elides_long_cwd_from_left():
+    cols = 60
+    r = ScreenRenderer(5, cols, color_mode="truecolor")
+    line = r.status_line(
+        cols=cols,
+        name="session-1",
+        backend_name="claude",
+        session_id=None,
+        base_branch=None,
+        worktree=None,
+        scroll_back=0,
+        user_declined=[],
+        short_session_fn=lambda s: "(none)",
+        cwd="/very/long/path/that/cannot/possibly/fit/in/the/status/bar/worktrees/session-1",
+    )
+    visible = line.replace("\x1b[7m", "").replace("\x1b[0m", "")
+    assert len(visible) <= cols  # never overflows the row
+    # Elided from the left: the identifying tail of the path survives.
+    assert "…" in visible
+    assert visible.rstrip().endswith("session-1")
+
+
+def test_status_line_includes_agent_working_directory(tmp_path):
+    import subprocess
+
+    from agit.git import GitRepo
+    from agit.config import AgitState
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    runner = make_runner(
+        repo=GitRepo(tmp_path),
+        state=AgitState(tmp_path),
+        name="session-1",
+        backend=type("B", (), {"name": "claude"})(),
+        scroll_back=0,
+        cols=200,
+    )
+
+    line = runner._status_line()
+    assert tmp_path.name in line  # the directory the agent works in is shown
 
 
 def test_screen_renderer_status_line_scrollback():

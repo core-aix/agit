@@ -64,18 +64,16 @@ What stays on ProxyRunner (not extracted here)
 
 from __future__ import annotations
 
+import re
 import threading
 import time
-from typing import Callable, TYPE_CHECKING
+from typing import Callable
 
 from agit.commits import build_agent_commit_message, build_backend_amend_message
 from agit.git import GitRepo
 from agit.transcripts.opencode import SessionTurn
 from agit.transcripts import turns_after
 from agit.config import AgitState
-
-if TYPE_CHECKING:
-    from agit.summaries import Summarizer
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +91,36 @@ _OnCommitFn = Callable[[str | None], None]
 
 _DebugFn = Callable[..., None]
 """Logging sink — ``runner._debug``."""
+
+
+def _norm(text: str | None) -> str:
+    """Whitespace-normalized form used to match recorded prompts against
+    transcript turns (the transcript normalizes the user's raw typing)."""
+    return " ".join((text or "").split())
+
+
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
+def _same_prompt(a: str, b: str) -> bool:
+    """True when two recordings are the same user prompt.
+
+    The prompt recorded at submit reconstructs the raw typed bytes, so line
+    editing while typing (cursor moves, deletions) garbles it relative to the
+    transcript's clean version — same words, joined or reordered differently.
+    Equality (even whitespace-normalized) misses those, leaving the garbled
+    copy to be re-added to the trace as if it were a separate prompt. Near-
+    duplicates are therefore detected by word overlap: editing artifacts only
+    shuffle words around, while genuinely different prompts share few.
+    """
+    na, nb = _norm(a).lower(), _norm(b).lower()
+    if na == nb:
+        return True
+    tokens_a, tokens_b = set(_TOKEN_RE.findall(na)), set(_TOKEN_RE.findall(nb))
+    if not tokens_a or not tokens_b:
+        return False
+    overlap = len(tokens_a & tokens_b) / len(tokens_a | tokens_b)
+    return overlap >= 0.6
 
 
 class CommitEngine:
@@ -130,8 +158,8 @@ class CommitEngine:
         on_commit_fn: _OnCommitFn | None = None,
         session_name: str | None = None,
         accumulate_trace_only_on_commit: bool = False,
-        summarizer: "Summarizer | None" = None,
         backend_commits: list[str] | None = None,
+        tag_backend_commits: bool = True,
     ) -> bool:
         """Core of every agent-commit path.
 
@@ -162,28 +190,21 @@ class CommitEngine:
             oldest first), issue #35.  With nothing staged, the latest of them
             is amended to carry the trace/metadata; with staged changes, the
             normal commit lists them in its ``covered_commits`` metadata.
+        tag_backend_commits:
+            Prefix an amended backend commit's subject with ``<aGiT> ``
+            (issue #35; the ``tag_backend_commits`` config option, on by
+            default).
+
+        Commits are created immediately, without any LLM call: summarization
+        runs in the background afterwards and is attached by amending the
+        commit message (issue #8) — blocking the commit on a summary froze the
+        UI and delayed integration past the next turn.
 
         Returns ``True`` if a commit was made, ``False`` otherwise.
         """
         if not turns:
             return False
         backend_commits = list(backend_commits or [])
-
-        diff_before_commit = self.repo.diff_head() if summarizer else ""
-        if summarizer and backend_commits and not diff_before_commit.strip():
-            # The backend committed its work itself, so the working tree is
-            # clean — summarize the committed range instead.
-            diff_before_commit = self.repo.diff_range(f"{backend_commits[0]}^", backend_commits[-1])
-        commit_summary = None
-        if summarizer:
-            try:
-                commit_summary = summarizer.summarize_commit(
-                    turns=turns,
-                    diff=diff_before_commit,
-                    session_summary=self.state.session_summary,
-                )
-            except Exception as error:
-                self._debug(f"summarization failed: {error!r}")
 
         if accumulate_trace_only_on_commit:
             # Actions / shell mode: do the staged check first, accumulate only
@@ -218,26 +239,48 @@ class CommitEngine:
                 for item in self.state.pending_trace()
                 if item.get("role") == "user" and (content := item.get("content"))
             ]
-            remaining_pending_users = list(pending_users)
             self.state.data["pending_trace"] = []
             self.state.save()
 
             subject_prompts: list[str] = []
+            entries: list[tuple[str, str]] = []
             for turn in turns:
                 if turn.user_prompt:
                     subject_prompts.append(turn.user_prompt)
-                    self.state.append_trace("user", turn.user_prompt)
-                    if turn.user_prompt in remaining_pending_users:
-                        remaining_pending_users.remove(turn.user_prompt)
+                    entries.append(("user", turn.user_prompt))
                 if turn.final_response:
-                    self.state.append_trace("agent", turn.final_response)
+                    entries.append(("agent", turn.final_response))
 
             # Pending user entries that never showed up as a turn's user_prompt
-            # (e.g. an incomplete initial turn that has only partial data) are still
-            # added to the subject and trace so they appear in the commit body.
-            for pending_user in remaining_pending_users:
-                subject_prompts.append(pending_user)
-                self.state.append_trace("user", pending_user)
+            # (e.g. a follow-up note typed mid-turn) are still added to the
+            # subject and trace so they appear in the commit body. Matching uses
+            # word overlap (_same_prompt), not equality: the recording keeps the
+            # user's raw typing, which line editing garbles relative to the
+            # transcript's clean version — equality re-added the same prompt as
+            # if it were new (issue #8). Duplicate recordings also collapse.
+            turn_prompts = [t.user_prompt for t in turns if t.user_prompt]
+            leftovers: list[str] = []
+            for pending_user in pending_users:
+                if not _norm(pending_user):
+                    continue
+                if any(_same_prompt(pending_user, prompt) for prompt in turn_prompts):
+                    continue
+                if any(_same_prompt(pending_user, prompt) for prompt in leftovers):
+                    continue
+                leftovers.append(pending_user)
+            subject_prompts.extend(leftovers)
+
+            # Leftovers were typed while the (last) turn was running, so they
+            # belong after its prompt and BEFORE its response — appending them
+            # at the end put the trace out of chronological order (issue #8).
+            insert_at = len(entries)
+            for index in range(len(entries) - 1, -1, -1):
+                if entries[index][0] == "agent":
+                    insert_at = index
+                    break
+            entries[insert_at:insert_at] = [("user", leftover) for leftover in leftovers]
+            for role, content in entries:
+                self.state.append_trace(role, content)
 
             # Hook: proxy mode puts the session on a fresh turn branch here.
             if pre_commit_fn is not None:
@@ -258,6 +301,9 @@ class CommitEngine:
 
             subject_text = " / ".join(subject_prompts) if subject_prompts else f"{backend} changes"
 
+        # The metadata lists covered hashes in short form (the full SHAs stay
+        # internal — _head_is_amendable compares them against rev-parse HEAD).
+        covered_display = [self._short_sha(sha) for sha in backend_commits]
         if amend_backend_head:
             # The backend committed its own work, leaving the tree clean (#35):
             # amend its latest commit so the trace/metadata land on the commit
@@ -274,8 +320,8 @@ class CommitEngine:
                     token_usage=self.state.pending_token_usage(),
                     trace_turn_limit=self.state.trace_turn_limit,
                     session_name=session_name,
-                    summary=commit_summary,
-                    covered_commits=backend_commits,
+                    covered_commits=covered_display,
+                    tag=tag_backend_commits,
                 )
             )
         else:
@@ -290,33 +336,25 @@ class CommitEngine:
                     token_usage=self.state.pending_token_usage(),
                     trace_turn_limit=self.state.trace_turn_limit,
                     session_name=session_name,
-                    summary=commit_summary,
                     # An aGiT commit accounts for itself; list only the
                     # backend-made commits it additionally covers (#35).
-                    covered_commits=backend_commits or None,
+                    covered_commits=covered_display or None,
                 )
             )
         self.state.clear_trace()
-
-        if summarizer and commit_summary and commit_sha:
-            try:
-                self.repo.notes_add(commit_sha, commit_summary, namespace="agit/commit-summary")
-                new_session_summary = summarizer.update_session_summary(
-                    current_summary=self.state.session_summary,
-                    turns=turns,
-                    diff=diff_before_commit,
-                    commit_summary=commit_summary,
-                )
-                self.state.session_summary = new_session_summary
-                self.state.session_summary_commit = commit_sha
-                self.repo.notes_add(commit_sha, new_session_summary, namespace="agit/session-summary")
-            except Exception as error:
-                self._debug(f"session summary update failed: {error!r}")
 
         if on_commit_fn is not None:
             on_commit_fn(commit_sha)
 
         return True
+
+    def _short_sha(self, sha: str) -> str:
+        """Short display form of *sha* (falls back to a 7-char prefix when the
+        repo cannot resolve it, e.g. fake repos in tests)."""
+        try:
+            return self.repo.short_sha(sha)
+        except Exception:
+            return sha[:7]
 
     def _head_is_amendable(self, backend_commits: list[str]) -> bool:
         """True when HEAD is the latest of the backend's own unintegrated
@@ -403,8 +441,11 @@ class CommitEngine:
         if awaited and any(getattr(t, "interrupted", False) for t in all_turns):
             awaited = []
         if awaited:
-            seen = {" ".join((t.user_prompt or "").split()) for t in exported_session.turns}
-            awaited = [p for p in awaited if p not in seen]
+            # Word-overlap matching, not equality: line editing garbles the
+            # recorded prompt relative to the transcript's clean version, and
+            # an unmatchable awaited entry would defer commits indefinitely.
+            turn_prompts = [t.user_prompt or "" for t in exported_session.turns]
+            awaited = [p for p in awaited if not any(_same_prompt(p, prompt) for prompt in turn_prompts)]
             if require_complete and awaited and agent_is_active_fn():
                 debug_fn(f"deferring agent commit: {len(awaited)} queued follow-up(s) not yet in transcript")
                 return None, awaited

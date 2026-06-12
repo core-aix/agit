@@ -109,12 +109,15 @@ class GitRepo:
 
     def commit(self, message: str) -> str:
         self._run(["git", "commit", "-F", "-"], input_text=message)
-        return self._run(["git", "rev-parse", "--short", "HEAD"]).stdout.strip()
+        return self.short_sha("HEAD")
 
     def amend_commit(self, message: str) -> str:
         """Rewrite HEAD's message (tree untouched); returns the new short SHA."""
         self._run(["git", "commit", "--amend", "-F", "-"], input_text=message)
-        return self._run(["git", "rev-parse", "--short", "HEAD"]).stdout.strip()
+        return self.short_sha("HEAD")
+
+    def short_sha(self, ref: str = "HEAD") -> str:
+        return self._run(["git", "rev-parse", "--short", ref]).stdout.strip()
 
     def commit_message(self, ref: str = "HEAD") -> str:
         return self._run(["git", "log", "-1", "--format=%B", ref], check=False).stdout

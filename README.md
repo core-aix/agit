@@ -44,7 +44,7 @@ Run in the current repository:
 agit
 ```
 
-By default, `agit` runs in proxy mode: it launches the real backend TUI (OpenCode or Claude) in a pseudo-terminal, renders it through an internal terminal screen, and reserves a bottom status line for aGiT. Press `Ctrl-G` to enter aGiT command mode (configurable via `menu_key` in `~/.agit/config.json` — see Configuration).
+By default, `agit` runs in proxy mode: it launches the real backend TUI (OpenCode or Claude) in a pseudo-terminal, renders it through an internal terminal screen, and reserves a bottom status line for aGiT showing the session (and the base branch it merges into), the backend, the summarizer state, and the directory the agent is working in (its session worktree, home-abbreviated and elided from the left when space is tight). Press `Ctrl-G` to enter aGiT command mode (configurable via `menu_key` in `~/.agit/config.json` — see Configuration).
 
 Run against another repository:
 
@@ -137,19 +137,21 @@ The base working tree (the branch you launched from) is only ever advanced by **
 
 ### Integration and startup recovery
 
-When a session's commits are merged into the base branch and the merge has conflicts, the agent backend resolves them, and the resolution is recorded as an `<agent-merge>` commit listing the base commits it was resolved against.
+When a session's commits are merged into the base branch and the merge has conflicts, the agent backend resolves them, and the resolution is recorded as an `<aGiT-merge>` commit listing the base commits it was resolved against.
 
 On startup, aGiT reconciles worktrees left behind by previous runs: it integrates any pending commits into the base branch and then deletes the worktree. Worktrees that cannot be integrated cleanly (a conflict, or uncommitted changes) are kept so no work is lost. The backend conversation itself persists (keyed by the worktree path) and stays resumable.
 
 ### Commit message format
 
-aGiT commit messages use a consistent Markdown-style structure. The first line is the subject (prefixed with `<agent>`, `<agent-merge>`, or left plain for user commits). The body is organized into `#` sections — `# Full Subject`, `# Summary` (when summarization is enabled), `# Interaction Trace`, `# aGiT Metadata` — with `## User` / `## Agent` subsections inside the interaction trace. Commits are written with `git commit -F -` (no editor), so the `#` lines are preserved rather than stripped as git comments. Secrets and terminal escape sequences are masked out of subjects and trace bodies before committing.
+aGiT commit messages use a consistent Markdown-style structure. The first line is the subject (prefixed with `<aGiT>` for agent commits — including backend-made commits aGiT amends, see `tag_backend_commits` under Configuration — `<aGiT-merge>` for agent-resolved merges, or left plain for user commits). When summarization is enabled the summary leads the message: its first line is the subject and the rest is the first paragraph of the body. The rest of the body is organized into `#` sections — `# Prompts` (when a summary takes the subject), `# Interaction Trace`, `# aGiT Metadata` — with `## User` / `## Agent` subsections inside the interaction trace. Commits are written with `git commit -F -` (no editor), so the `#` lines are preserved rather than stripped as git comments. Secrets and terminal escape sequences are masked out of subjects and trace bodies before committing.
+
+Because the conversation is recorded in commit messages, aGiT shows a privacy warning at startup — never enter passwords, API keys, or other sensitive information in the chat — which must be acknowledged to continue (skipped when there is no terminal to acknowledge from).
 
 ### Summarization
 
 When summarization is enabled (the default), aGiT runs a second LLM stream alongside the coding session to preserve design context that would otherwise be lost to session compaction or terse commit subjects:
 
-- **Commit summaries** — each agent commit gets an LLM-written summary of what changed and why. It is included in the commit body under the `# Summary` section and stored as a git note in the `agit/commit-summary` namespace.
+- **Commit summaries** — each agent commit gets an LLM-written summary of what changed and why. The summary leads the commit message: its first line becomes the subject and the rest follows as the first paragraph of the body (the prompts that used to head the message move to `# Prompts`); it is also stored as a git note in the `agit/commit-summary` namespace.
 - **Session summaries** — a rolling narrative of the session (goals, architectural decisions, design evolution) is updated on every commit and attached as a git note in the `agit/session-summary` namespace.
 - **Pre-compaction capture** — when you run `/compact` in the backend, aGiT first exports the full session transcript and folds it into the session summary, so compaction does not lose the conversation's context.
 
@@ -160,6 +162,8 @@ git notes --ref agit/commit-summary show <commit>
 git notes --ref agit/session-summary show <commit>
 ```
 
+Summarization never blocks the session: commits are created immediately with a prompt-based subject, the summary is computed on a background worker (the status line shows "aGiT is summarizing commit ..."), and the commit message is then amended in place. The amend only happens while it is safe — the commit is still the latest, unintegrated, and nothing new is staged; integration waits for the summary up to `summary_wait_seconds` and then proceeds, in which case the summary is recorded in git notes only. The metadata records the summarization cost next to the session's own usage (`summary_model`, `summary_tokens_input`, `summary_tokens_output`).
+
 The status bar shows whether summarization is active (`sum:on` / `sum:off`). Use the `summarizer` command (`Ctrl-G`, then `summarizer`, or `:summarizer` in JSON mode) to toggle it (`summarizer on|off`), set the summarization model (`summarizer model`), or show the current status; changes persist to the repository-local `.agit/config.json` (see Configuration).
 
 ## Commit Behavior
@@ -167,10 +171,10 @@ The status bar shows whether summarization is active (`sum:on` / `sum:off`). Use
 - Tracked modifications and deletions are staged with `git add -u`.
 - New untracked files require confirmation before staging.
 - Declined untracked files are remembered in repository-local `.agit/state.json`.
-- Agent commits use the `<agent>` tag and include the full interaction trace since the last code-changing commit.
+- Agent commits use the `<aGiT>` tag and include the full interaction trace since the last code-changing commit.
 - Agent commit metadata includes context token count and generated token usage accumulated since the last code-changing commit.
   - Token figures are read directly from the backend's session transcript (each assistant message's reported usage) and broken out by category: `input`, `output`, `cache_read`, `cache_write`, and (when the backend reports it) `reasoning`. For Claude, the recorded output count already includes extended-thinking and tool-call tokens. Sub-agent/sidechain turns are counted separately under the matching `subagent_*` categories rather than dropped. Each category is recorded only when the backend reports a non-zero value, so backends that omit a field (e.g. OpenCode does not expose sub-agent usage) simply have no line for it.
-  - The categories are **non-overlapping**: `output` counts only the main agent's generated tokens, and `subagent_output` counts only sub-agent generated tokens — neither includes the other, so nothing is double-counted. For a grand total of generated tokens, sum the matching pairs yourself (e.g. `output + subagent_output`, and `reasoning + subagent_reasoning` for OpenCode). The input side works the same way: `input` is fresh (uncached) input, while `cache_read`/`cache_write` are the cached-input categories that are billed at different rates, which is why they are kept distinct rather than folded into `input`.
+  - The categories are **non-overlapping**: `output` counts only the main agent's generated tokens, and `subagent_output` counts only sub-agent generated tokens — neither includes the other, so nothing is double-counted. For a grand total of generated tokens, sum the matching pairs yourself (e.g. `output + subagent_output`, and `reasoning + subagent_reasoning` for OpenCode). The input side counts every token exactly once: `input` is all *fresh* input processed since the last commit — the uncached remainder plus the cache-creation tokens (so a first run's input reflects the full context instead of looking near zero next to the cache) — with `cache_write` kept as the "of which was written to the cache" breakdown. `cache_read` stays separate because those tokens were already counted as input when first processed; they are replayed from the cache and billed at a different rate.
   - The figures should still be treated as a lower bound: any consumption the backend does not record in the transcript (e.g. internal compaction, retried requests, or usage a provider omits) is not captured, so actual tokens consumed may be higher than reported.
 - Proxy mode baselines the continued backend session on startup so token metadata only includes turns after aGiT starts tracking new changes.
 - Proxy mode preserves the backend's selected model in commit metadata when it can be read from session data.
@@ -238,6 +242,7 @@ User-wide settings live in `~/.agit/config.json` (override the directory with `A
   "menu_key": "ctrl-g",
   "sandbox": true,
   "use_worktrees": true,
+  "tag_backend_commits": true,
   "timings": {
     "base_poll_seconds": 3.0
   }
@@ -249,6 +254,8 @@ User-wide settings live in `~/.agit/config.json` (override the directory with `A
 `sandbox` (default `true`) confines the agent's writes to its own session worktree (via `sandbox-exec` on macOS), keeping the base repository and sibling worktrees read-only to the agent. Set it to `false` to disable confinement; when sandboxing is unavailable, aGiT instead warns when the base repository is edited while a session runs.
 
 `use_worktrees` (default `true`) controls whether sessions run in isolated worktrees. Set it to `false` to run the agent directly on the current branch by default — the same behavior as `--no-worktree` (which always wins over the config). See the `--no-worktree` notes under Usage for the trade-offs.
+
+`tag_backend_commits` (default `true`) prefixes the subject of commits the backend made itself with `<aGiT>` when aGiT amends them to attach its interaction trace and metadata, so the log shows which commits were backend-made and aGiT-amended. Set it to `false` to keep the backend's original subject untouched (the trace/metadata are still appended to the message body either way).
 
 `menu_key` sets the key that opens aGiT's command menu in proxy mode. The default is `ctrl-g`; any `ctrl-<letter>` works except keys the terminal or aGiT already uses (`ctrl-c` exit flow, `ctrl-h` Backspace, `ctrl-i` Tab, `ctrl-j`/`ctrl-m` Enter). An invalid value falls back to `ctrl-g`, so a typo can never lock you out of the menu. The status line and aGiT's messages show whichever key is configured.
 
@@ -264,3 +271,4 @@ User-wide settings live in `~/.agit/config.json` (override the directory with `A
 | `base_edit_check_seconds` | `3.0` | How often aGiT warns about edits to the base repo when the sandbox is unavailable. |
 | `cwd_check_seconds` | `3.0` | How often aGiT checks for the Claude resume-cwd drift bug. |
 | `base_drift_check_seconds` | `2.0` | How often aGiT checks whether the base repo was switched to another branch outside aGiT. |
+| `summary_wait_seconds` | `45.0` | How long integration waits for a background commit summary before proceeding without it. |

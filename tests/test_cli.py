@@ -379,3 +379,52 @@ def test_backend_other_args_still_launch_tui(monkeypatch):
     rc = cli.main(["--backend", "opencode", "--", "--port", "12345"])
     assert rc == 0
     assert captured["backend_args"] == ["--port", "12345"]
+
+
+# --- startup privacy warning --------------------------------------------------
+
+
+def test_privacy_warning_acknowledged_with_enter(monkeypatch, capsys):
+    _force_tty(monkeypatch, stdin=True)
+    monkeypatch.setattr("builtins.input", lambda *a: "")
+
+    assert cli._acknowledge_privacy_warning() is True
+    out = capsys.readouterr().out
+    # The warning explains what is logged and what not to enter.
+    assert "git commit" in out
+    assert "passwords, API keys" in out
+
+
+def test_privacy_warning_quit_aborts(monkeypatch, capsys):
+    _force_tty(monkeypatch, stdin=True)
+    monkeypatch.setattr("builtins.input", lambda *a: "q")
+
+    assert cli._acknowledge_privacy_warning() is False
+    assert "not started" in capsys.readouterr().out
+
+
+def test_privacy_warning_interrupt_aborts(monkeypatch, capsys):
+    _force_tty(monkeypatch, stdin=True)
+    monkeypatch.setattr("builtins.input", lambda *a: (_ for _ in ()).throw(KeyboardInterrupt()))
+
+    assert cli._acknowledge_privacy_warning() is False
+
+
+def test_privacy_warning_non_interactive_prints_and_continues(monkeypatch, capsys):
+    # No TTY = no way to acknowledge: print the warning, never block automation.
+    _force_tty(monkeypatch, stdin=False, stdout=False)
+    monkeypatch.setattr("builtins.input", lambda *a: (_ for _ in ()).throw(AssertionError("should not prompt")))
+
+    assert cli._acknowledge_privacy_warning() is True
+    assert "passwords, API keys" in capsys.readouterr().out
+
+
+def test_main_stops_when_privacy_warning_declined(monkeypatch):
+    captured = _stub_launch(monkeypatch)
+    _force_tty(monkeypatch, stdin=True)
+    monkeypatch.setattr("builtins.input", lambda *a: "q")
+
+    rc = cli.main([])
+
+    assert rc == 1
+    assert captured == {}  # neither the proxy nor the shell was launched

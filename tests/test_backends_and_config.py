@@ -243,3 +243,17 @@ def test_use_worktrees_config_opt_out(tmp_path, monkeypatch):
     monkeypatch.setenv("AGIT_CONFIG_DIR", str(tmp_path))
     (tmp_path / "config.json").write_text('{"use_worktrees": false}')
     assert GlobalConfig().use_worktrees is False
+
+
+def test_tag_backend_commits_defaults_true(tmp_path):
+    config = GlobalConfig(tmp_path / "config.json")
+    assert config.tag_backend_commits is True
+
+
+def test_tag_backend_commits_opt_out_round_trips(tmp_path):
+    path = tmp_path / "config.json"
+    config = GlobalConfig(path)
+    config.tag_backend_commits = False
+    assert GlobalConfig(path).tag_backend_commits is False
+    config.tag_backend_commits = True
+    assert GlobalConfig(path).tag_backend_commits is True

@@ -27,6 +27,7 @@ DEFAULT_TIMINGS: dict[str, float] = {
     "base_edit_check_seconds": 3.0,  # how often to warn about un-sandboxed base-repo edits
     "cwd_check_seconds": 3.0,  # how often to check for the resume-cwd drift bug
     "base_drift_check_seconds": 2.0,  # how often to check the base repo's checked-out branch
+    "summary_wait_seconds": 45.0,  # how long integration waits for a background commit summary (#8)
 }
 
 
@@ -135,6 +136,19 @@ class GlobalConfig:
             if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
                 result[key] = float(value)
         return result
+
+    @property
+    def tag_backend_commits(self) -> bool:
+        # Prefix commits the backend made itself with "<aGiT> " when aGiT
+        # amends them with its trace/metadata (issue #35). On by default; set
+        # "tag_backend_commits": false to keep the backend's subject untouched.
+        value = self.data.get("tag_backend_commits")
+        return True if value is None else bool(value)
+
+    @tag_backend_commits.setter
+    def tag_backend_commits(self, value: bool) -> None:
+        self.data["tag_backend_commits"] = bool(value)
+        self.save()
 
     @property
     def summarization_model(self) -> str | None:

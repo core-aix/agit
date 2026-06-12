@@ -7,6 +7,10 @@ the backend without its required repo argument and exporting via a
 nonexistent attribute, so the capture never ran). The fake summarizer keeps
 the real backend construction and real git notes in the loop so regressions
 in either surface as assertion failures, not swallowed exceptions.
+
+Since #8 the summarization runs on a worker thread so the UI never blocks:
+_handle_pre_compaction only exports and spawns, and the result is applied by
+_service_precompact_summary on the main loop.
 """
 
 from types import SimpleNamespace
@@ -52,6 +56,7 @@ def _turn() -> SessionTurn:
 
 def _pre_compaction_runner(tmp_path, monkeypatch, *, turns):
     monkeypatch.setattr("agit.summaries.Summarizer", FakeSummarizer)
+    monkeypatch.setenv("AGIT_CONFIG_DIR", str(tmp_path / "agit-config"))
     FakeSummarizer.last = None
     repo = GitRepo.init(tmp_path)
     runner = make_runner(repo=repo, state=AgitState(tmp_path))
@@ -70,6 +75,12 @@ def test_pre_compaction_captures_summary_to_state_and_notes(tmp_path, monkeypatc
     runner.state.session_summary = "previous narrative"
 
     runner._handle_pre_compaction()
+    # The export+spawn must not touch state synchronously (the LLM call runs
+    # on a worker thread; the UI thread stays free).
+    assert runner.state.session_summary == "previous narrative"
+    assert runner._precompact_thread is not None
+    runner._precompact_thread.join(timeout=10)
+    runner._service_precompact_summary()
 
     # The summary landed in state and as a git note on HEAD.
     assert runner.state.session_summary == "captured design context"
@@ -83,9 +94,14 @@ def test_pre_compaction_captures_summary_to_state_and_notes(tmp_path, monkeypatc
     summarizer = FakeSummarizer.last
     assert summarizer is not None
     # Regression (#47 merge): the summarization backend must be constructed
-    # with the repo path — backend_class() raised TypeError and the whole
-    # capture silently no-opped.
-    assert summarizer.backend.repo == tmp_path
+    # with a directory argument — backend_class() raised TypeError and the
+    # whole capture silently no-opped. Since #56 that directory is the scratch
+    # dir, never the session worktree/repo (its headless runs would otherwise
+    # be recorded as this repo's newest session and get resumed on restart).
+    from agit.summaries import summary_scratch_dir
+
+    assert summarizer.backend.repo == summary_scratch_dir()
+    assert summarizer.backend.repo != tmp_path
     assert summarizer.model == "cheap-model"
     # The previous rolling summary is passed along so the narrative evolves.
     assert summarizer.current_summary == "previous narrative"
@@ -97,6 +113,9 @@ def test_pre_compaction_without_tracked_session_is_a_noop(tmp_path, monkeypatch)
     runner.state.backend_session_id = None
 
     runner._handle_pre_compaction()
+    if runner._precompact_thread is not None:
+        runner._precompact_thread.join(timeout=10)
+    runner._service_precompact_summary()
 
     assert runner.state.session_summary is None
     assert repo.notes_show(repo.rev_parse("HEAD"), namespace="agit/session-summary") is None
@@ -107,6 +126,9 @@ def test_pre_compaction_with_empty_session_writes_nothing(tmp_path, monkeypatch)
     runner.state.backend_session_id = "ses-1"
 
     runner._handle_pre_compaction()
+    if runner._precompact_thread is not None:
+        runner._precompact_thread.join(timeout=10)
+    runner._service_precompact_summary()
 
     assert runner.state.session_summary is None
     assert repo.notes_show(repo.rev_parse("HEAD"), namespace="agit/session-summary") is None

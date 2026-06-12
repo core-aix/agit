@@ -88,6 +88,15 @@ def detect_color_mode(environ=None) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _home_relative(path: str) -> str:
+    """Abbreviate the user's home directory to ``~`` for display."""
+    text = str(path)
+    home = os.path.expanduser("~")
+    if home and (text == home or text.startswith(home + os.sep)):
+        return "~" + text[len(home) :]
+    return text
+
+
 class _BackgroundColorEraseScreen(pyte.HistoryScreen):
     # pyte erases cells using the cursor's *full* SGR attributes, so a backend
     # that clears the screen (or a line) while underline — or any glyph
@@ -531,6 +540,7 @@ class ScreenRenderer:
         short_session_fn,
         menu_label: str = "Ctrl-G",
         summarizer_on: bool = True,
+        cwd: str | None = None,
     ) -> str:
         declined = len(user_declined)
         session = f"{name or 'session'}" + (f" [{short_session_fn(session_id)}]" if session_id else "")
@@ -542,6 +552,17 @@ class ScreenRenderer:
             right = f" SCROLLBACK -{scroll_back} (scroll down to resume) "
         else:
             right = f" unstaged:{declined} " if declined else ""
+        if cwd:
+            # The directory the agent works in (its session worktree, or the
+            # repo in --no-worktree mode), home-abbreviated. When space runs
+            # out the path is elided from the LEFT — the trailing components
+            # are the part that identifies the directory.
+            cwd_text = _home_relative(cwd)
+            room = cols - len(left) - len(right) - 3  # the "| " separator + trailing space
+            if len(cwd_text) > room:
+                cwd_text = "…" + cwd_text[-(room - 1) :] if room > 1 else ""
+            if cwd_text:
+                left += f"| {cwd_text} "
         padding = " " * max(cols - len(left) - len(right), 0)
         return f"\x1b[7m{left}{padding}{right}\x1b[0m"
 

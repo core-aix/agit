@@ -95,6 +95,9 @@ def main(argv: list[str] | None = None) -> int:
     if backend_args:
         _warn_reserved_passthrough(args.backend or config.default_backend, backend_args)
 
+    if not _acknowledge_privacy_warning():
+        return 1
+
     try:
         repo = _discover_or_init(Path(args.repo).expanduser())
         if repo is None:
@@ -179,6 +182,33 @@ def _show_combined_help(
         print(result.stdout or result.stderr)
     except Exception as error:
         print(f"(Could not run '{backend_cmd} --help': {error})")
+
+
+PRIVACY_WARNING = (
+    "WARNING: aGiT records the conversation in git commit messages — every\n"
+    "message you enter in the chat can become part of the repository history.\n"
+    "Do not enter passwords, API keys, or other sensitive information in the\n"
+    "chat. (Keeping secrets out of prompts is good practice anyway.)"
+)
+
+
+def _acknowledge_privacy_warning() -> bool:
+    """Show the privacy warning at startup; the user must acknowledge it to
+    continue. Without a TTY there is no way to acknowledge, so the warning is
+    printed and aGiT proceeds — never block automation on an ``input()`` that
+    cannot be answered."""
+    print(PRIVACY_WARNING)
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return True
+    try:
+        answer = input("Press Enter to acknowledge and continue (q to quit): ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print("\naGiT not started.")
+        return False
+    if answer in {"q", "quit", "n", "no"}:
+        print("aGiT not started.")
+        return False
+    return True
 
 
 def _discover_or_init(path: Path) -> GitRepo | None:

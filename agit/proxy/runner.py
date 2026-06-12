@@ -27,7 +27,12 @@ except ImportError:  # pragma: no cover - exercised only without optional depend
 from agit.commits import AgitActions
 from agit.backends.setup import BackendUnavailable, backend_installed, ensure_installed_backend, install_hint
 from agit.backends.proxy_agents import available_backends, make_proxy_agent
-from agit.commits import METADATA_HEADER, build_user_commit_message
+from agit.commits import (
+    METADATA_HEADER,
+    apply_summary_to_message,
+    build_user_commit_message,
+    summary_metadata_lines,
+)
 from agit.git import GitRepo
 from agit.config import GlobalConfig
 from agit.git import RepoLock, already_running_message
@@ -240,6 +245,7 @@ class ProxyRunner:
     BASE_DRIFT_CHECK_SECONDS = 2.0
     RENDER_MIN_INTERVAL = 0.033  # coalesce output-driven repaints to ~30fps
     SYNC_MAX_HOLD = 0.05  # cap how long a backend synchronized-update may defer a paint
+    SUMMARY_WAIT_SECONDS = 45.0  # how long integration waits for a background commit summary (#8)
 
     def __init__(
         self,
@@ -387,6 +393,11 @@ class ProxyRunner:
         self._reap_pids: list[int] = []  # signalled backends awaiting their waitpid
         self._idle_integrate_at = 0.0  # throttle for integrating agent-made commits
         self._attach_uncovered_until = 0.0  # deadline for attaching traces to backend-made commits (#35)
+        self._summary_thread: threading.Thread | None = None  # background commit-summary worker (#8)
+        self._summary_result: dict | None = None  # finished summary awaiting main-thread application
+        self._summary_pending: dict | None = None  # {"sha", "since"} while a summary is being computed
+        self._precompact_thread: threading.Thread | None = None  # background pre-compaction summary worker
+        self._precompact_result: dict | None = None
         self._base_poll_at = 0.0  # throttle for the base-HEAD poll
         self._warned_backend_session = False  # one-shot "use agit to start sessions" notice
         # Lifecycle flags read before their first conditional assignment. These
@@ -430,6 +441,7 @@ class ProxyRunner:
         self.BASE_EDIT_CHECK_SECONDS = timings["base_edit_check_seconds"]
         self.CWD_CHECK_SECONDS = timings["cwd_check_seconds"]
         self.BASE_DRIFT_CHECK_SECONDS = timings["base_drift_check_seconds"]
+        self.SUMMARY_WAIT_SECONDS = timings["summary_wait_seconds"]
 
     # --- session pointer -------------------------------------------------
 
@@ -552,6 +564,11 @@ class ProxyRunner:
                 "_reap_pids": [],
                 "_idle_integrate_at": 0.0,
                 "_attach_uncovered_until": 0.0,
+                "_summary_thread": None,
+                "_summary_result": None,
+                "_summary_pending": None,
+                "_precompact_thread": None,
+                "_precompact_result": None,
                 "_base_poll_at": 0.0,
                 "_warned_backend_session": False,
                 "_user_declined": [],
@@ -2559,6 +2576,8 @@ class ProxyRunner:
             self._check_base_branch_drift()  # pause merging before any integration runs
             self._resume_pending_prompt_if_ready()
             self._ensure_worktree_alive()
+            self._service_commit_summary()  # apply finished background summaries (#8)
+            self._service_precompact_summary()
             self._maybe_agent_commit()
             self._service_background_sessions()
             self._poll_base_advanced()
@@ -3015,6 +3034,9 @@ class ProxyRunner:
             short_session_fn=_short_session,
             menu_label=self._menu_label(),
             summarizer_on=self._summarization_enabled(),
+            # The directory the agent works in: its session worktree, or the
+            # repo itself in --no-worktree mode.
+            cwd=str(repo_path) if (repo_path := getattr(self.repo, "repo", None)) else None,
         )
 
     def _summarization_enabled(self) -> bool:
@@ -3320,20 +3342,9 @@ class ProxyRunner:
             self._last_agent_commit_id = sha
             if not quiet:
                 self._set_message(self._agent_commit_message(), sticky=True)
-
-        summarizer = None
-        if self._summarization_enabled():
-            from agit.summaries import Summarizer
-            from agit.backends.claude import ClaudeBackend
-            from agit.backends.opencode import OpenCodeBackend
-
-            backend_class = OpenCodeBackend if self.state.backend == "opencode" else ClaudeBackend
-            summarizer_model = self.state.summarization_model
-            if summarizer_model is None and self.global_config is not None:
-                summarizer_model = self.global_config.summarization_model
-            repo_path = getattr(self.repo, "repo", None)
-            if repo_path is not None:
-                summarizer = Summarizer(backend_class(repo_path), model=summarizer_model)
+            # The commit is made immediately; the LLM summary is computed in the
+            # background and amended in afterwards (#8) so the UI never blocks.
+            self._start_commit_summary(sha, turns)
 
         return CommitEngine(self.repo, self.state, debug_fn=self._debug).commit_turns(
             turns=turns,
@@ -3344,8 +3355,10 @@ class ProxyRunner:
             pre_commit_fn=self._ensure_turn_branch,
             on_commit_fn=on_commit_fn,
             session_name=self.name,
-            summarizer=summarizer,
             backend_commits=self._uncovered_backend_commits(),
+            tag_backend_commits=getattr(self.global_config, "tag_backend_commits", True)
+            if self.global_config is not None
+            else True,
         )
 
     def _uncovered_backend_commits(self) -> list[str]:
@@ -3369,7 +3382,172 @@ class ProxyRunner:
         # The auto-commit confirmation, including the short SHA of the commit aGiT
         # just made so the user can find it (e.g. `git show <id>`).
         commit_id = self._last_agent_commit_id
-        return f"Created <agent> commit {commit_id}." if commit_id else "Created <agent> commit."
+        return f"Created <aGiT> commit {commit_id}." if commit_id else "Created <aGiT> commit."
+
+    # ------------------------------------------------------------------
+    # Background commit summarization (#8)
+    # ------------------------------------------------------------------
+    #
+    # The summary is an LLM call that can take many seconds; running it inside
+    # the commit path froze the proxy UI and delayed integration past the next
+    # turn. Instead the commit is created immediately and a worker thread
+    # computes the summary; the main loop then amends it into the commit
+    # message — only while the commit is still HEAD, unintegrated, and the
+    # tree is clean, so an amend can never rewrite history or swallow staged
+    # work. Integration waits for the summary up to SUMMARY_WAIT_SECONDS, then
+    # proceeds without it (the summary still lands in git notes).
+
+    def _make_summarizer(self):
+        if not self._summarization_enabled():
+            return None
+        from agit.summaries import Summarizer, summary_scratch_dir
+        from agit.backends.claude import ClaudeBackend
+        from agit.backends.opencode import OpenCodeBackend
+
+        backend_class = OpenCodeBackend if self.state.backend == "opencode" else ClaudeBackend
+        model = self.state.summarization_model
+        if model is None and self.global_config is not None:
+            model = self.global_config.summarization_model
+        # The summarizer must NOT run in the session worktree (or the repo):
+        # its headless calls record real backend sessions keyed by cwd, which
+        # the parse worker / exit adoption would then resume instead of the
+        # user's conversation (issues #8/#56).
+        return Summarizer(backend_class(summary_scratch_dir()), model=model)
+
+    def _start_commit_summary(self, sha: str, turns) -> None:
+        summarizer = self._make_summarizer()
+        if summarizer is None:
+            return
+        if self._summary_thread is not None and self._summary_thread.is_alive():
+            # One summary at a time; a turn committed before the previous
+            # summary finished keeps its prompt-based message (notes only).
+            self._debug(f"summary worker busy; skipping summary for {sha}")
+            return
+        try:
+            full_sha = self.repo.rev_parse(sha)
+            # The committed snapshot is immutable, so the summary is computed
+            # from exactly what landed — the whole turn's range when the base
+            # branch is known, otherwise the commit's own diff.
+            if self._base_branch is not None:
+                diff = self.repo.diff_range(self._base_branch, full_sha)
+            else:
+                diff = self.repo.diff_range(f"{full_sha}^", full_sha)
+        except Exception as error:
+            self._debug(f"summary snapshot failed: {error!r}")
+            return
+        session_summary = self.state.session_summary
+        # The summary may finish after the user switches sessions: remember the
+        # owning repo/state so it is never applied to a different session.
+        result: dict = {"sha": full_sha, "short_sha": sha, "repo": self.repo, "state": self.state}
+        self._summary_result = None
+        self._summary_pending = {"sha": full_sha, "since": time.monotonic()}
+
+        def worker() -> None:
+            try:
+                result["summary"] = summarizer.summarize_commit(turns=turns, diff=diff, session_summary=session_summary)
+            except Exception as error:  # surfaced by the service tick
+                result["error"] = repr(error)
+            else:
+                try:
+                    result["session_summary"] = summarizer.update_session_summary(
+                        current_summary=session_summary,
+                        turns=turns,
+                        diff=diff,
+                        commit_summary=result["summary"],
+                    )
+                except Exception as error:
+                    # A failed rolling summary must not discard a good commit
+                    # summary; the previous session summary simply stays current.
+                    result["session_summary_error"] = repr(error)
+            result["metadata"] = summary_metadata_lines(
+                model=summarizer.model or self.state.model,
+                tokens_input=summarizer.tokens_input,
+                tokens_output=summarizer.tokens_output,
+            )
+            self._summary_result = result
+
+        self._summary_thread = threading.Thread(target=worker, daemon=True, name="agit-summary")
+        self._summary_thread.start()
+        self._set_message(f"aGiT is summarizing commit {sha}...", seconds=self.SUMMARY_WAIT_SECONDS)
+
+    def _service_commit_summary(self) -> None:
+        """Main-loop tick: apply a finished background summary (#8). All git
+        and state mutations happen here, on the main thread."""
+        result = self._summary_result
+        if result is None:
+            return
+        self._summary_result = None
+        self._summary_pending = None
+        if "error" in result:
+            # Includes UnusableSummaryError (backend returned "You've hit your
+            # session limit..." or similar, issue #8): the commit keeps its
+            # prompt-led message instead of getting the error as a subject.
+            self._debug(f"commit summarization failed: {result['error']}")
+            self._set_message("aGiT: commit summarization failed; keeping the prompt-based message.")
+            return
+        sha, summary, repo, state = result["sha"], result["summary"], result["repo"], result["state"]
+        try:
+            # Amend first, then attach notes to whatever commit survives — notes
+            # added before an amend would hang off the orphaned pre-amend object.
+            target = self._amend_summary_into_head(repo, sha, summary, result.get("metadata"))
+            if target:
+                self._set_message(f"Summary added to commit {result['short_sha']}.")
+            else:
+                # Already integrated or superseded: the summary lives in the
+                # commit's git notes instead of its message.
+                target = sha
+                self._debug(f"summary for {sha} recorded as notes only")
+            repo.notes_add(target, summary, namespace="agit/commit-summary")
+            session_summary = result.get("session_summary")
+            if session_summary:
+                state.session_summary = session_summary
+                state.session_summary_commit = target
+                repo.notes_add(target, session_summary, namespace="agit/session-summary")
+            elif "session_summary_error" in result:
+                self._debug(f"session summary update failed: {result['session_summary_error']}")
+        except Exception as error:
+            self._debug(f"applying commit summary failed: {error!r}")
+
+    def _amend_summary_into_head(self, repo, sha: str, summary: str, metadata: list[str] | None) -> str | None:
+        """Amend the summary into *sha*'s message, only while that is safe:
+        the commit is still HEAD, not yet integrated into base, and nothing is
+        staged (``--amend`` would otherwise pull staged work into the commit).
+        Returns the amended commit's full SHA, or None if no amend happened."""
+        try:
+            if repo.rev_parse("HEAD") != sha:
+                return None
+            if self._base_branch is None or sha not in repo.log_shas(self._base_branch, "HEAD"):
+                return None
+            if repo.has_staged_changes():
+                return None
+            message = repo.commit_message("HEAD")
+            amended = apply_summary_to_message(message, summary, summary_metadata=metadata)
+            if amended == message:
+                return None  # already summarized: never amend twice
+            new_short = repo.amend_commit(amended)
+            if self._last_agent_commit_id and sha.startswith(str(self._last_agent_commit_id)):
+                self._last_agent_commit_id = new_short
+            return repo.rev_parse("HEAD")
+        except Exception as error:
+            self._debug(f"summary amend failed: {error!r}")
+            return None
+
+    def _summary_blocks_integration(self, now: float) -> bool:
+        # Hold integration briefly so the summary can be amended in before the
+        # commit leaves the turn branch — but never stall: past the deadline
+        # the commit integrates as-is and the summary becomes notes-only.
+        pending = self._summary_pending
+        if pending is None:
+            return False
+        if now - pending["since"] >= self.SUMMARY_WAIT_SECONDS:
+            return False
+        thread = self._summary_thread
+        if thread is None or not thread.is_alive():
+            # Result ready (or worker gone): apply it now so integration can
+            # proceed this tick instead of waiting for the next one.
+            self._service_commit_summary()
+            return self._summary_pending is not None
+        return True
 
     def _set_message(self, message: str | None, *, seconds: float = 4.0, sticky: bool = False) -> None:
         # message may be None when relayed straight from a service result; storing
@@ -3489,6 +3667,12 @@ class ProxyRunner:
         self._set_message("Finalizing commits before exit...", seconds=30)
         self._render()
         self._commit_latest_turn_sync()  # active session, in place
+        # Give an in-flight commit summary a short grace period so it can be
+        # amended in before the final integration; past that it is dropped
+        # rather than holding the exit hostage (#8).
+        if self._summary_thread is not None and self._summary_thread.is_alive():
+            self._summary_thread.join(timeout=10)
+        self._service_commit_summary()
         self._integrate_session_on_exit()
         self._remove_worktree_on_exit()
         for session in list(self.sessions):
@@ -3677,29 +3861,54 @@ class ProxyRunner:
         return True
 
     def _handle_pre_compaction(self) -> None:
-        self._set_message("aGiT: Capturing session summary before compaction...")
-        self._render()
+        # The transcript snapshot must happen before /compact is forwarded, but
+        # the LLM summarization of it must NOT block the UI (#8): export here,
+        # summarize on a worker thread, apply via _service_precompact_summary.
+        summarizer = self._make_summarizer()
+        if summarizer is None:
+            return
         try:
-            from agit.summaries import Summarizer
-            from agit.backends.claude import ClaudeBackend
-            from agit.backends.opencode import OpenCodeBackend
-
-            backend_class = OpenCodeBackend if self.state.backend == "opencode" else ClaudeBackend
-            backend = backend_class(self.repo.repo)
-            model = self.state.summarization_model
-            if model is None and self.global_config is not None:
-                model = self.global_config.summarization_model
-            summarizer = Summarizer(backend, model=model)
             session_id = self.state.backend_session_id
             if not session_id:
                 return
             exported = self.backend.export_session(self.repo.repo, session_id)
             if not exported or not exported.turns:
                 return
-            summary = summarizer.summarize_pre_compaction(
-                exported_session=exported,
-                current_summary=self.state.session_summary,
-            )
+        except Exception as error:
+            self._debug(f"pre-compaction export failed: {error!r}")
+            return
+        if self._precompact_thread is not None and self._precompact_thread.is_alive():
+            self._debug("pre-compaction summary worker busy; skipping")
+            return
+        current_summary = self.state.session_summary
+        result: dict = {}
+        self._precompact_result = None
+
+        def worker() -> None:
+            try:
+                result["summary"] = summarizer.summarize_pre_compaction(
+                    exported_session=exported,
+                    current_summary=current_summary,
+                )
+            except Exception as error:
+                result["error"] = repr(error)
+            self._precompact_result = result
+
+        self._precompact_thread = threading.Thread(target=worker, daemon=True, name="agit-precompact")
+        self._precompact_thread.start()
+        self._set_message("aGiT: Capturing session summary before compaction...")
+
+    def _service_precompact_summary(self) -> None:
+        result = self._precompact_result
+        if result is None:
+            return
+        self._precompact_result = None
+        if "error" in result:
+            self._debug(f"pre-compaction summary failed: {result['error']}")
+            self._set_message("aGiT: Pre-compaction summary failed.")
+            return
+        try:
+            summary = result["summary"]
             self.state.session_summary = summary
             head_sha = self.repo.rev_parse("HEAD")
             if head_sha:
@@ -3707,8 +3916,7 @@ class ProxyRunner:
                 self.repo.notes_add(head_sha, summary, namespace="agit/session-summary")
             self._set_message("aGiT: Session summary captured.")
         except Exception as error:
-            self._debug(f"pre-compaction summary failed: {error!r}")
-            self._set_message("aGiT: Pre-compaction summary failed.")
+            self._debug(f"applying pre-compaction summary failed: {error!r}")
 
     def _base_user_edits_pending(self) -> bool:
         # The user's own edits land in the BASE repo's working tree (the session
@@ -3948,13 +4156,17 @@ class ProxyRunner:
             self.agent_in_flight = False
             self.last_status = ""
             if not quiet:
-                # Paint the "Created <agent> commit." confirmation NOW, before the
+                # Paint the "Created <aGiT> commit." confirmation NOW, before the
                 # integrate below runs git merge/fast-forward on the main thread.
                 self._render()
             if integrate:
                 # Interactive integration only for the active session. The
-                # sync/background commit path passes integrate=False.
-                self._integrate_session_turn()
+                # sync/background commit path passes integrate=False. While a
+                # background summary is pending, integration is deferred so the
+                # summary can be amended in first; the idle-integration path
+                # picks the commit up once it lands (or the wait deadline passes).
+                if not self._summary_blocks_integration(time.monotonic()):
+                    self._integrate_session_turn()
         return committed
 
     def _commit_available_agent_turns(self, *, quiet: bool) -> bool:
@@ -4056,6 +4268,8 @@ class ProxyRunner:
         except Exception as error:
             self._debug(f"idle integrate check failed: {error!r}")
             return
+        if self._summary_blocks_integration(now):
+            return  # summary worker still running — amend first, then integrate
         if not self._attach_trace_to_backend_commits(now):
             return  # parse still in flight — integrate once the trace is attached
         self._debug(f"integrating agent-made commits on {branch} (worktree clean and idle)")

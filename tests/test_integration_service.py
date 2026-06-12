@@ -198,7 +198,7 @@ def test_integrate_turn_clean_merge(tmp_path):
     main = _init_repo(tmp_path)
     base = main.current_branch()
     _, work = _make_session(main, "s1", base)
-    _commit(work, "a.txt", "x\n", "<agent> work")
+    _commit(work, "a.txt", "x\n", "<aGiT> work")
 
     svc = _svc(main, base)
     result, branch = svc.integrate_turn_or_conflict(
