@@ -908,11 +908,24 @@ class ProxyRunner:
         gc = getattr(self, "global_config", None)
         return bool(getattr(gc, "check_for_updates", True)) if gc is not None else False
 
+    def _merge_session_active(self) -> bool:
+        # True while a merge / conflict resolution is in progress in ANY session
+        # (the active one, or a background session integrating its turn). Update
+        # prompts and updates are suppressed for the duration so they never
+        # interrupt a merge the user is in the middle of.
+        if getattr(self, "merge_ctx", None) is not None:
+            return True
+        return any(getattr(session, "merge_ctx", None) is not None for session in getattr(self, "sessions", []))
+
     def _maybe_check_for_update(self) -> None:
         # Kick off a background self-update check on a throttle, and surface a
         # finished one. Network I/O (`git fetch`) runs on a worker thread so the
         # terminal never stalls; the result is handed back and consumed here on
         # the main thread.
+        if self._merge_session_active():
+            # Don't prompt mid-merge; a result that lands now stays pending and
+            # is surfaced once the merge is done.
+            return
         self._consume_update_check_result()
         if self._updater is None or not self._update_checks_enabled():
             return
@@ -963,7 +976,7 @@ class ProxyRunner:
         # mid-parse, mid-merge, or mid-summary anywhere. The actual commit +
         # integration of finished work is flushed by _finalize_pending_work()
         # right before the update is applied.
-        if getattr(self, "merge_ctx", None):
+        if self._merge_session_active():
             return False
         if getattr(self, "agent_in_flight", False):
             return False

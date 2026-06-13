@@ -1,5 +1,6 @@
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -226,6 +227,42 @@ def test_ready_for_update_blocked_by_in_flight_agent():
     assert runner._ready_for_update() is True
     runner.active.agent_in_flight = True
     assert runner._ready_for_update() is False
+
+
+def test_ready_for_update_blocked_by_active_merge():
+    runner = make_runner()
+    runner.merge_ctx = object()  # a conflict resolution is in progress
+    assert runner._ready_for_update() is False
+
+
+def test_ready_for_update_blocked_by_background_merge():
+    runner = make_runner()
+    runner.merge_ctx = None
+    runner.sessions = [SimpleNamespace(merge_ctx=object())]  # a background session is merging
+    assert runner._merge_session_active() is True
+    assert runner._ready_for_update() is False
+
+
+def test_no_update_prompt_during_merge_session():
+    runner = make_runner()
+    runner.merge_ctx = object()  # merge in progress
+    runner._update_status = None
+    runner._update_offered = False
+    runner._update_worker_result = _available_status()
+    runner._update_check_thread = SimpleNamespace(is_alive=lambda: False)
+
+    runner._maybe_check_for_update()
+
+    # The finished result is NOT consumed or surfaced while merging.
+    assert runner._update_offered is False
+    assert runner.message is None
+    assert runner._update_status is None
+
+    # Once the merge ends, the pending result surfaces on the next pass.
+    runner.merge_ctx = None
+    runner._maybe_check_for_update()
+    assert runner._update_offered is True
+    assert "update available" in (runner.message or "")
 
 
 def test_handle_update_command_marks_pending_when_busy(monkeypatch):
