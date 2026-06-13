@@ -10,7 +10,7 @@ build-backend = "setuptools.build_meta"
 # release); 0.0.0 marks an unreleased working tree.
 [project]
 name = "agit-ai"
-version = "0.0.0"
+version = "0.0.1"
 description = "Interactive agent + git commit orchestration. Requires git and a backend CLI (Claude Code or OpenCode); the GitHub CLI (gh) is optional, used for the dashboard's GitHub-ID committer view."
 readme = "README.md"
 requires-python = ">=3.10"
