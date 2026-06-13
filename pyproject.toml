@@ -11,7 +11,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "agit-ai"
 version = "0.0.1"
-description = "Interactive agent + git commit orchestration. Requires git and a backend CLI (Claude Code or OpenCode); the GitHub CLI (gh) is optional, used for the dashboard's GitHub-ID committer view."
+description = "Interactive coding-agent CLI that commits AI changes to git with traceable metadata."
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "Apache-2.0"}
