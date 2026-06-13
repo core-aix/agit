@@ -186,13 +186,17 @@ def test_same_commit_in_multiple_squashes_counts_tokens_once(tmp_path):
     # the shared turn — the byte-identical block is what marks it as one commit.
     _write_lines(repo, "first.txt", 100)
     repo.commit(
-        "First squash (#1)\n\n* shared agent work\n\n" + shared
-        + "\n* only in first\n\n" + block("2026-06-02T00:00:00Z", 20)
+        "First squash (#1)\n\n* shared agent work\n\n"
+        + shared
+        + "\n* only in first\n\n"
+        + block("2026-06-02T00:00:00Z", 20)
     )
     _write_lines(repo, "second.txt", 200)
     repo.commit(
-        "Second squash (#2)\n\n* shared agent work\n\n" + shared
-        + "\n* only in second\n\n" + block("2026-06-03T00:00:00Z", 7)
+        "Second squash (#2)\n\n* shared agent work\n\n"
+        + shared
+        + "\n* only in second\n\n"
+        + block("2026-06-03T00:00:00Z", 7)
     )
 
     dash = build_dashboard(repo)
