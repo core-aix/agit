@@ -90,26 +90,26 @@ def test_proxy_ctrl_g_enters_command_mode():
 def test_kitty_ctrl_key_decoding():
     """Test that kitty keyboard protocol control keys are decoded to plain bytes."""
     from agit.proxy.runner import _decode_kitty_ctrl_keys
-    
+
     # Ctrl-O (o=111) should decode to 0x0f
     assert _decode_kitty_ctrl_keys(b"\x1b[111;5u") == b"\x0f"
-    
+
     # Ctrl-G (g=103) should decode to 0x07
     assert _decode_kitty_ctrl_keys(b"\x1b[103;5u") == b"\x07"
-    
+
     # Ctrl-A (a=97) should decode to 0x01
     assert _decode_kitty_ctrl_keys(b"\x1b[97;5u") == b"\x01"
-    
+
     # Ctrl-Z (z=122) should decode to 0x1a
     assert _decode_kitty_ctrl_keys(b"\x1b[122;5u") == b"\x1a"
-    
+
     # Mixed content: text + Ctrl-O + text
     assert _decode_kitty_ctrl_keys(b"hello\x1b[111;5uworld") == b"hello\x0fworld"
-    
+
     # Non-ctrl kitty sequences should not be decoded (modifier != 5)
     # Shift+O would be modifier 2, so \x1b[111;2u should remain unchanged
     assert _decode_kitty_ctrl_keys(b"\x1b[111;2u") == b"\x1b[111;2u"
-    
+
     # Plain bytes should pass through unchanged
     assert _decode_kitty_ctrl_keys(b"\x0f") == b"\x0f"
     assert _decode_kitty_ctrl_keys(b"hello") == b"hello"
@@ -118,19 +118,19 @@ def test_kitty_ctrl_key_decoding():
 def test_kitty_escape_key_decoding():
     """Test that kitty keyboard protocol Escape key is decoded to plain \\x1b."""
     from agit.proxy.runner import _decode_kitty_ctrl_keys
-    
+
     # Escape key (keycode 27) should decode to \x1b
     assert _decode_kitty_ctrl_keys(b"\x1b[27u") == b"\x1b"
-    
+
     # Escape key with explicit modifier 1 should also decode to \x1b
     assert _decode_kitty_ctrl_keys(b"\x1b[27;1u") == b"\x1b"
-    
+
     # Mixed content: Escape + text
     assert _decode_kitty_ctrl_keys(b"\x1b[27uhello") == b"\x1bhello"
-    
+
     # Multiple Escape keys
     assert _decode_kitty_ctrl_keys(b"\x1b[27u\x1b[27u") == b"\x1b\x1b"
-    
+
     # Plain Escape should pass through unchanged
     assert _decode_kitty_ctrl_keys(b"\x1b") == b"\x1b"
 
@@ -138,18 +138,18 @@ def test_kitty_escape_key_decoding():
 def test_proxy_menu_key_works_with_kitty_encoding():
     """Test that the menu key works even when terminal sends kitty-encoded keys."""
     from agit.proxy.runner import _decode_kitty_ctrl_keys
-    
+
     # Simulate what happens in _reactor_stdin_phase:
     # 1. Terminal sends kitty-encoded Ctrl-O
     # 2. We decode it to plain byte
     # 3. ProxyInput matches it as menu key
-    
+
     kitty_encoded_ctrl_o = b"\x1b[111;5u"
     decoded = _decode_kitty_ctrl_keys(kitty_encoded_ctrl_o)
-    
+
     parser = ProxyInput(menu_key=b"\x0f")  # Ctrl-O
     forwarded, local_echo, command, should_exit = parser.feed(decoded + b"git-status\r")
-    
+
     assert forwarded == []
     assert command == "git-status"
     assert should_exit is False
@@ -158,9 +158,9 @@ def test_proxy_menu_key_works_with_kitty_encoding():
 def test_proxy_shift_modified_menu_key_enters_command_mode():
     # Test multi-byte kitty keyboard protocol sequence for Ctrl+Shift+G
     parser = ProxyInput(menu_key=b"\x1b[103;6u")
-    
+
     forwarded, local_echo, command, should_exit = parser.feed(b"\x1b[103;6ugit-status\r")
-    
+
     assert forwarded == []
     assert local_echo == b""
     assert command == "git-status"
@@ -170,10 +170,10 @@ def test_proxy_shift_modified_menu_key_enters_command_mode():
 def test_proxy_shift_modified_menu_key_partial_match():
     # Test that partial matches are buffered and forwarded if they don't complete
     parser = ProxyInput(menu_key=b"\x1b[103;6u")
-    
+
     # Send partial sequence followed by other data
     forwarded, local_echo, command, should_exit = parser.feed(b"\x1b[103;7u")
-    
+
     # Should forward the partial match since it doesn't match the menu key
     assert b"".join(forwarded) == b"\x1b[103;7u"
     assert command is None
@@ -182,16 +182,16 @@ def test_proxy_shift_modified_menu_key_partial_match():
 def test_proxy_shift_modified_menu_key_split_across_reads():
     # Test that sequences split across multiple feed() calls work correctly
     parser = ProxyInput(menu_key=b"\x1b[103;6u")
-    
+
     # Send first part
     forwarded1, _, command1, _ = parser.feed(b"\x1b[103")
     assert forwarded1 == []  # Still buffering
     assert command1 is None
-    
+
     # Send second part
     forwarded2, _, command2, _ = parser.feed(b";6u")
     assert forwarded2 == []  # Still buffering, haven't completed yet
-    
+
     # Send the command
     forwarded3, _, command3, _ = parser.feed(b"session\r")
     assert command3 == "session"
@@ -200,10 +200,10 @@ def test_proxy_shift_modified_menu_key_split_across_reads():
 def test_proxy_shift_modified_menu_key_non_match_forwards():
     # Test that non-matching sequences are forwarded immediately
     parser = ProxyInput(menu_key=b"\x1b[103;6u")
-    
+
     # Send a different escape sequence
     forwarded, local_echo, command, should_exit = parser.feed(b"\x1b[112;6u")
-    
+
     # Should forward the non-matching sequence
     assert b"".join(forwarded) == b"\x1b[112;6u"
     assert command is None

@@ -101,20 +101,20 @@ _BRACKETED_PASTE_RE = re.compile(rb"\x1b\[200~.*?(?:\x1b\[201~|$)", re.S)
 
 def _decode_kitty_ctrl_keys(data: bytes) -> bytes:
     """Decode kitty keyboard protocol control keys and Escape to plain bytes.
-    
+
     When the terminal is in kitty keyboard protocol mode:
     - Ctrl-A through Ctrl-Z are sent as escape sequences like \\x1b[97;5u (Ctrl-A)
       instead of plain bytes like \\x01.
     - Escape is sent as \\x1b[27u instead of plain \\x1b.
-    
+
     This function converts them back to plain bytes so the menu key matching
     and Esc handling work correctly.
-    
+
     Only decodes Ctrl keys (modifier 5 = Ctrl+base) and Escape. Other keys are left unchanged.
     """
     # First decode Escape key
     data = _KITTY_ESC_KEY_RE.sub(b"\x1b", data)
-    
+
     # Then decode control keys
     def replace_kitty_ctrl(match: re.Match) -> bytes:
         keycode = int(match.group(1))
@@ -124,7 +124,7 @@ def _decode_kitty_ctrl_keys(data: bytes) -> bytes:
             return bytes([keycode - 96])
         # Not a letter, return unchanged
         return match.group(0)
-    
+
     return _KITTY_CTRL_KEY_RE.sub(replace_kitty_ctrl, data)
 
 
@@ -256,7 +256,7 @@ class ProxyInput:
                 # Multi-byte menu key sequence (ctrl+shift+<letter>)
                 self.menu_key_buffer.append(byte)
                 buffer_bytes = bytes(self.menu_key_buffer)
-                
+
                 # Check if we have a complete match
                 if buffer_bytes == self.menu_key:
                     self.capturing = True
@@ -264,17 +264,17 @@ class ProxyInput:
                     self.escape_buffer = None
                     self.menu_key_buffer.clear()
                     continue
-                
+
                 # Check if we have a partial match (prefix of menu_key)
                 if self.menu_key.startswith(buffer_bytes):
                     # Still accumulating, don't forward yet
                     continue
-                
+
                 # No match - forward the buffered bytes (which includes current byte)
                 # and clear the buffer
                 forwarded.append(buffer_bytes)
                 self.menu_key_buffer.clear()
-                
+
         return forwarded, b"", command, should_exit
 
     def text(self) -> str:

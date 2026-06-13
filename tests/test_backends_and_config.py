@@ -237,7 +237,7 @@ def test_menu_key_shift_modified(tmp_path):
     from agit.config import GlobalConfig
 
     config = GlobalConfig(tmp_path / "config.json")
-    
+
     # Test ctrl+shift+g format
     config.data["menu_key"] = "ctrl+shift+g"
     assert config.menu_key == "ctrl+shift+g"
@@ -245,14 +245,14 @@ def test_menu_key_shift_modified(tmp_path):
     assert config.menu_key_byte == b""  # Empty for shift-modified keys
     assert config.menu_key_sequence == b"\x1b[103;6u"  # CSI 103 ; 6 u (g=103, modifiers=6)
     assert config.menu_key_label == "Ctrl+Shift-G"
-    
+
     # Test normalization
     config.data["menu_key"] = "Ctrl+Shift+P"
     assert config.menu_key == "ctrl+shift+p"
     assert config.is_shift_modified is True
     assert config.menu_key_sequence == b"\x1b[112;6u"  # p=112
     assert config.menu_key_label == "Ctrl+Shift-P"
-    
+
     # Test that plain ctrl-<letter> still works
     config.data["menu_key"] = "ctrl-y"
     assert config.menu_key == "ctrl-y"
