@@ -247,9 +247,11 @@ def test_user_commit_message_masks_secret_subject():
 
 
 def test_commit_messages_include_current_agit_version_without_created_at():
+    from agit import __version__
+
     message = build_user_commit_message(message="save work", agit_session_id="agit-1")
 
-    assert "agit_version: 0.0.1" in message
+    assert f"agit_version: {__version__}" in message
     assert "created_at" not in message
 
 
