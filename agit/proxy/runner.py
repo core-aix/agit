@@ -1599,7 +1599,7 @@ class ProxyRunner:
                 return "conflict"
             self._advance_base_to(turn_branch)
             self._debug(f"integrated '{self.name}' {turn_branch} -> {self._base_branch}")
-            self._announce_commit_merged()
+            self._announce_agent_commit()
             return "integrated"
         except Exception as error:
             self._debug(f"integration failed for '{self.name}': {error!r}")
@@ -3694,10 +3694,12 @@ class ProxyRunner:
         return self.name or "main"
 
     def _agent_commit_message(self) -> str:
-        # The auto-commit confirmation, shown only once the commit is merged into
-        # the base branch. Includes the short SHA so the user can find it (e.g.
-        # `git show <id>`), the session it belongs to (background sessions
-        # auto-commit too), the base it landed on, and whether it was summarized.
+        # The auto-commit confirmation, shown only once the commit has landed in
+        # the base branch (worktree sessions) or been committed and summarized
+        # (no-worktree sessions). Includes the short SHA so the user can find the
+        # commit (e.g. `git show <id>`), the session it belongs to (background
+        # sessions auto-commit too), the base it landed on, and whether it was
+        # summarized.
         commit_id = self._last_agent_commit_id
         session = self._session_label()
         base = self._base_branch or "the base branch"
@@ -3705,11 +3707,15 @@ class ProxyRunner:
         head = f"Created <aGiT> commit {commit_id}" if commit_id else "Created <aGiT> commit"
         return f"{head} in session '{session}' — merged into {base}{summarized}."
 
-    def _announce_commit_merged(self) -> None:
-        # On a clean integration, surface the deferred "created" notice for the
-        # session whose turn just merged — but only when there is a just-made
-        # agent commit to announce (manual integration of older commits, or a
-        # base fast-forward with nothing pending, stays silent).
+    def _announce_agent_commit(self) -> None:
+        # Surface the deferred "created" notice for the session whose commit just
+        # landed — at integration time for a worktree session (the commit is now
+        # in the base), or after the commit/summary for a no-worktree session
+        # (which never integrates). Only fires when there is a just-made agent
+        # commit to announce; a base fast-forward with nothing pending, or an
+        # already-announced commit, stays silent. Uses a session notice (not a
+        # sticky message) so it never stomps the "summarizing…" notice and the
+        # ordering — summarizing first, then created — is preserved.
         if not self._commit_merged_pending:
             return
         self._commit_merged_pending = False
@@ -3854,8 +3860,9 @@ class ProxyRunner:
             # added before an amend would hang off the orphaned pre-amend object.
             target = self._amend_summary_into_head(repo, sha, summary, result.get("metadata"))
             if target:
-                # The commit is now summarized; the "created & merged" notice (set
-                # at integration) will note this. No separate "summary added"
+                # The commit is now summarized; the "created" notice (set at
+                # integration for a worktree session, or just below for a
+                # no-worktree one) will note this. No separate "summary added"
                 # popup — that fired before the merge and confused the ordering.
                 self._commit_summarized = True
             else:
@@ -3871,6 +3878,12 @@ class ProxyRunner:
                 repo.notes_add(target, session_summary, namespace="agit/session-summary")
             elif "session_summary_error" in result:
                 self._debug(f"session summary update failed: {result['session_summary_error']}")
+            if self.worktree is None:
+                # No integration step will announce a no-worktree commit, and the
+                # summary has now landed, so surface the "created (summarized)"
+                # notice here — replacing the "summarizing…" notice in the right
+                # order. Idempotent: a no-op if the commit was already announced.
+                self._announce_agent_commit()
         except Exception as error:
             self._debug(f"applying commit summary failed: {error!r}")
 
@@ -4674,10 +4687,17 @@ class ProxyRunner:
             if self.verbose:
                 self._render_status("git changes found; no new final response available")
             return
+        # Do NOT announce the commit here. A worktree session announces it only
+        # once it merges into the base (via _announce_agent_commit at
+        # integration); meanwhile the "summarizing…" notice must stand. A
+        # no-worktree session never integrates, so it announces here — but only
+        # after any summary has landed (so summarizing shows first), which the
+        # summary service handles; if summarization is off there is no summary to
+        # wait for, so announce immediately.
         if self.verbose:
-            self._render_status(self._agent_commit_message())
-        else:
-            self._set_message(self._agent_commit_message(), sticky=True)
+            self._render_status("committed agent turn")
+        elif self.worktree is None and self._summary_pending is None:
+            self._announce_agent_commit()
 
     def _integrate_agent_made_commits_if_idle(self, now: float) -> None:
         # The agent can run `git commit` itself (some workflows ask it to).

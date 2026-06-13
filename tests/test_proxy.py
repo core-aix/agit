@@ -617,14 +617,14 @@ def test_agent_commit_popup_includes_commit_id_and_session(tmp_path):
     runner._last_agent_commit_id = "abc1234"
     runner._commit_merged_pending = True
 
-    runner._announce_commit_merged()
+    runner._announce_agent_commit()
 
     assert runner.message == "Created <aGiT> commit abc1234 in session 'feature-x' — merged into main."
     # Summarized turns note that in the same line.
     runner._last_agent_commit_id = "def5678"
     runner._commit_merged_pending = True
     runner._commit_summarized = True
-    runner._announce_commit_merged()
+    runner._announce_agent_commit()
     assert runner.message == "Created <aGiT> commit def5678 in session 'feature-x' — merged into main (summarized)."
 
 
