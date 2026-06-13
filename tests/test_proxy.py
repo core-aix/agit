@@ -4391,6 +4391,46 @@ def test_screen_renderer_init_screen_creates_screen():
     assert r._in_sync_update is False
 
 
+def test_command_palette_shows_all_commands_on_tall_terminal():
+    # Regression: the palette used to slice input_matches[:8], hiding the last
+    # commands (e.g. "update"/"exit") at the bottom of the box even with room.
+    r = _make_renderer(24, 80)
+    parts: list[str] = []
+    matches = list(ProxyInput.COMMANDS)
+    r.append_command_palette(
+        parts,
+        rows=24,
+        cols=80,
+        input_text="",
+        input_matches=matches,
+        input_selected=matches[0],
+    )
+    painted = "".join(parts)
+    for command in matches:
+        assert command in painted, command
+
+
+def test_command_palette_scrolls_to_keep_selection_visible():
+    # On a short terminal not every command fits; the window must scroll so the
+    # selected command is always painted (otherwise it is invisible AND
+    # unhighlighted).
+    r = _make_renderer(12, 80)
+    matches = list(ProxyInput.COMMANDS)
+    last = matches[-1]
+    parts: list[str] = []
+    r.append_command_palette(
+        parts,
+        rows=12,
+        cols=80,
+        input_text="",
+        input_matches=matches,
+        input_selected=last,
+    )
+    painted = "".join(parts)
+    assert last in painted
+    assert "\x1b[7m" in painted  # the selected row is reverse-video highlighted
+
+
 def test_screen_renderer_cell_sgr_bold_red():
     r = ScreenRenderer(24, 80, color_mode="truecolor")
     import pyte.screens
