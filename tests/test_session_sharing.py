@@ -582,6 +582,27 @@ def test_runner_manage_unshare_removes_session(tmp_path, monkeypatch):
     assert SharedSessionStore(repo).entries() == []
 
 
+def test_manage_enabling_auto_update_syncs_immediately(tmp_path, monkeypatch):
+    # Turning auto-update ON should push the latest right away, not wait for the
+    # next commit — so the shared copy is current immediately.
+    backend = _StubBackend(transcript="newest turns")
+    runner, repo = _runner_with_store(tmp_path, monkeypatch, backend)
+    SharedSessionStore(repo).publish(
+        github_id="tester",
+        name="session-1",
+        transcript="stale",
+        manifest={"github_id": "tester", "name": "session-1", "session_id": "sid-123", "updated": 1},
+    )
+    # Pick the session, then "Turn ON auto-update" (2nd action).
+    runner._select_popup = lambda title, options: options[1] if title.startswith("Manage") else options[0]
+
+    runner._manage_shared_sessions_menu()
+
+    assert runner._session_auto_shared("sid-123") is True  # opt-in persisted
+    entry = SharedSessionStore(repo).entries()[0]
+    assert SharedSessionStore(repo).read_transcript(entry) == "newest turns"  # pushed on enable
+
+
 def test_manage_menu_opens_without_fetch_or_transcript_read(tmp_path, monkeypatch):
     # The menu must open instantly: no network fetch, and no transcript read/redact
     # while building the list (the "takes a few seconds" bug).

@@ -2685,8 +2685,15 @@ class ProxyRunner:
             self._update_shared_entry(entry)
         elif kind == "auto":
             self._set_session_auto_share(sid, not auto_on)
-            self._set_message(f"Auto-update {'enabled' if not auto_on else 'disabled'} for {entry.display}.")
-            self._render()
+            if auto_on:
+                self._set_message(f"Auto-update disabled for {entry.display}.")
+                self._render()
+            else:
+                # Enabling syncs once right away, so the shared copy is current
+                # immediately instead of only on the next commit.
+                self._set_message(f"Auto-update on for {entry.display} — pushing the latest now…", seconds=10.0)
+                self._render()
+                self._update_shared_entry(entry)
         else:
             self._unshare_entry(entry)
 
