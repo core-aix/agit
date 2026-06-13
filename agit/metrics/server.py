@@ -45,7 +45,8 @@ class _DashboardHandler(http.server.BaseHTTPRequestHandler):
             author, backend, model = _str(query, "author"), _str(query, "backend"), _str(query, "model")
             frm, to = _int(query, "from", 0), _int(query, "to", 0)
             if parsed.path in ("/", "/index.html"):
-                self._respond("text/html; charset=utf-8", format_html(self._dashboard()).encode("utf-8"))
+                html = format_html(self._dashboard(), shared_sessions=shared_sessions_for(self.repo))
+                self._respond("text/html; charset=utf-8", html.encode("utf-8"))
             elif parsed.path == "/data":
                 payload = aggregates_payload(
                     self._dashboard(),

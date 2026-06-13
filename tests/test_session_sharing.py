@@ -342,10 +342,40 @@ def test_runner_auto_share_publishes_in_background(tmp_path, monkeypatch):
 
     entries = SharedSessionStore(repo).entries()
     assert len(entries) == 1 and entries[0].manifest["session_id"] == "sid-123"
-    # A second call with unchanged content does not spawn another push.
+    # The throttle timestamp is stamped on every check, so an immediate re-check is
+    # debounced and does NOT re-do the (potentially large) read/redact or re-spawn —
+    # this is the fix for the "terminal becomes slow" bug.
     runner._auto_share_thread = None
     runner._maybe_auto_share_active()
-    assert runner._auto_share_thread is None  # content hash unchanged ⇒ skipped
+    assert runner._auto_share_thread is None
+
+
+def test_auto_share_main_thread_does_no_heavy_work(tmp_path, monkeypatch):
+    # The reactor-thread part must never read/redact the transcript itself — that
+    # happens in the worker. Prove it by making export_session_raw blow up if the
+    # MAIN thread ever calls it; only the spawned worker may.
+    import threading
+
+    backend = _StubBackend()
+    runner, repo = _runner_with_store(tmp_path, monkeypatch, backend)
+    main = threading.get_ident()
+    calls = {"main": 0}
+    real_export = backend.export_session_raw
+
+    def guarded(repo_path, sid):
+        if threading.get_ident() == main:
+            calls["main"] += 1
+        return real_export(repo_path, sid)
+
+    backend.export_session_raw = guarded
+    runner.state.set_auto_share("sid-123", True)
+
+    runner._maybe_auto_share_active()
+    if runner._auto_share_thread is not None:
+        runner._auto_share_thread.join(timeout=10)
+
+    assert calls["main"] == 0  # the transcript was only read on the worker thread
+    assert SharedSessionStore(repo).entries()  # and the worker still shared it
 
 
 def test_runner_auto_share_skipped_when_not_opted_in(tmp_path, monkeypatch):

@@ -765,6 +765,32 @@ def test_dashboard_server_serves_aggregates_and_paginated_log(tmp_path):
         thread.join(timeout=5)
 
 
+def test_dashboard_server_index_embeds_shared_sessions(tmp_path):
+    # Regression: the live index page must embed shared sessions on first paint,
+    # not only fill them in on the first /data poll (the bug where the dashboard
+    # showed no shared sessions until a refresh — and never for a file:// snapshot).
+    from agit.sessions import SharedSessionStore
+
+    repo = _demo_repo(tmp_path)
+    SharedSessionStore(repo).publish(
+        github_id="alice",
+        name="s1",
+        transcript="t",
+        manifest={"github_id": "alice", "name": "s1", "session_id": "x", "updated": 1},
+    )
+    server, thread, base = _serve(repo)
+    try:
+        html = _get(base + "/")
+        embedded = json.loads(re.search(r'id="agit-data">(.*?)</script>', html, re.S).group(1))
+        assert [s["name"] for s in embedded["shared_sessions"]] == ["s1"]
+        served = json.loads(_get(base + "/data"))
+        assert [s["name"] for s in served["shared_sessions"]] == ["s1"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 def test_dashboard_server_404s_unknown_paths(tmp_path):
     server, thread, base = _serve(_demo_repo(tmp_path))
     try:

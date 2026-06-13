@@ -2711,9 +2711,14 @@ class ProxyRunner:
         self._render()
 
     def _cached_or_resolve_login(self) -> str:
+        # Resolve and cache the GitHub login. Only writes config when it actually
+        # changes, so callers on a hot path (auto-share) don't re-save every time.
+        cached = self.global_config.github_login
+        if cached:
+            return cached
         from agit.sessions import github_login
 
-        login = self.global_config.github_login or github_login(self.base_repo)
+        login = github_login(self.base_repo)
         self.global_config.github_login = login
         return login
 
@@ -2722,6 +2727,11 @@ class ProxyRunner:
     AUTO_SHARE_MIN_INTERVAL = 45.0  # seconds between background auto-share pushes
 
     def _maybe_auto_share_active(self) -> None:
+        # Reactor-thread part: only cheap checks, then hand ALL the heavy work
+        # (read transcript, redact, hash, push) to a background thread. Nothing
+        # here may block the UI loop. The throttle is stamped BEFORE the work so a
+        # quiet session can't trigger the (potentially large) read+redact every
+        # reactor tick — the original cause of the "terminal becomes slow" bug.
         backend = self.backend
         if not getattr(backend, "supports_session_sharing", False):
             return
@@ -2733,25 +2743,54 @@ class ProxyRunner:
         now = time.monotonic()
         if now - self._auto_share_at.get(sid, 0.0) < self.AUTO_SHARE_MIN_INTERVAL:
             return
-        payload = self._share_payload(sid, self._session_name(self.active_index))
-        if payload is None:
-            return
-        _login, _name, _redacted, digest, manifest = payload
-        if digest == self._auto_share_hash.get(sid):
-            return  # nothing new since the last push
-        self._auto_share_at[sid] = now
-        self._auto_share_hash[sid] = digest
-        self._auto_share_thread = threading.Thread(
-            target=self._auto_share_publish, args=(manifest["github_id"], _name, _redacted, manifest), daemon=True
-        )
+        self._auto_share_at[sid] = now  # throttle regardless of whether anything changed
+        # Snapshot everything the worker needs on the main thread (these touch the
+        # active session / config, which can change underneath a thread).
+        ctx = {
+            "session_id": sid,
+            "name": self._session_name(self.active_index),
+            "login": self._cached_or_resolve_login(),
+            "backend": backend,
+            "repo_path": self.repo.repo,
+            "base_repo_path": self.base_repo.repo,
+            "model": self.state.model,
+            "agit_session_id": self.state.session_id,
+            "store": self._shared_store(),
+            "last_hash": self._auto_share_hash.get(sid),
+        }
+        self._auto_share_thread = threading.Thread(target=self._auto_share_worker, args=(ctx,), daemon=True)
         self._auto_share_thread.start()
 
-    def _auto_share_publish(self, github_id: str, name: str, transcript: str, manifest: dict) -> None:
-        # Runs off the reactor thread; best-effort, never touches the UI.
+    def _auto_share_worker(self, ctx: dict) -> None:
+        # Runs off the reactor thread; best-effort, never touches the UI. Reads and
+        # redacts the (possibly large) transcript and pushes here, not on the loop.
         try:
-            self._shared_store().publish(github_id=github_id, name=name, transcript=transcript, manifest=manifest)
+            backend, sid = ctx["backend"], ctx["session_id"]
+            raw = backend.export_session_raw(ctx["repo_path"], sid) or backend.export_session_raw(
+                ctx["base_repo_path"], sid
+            )
+            if not raw:
+                return
+            from agit.sessions import redact_transcript
+
+            redacted = redact_transcript(raw)
+            digest = hashlib.sha256(redacted.encode("utf-8")).hexdigest()
+            if digest == ctx["last_hash"]:
+                return  # nothing new since the last push — skip the network round-trip
+            self._auto_share_hash[sid] = digest
+            manifest = {
+                "github_id": ctx["login"],
+                "name": ctx["name"],
+                "backend": backend.name,
+                "model": ctx["model"],
+                "session_id": sid,
+                "agit_session_id": ctx["agit_session_id"],
+                "updated": int(time.time()),
+                "content_hash": digest,
+            }
+            ctx["store"].publish(github_id=ctx["login"], name=ctx["name"], transcript=redacted, manifest=manifest)
         except Exception as error:
-            self._debug(f"auto-share failed for {github_id}/{name}: {error!r}")
+            self._debug(f"auto-share failed: {error!r}")
 
     def _resume_shared_session_menu(self) -> None:
         store = self._shared_store()
