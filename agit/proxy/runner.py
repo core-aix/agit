@@ -2226,6 +2226,8 @@ class ProxyRunner:
         if self.merge_ctx or (self.worktree is not None and self.repo.merge_in_progress()):
             options.append("✓ Complete merge for this session")
             actions.append(("complete-merge", None))
+        shared_ids = self._my_shared_session_ids()  # mark which sessions are shared (#55)
+        auto_state = self._user_state() if shared_ids else None
         live_names = set()
         for index, session in enumerate(self.sessions):
             live_names.add(self._session_name(index))
@@ -2234,6 +2236,11 @@ class ProxyRunner:
             label = f"{marker}{self._session_name(index)} [{self._session_status(index)}] ({backend})"
             if index == self.active_index and not self.merge_ctx and self._active_has_pending():
                 label += " — commits to integrate"
+            sid = getattr(getattr(session, "state", None), "backend_session_id", None)
+            if sid and auto_state is not None and auto_state.auto_share_enabled(sid):
+                label += " · ⇪ auto-share"
+            elif sid and sid in shared_ids:
+                label += " · ⇪ shared"
             options.append(label)
             actions.append(("switch", index))
         for info in self._dormant_worktrees(live_names):
@@ -2544,14 +2551,14 @@ class ProxyRunner:
         self._set_message(self._share_outcome_message(result, login, name), seconds=12.0)
         self._render()
         # Offer to keep it current automatically (the opt-in covers future pushes).
-        if result.pushed and not self.state.auto_share_enabled(session_id):
+        if result.pushed and not self._session_auto_shared(session_id):
             keep = self._select_popup(
                 "Keep this shared session up to date automatically?\n"
                 "New turns will be pushed to the shared copy as the conversation grows.",
                 ["Yes, keep it updated", "No, I'll re-share manually"],
             )
             if keep == "Yes, keep it updated":
-                self.state.set_auto_share(session_id, True)
+                self._set_session_auto_share(session_id, True)
                 self._set_message(
                     f"'{login}/{name}' will auto-update as you work. Manage it via session → Manage shared.",
                     seconds=8.0,
@@ -2618,11 +2625,12 @@ class ProxyRunner:
             self._set_message("You haven't shared any sessions in this repo yet. Use session → Share this session.")
             self._render()
             return
+        auto_state = self._user_state()  # base-repo opt-in, read once for the whole list
         options: list[str] = []
         for entry in mine:
             sid = entry.manifest.get("session_id", "")
             status = self._shared_entry_status(entry, sid)
-            auto = " · auto-update on" if self.state.auto_share_enabled(sid) else ""
+            auto = " · auto-update on" if auto_state.auto_share_enabled(sid) else ""
             age = self._format_age(entry.manifest["updated"]) if entry.manifest.get("updated") else ""
             options.append(f"{entry.display}  ({age}{auto}) — {status}")
         choice = self._select_popup("Your shared sessions — pick one to manage", options)
@@ -2645,7 +2653,7 @@ class ProxyRunner:
 
     def _manage_one_shared_session(self, entry) -> None:
         sid = entry.manifest.get("session_id", "")
-        auto_on = self.state.auto_share_enabled(sid)
+        auto_on = self._session_auto_shared(sid)
         actions = [
             ("update", "↻ Update now (push latest turns)"),
             ("auto", ("✓ Auto-update is ON — turn it off" if auto_on else "○ Turn ON auto-update")),
@@ -2660,7 +2668,7 @@ class ProxyRunner:
         if kind == "update":
             self._update_shared_entry(entry)
         elif kind == "auto":
-            self.state.set_auto_share(sid, not auto_on)
+            self._set_session_auto_share(sid, not auto_on)
             self._set_message(f"Auto-update {'enabled' if not auto_on else 'disabled'} for {entry.display}.")
             self._render()
         else:
@@ -2704,7 +2712,7 @@ class ProxyRunner:
             return
         sid = entry.manifest.get("session_id", "")
         if sid:
-            self.state.set_auto_share(sid, False)
+            self._set_session_auto_share(sid, False)
         if not result.remote:
             message = f"Removed {entry.display} from the local shared ref (no remote to push the removal to)."
         elif result.pushed:
@@ -2713,6 +2721,32 @@ class ProxyRunner:
             message = f"Removed {entry.display} locally, but the push was rejected — try again. [{result.error[:80]}]"
         self._set_message(message, seconds=10.0)
         self._render()
+
+    def _session_auto_shared(self, session_id: str | None) -> bool:
+        # Read the opt-in from the BASE repo state (persists across runs); the
+        # session worktree where self.state lives is removed on exit (#55).
+        return bool(session_id) and self._user_state().auto_share_enabled(session_id)
+
+    def _my_shared_session_ids(self) -> set[str]:
+        # session_ids of conversations I've shared in this repo, from the LOCAL ref
+        # (no network) — used to mark shared sessions in the session menu.
+        if not getattr(self.backend, "supports_session_sharing", False):
+            return set()
+        try:
+            login = self.global_config.github_login
+            ids = set()
+            for entry in self._shared_store().entries():
+                if login and entry.github_id != login:
+                    continue
+                sid = entry.manifest.get("session_id")
+                if sid:
+                    ids.add(sid)
+            return ids
+        except Exception:
+            return set()
+
+    def _set_session_auto_share(self, session_id: str, enabled: bool) -> None:
+        self._user_state().set_auto_share(session_id, bool(enabled))
 
     def _cached_or_resolve_login(self) -> str:
         # Resolve and cache the GitHub login. Only writes config when it actually
@@ -2739,7 +2773,7 @@ class ProxyRunner:
         if not getattr(backend, "supports_session_sharing", False):
             return
         sid = self.state.backend_session_id
-        if not sid or not self.state.auto_share_enabled(sid):
+        if not sid or not self._session_auto_shared(sid):
             return
         if self._auto_share_thread is not None and self._auto_share_thread.is_alive():
             return

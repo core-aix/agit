@@ -394,6 +394,65 @@ def test_auto_share_main_thread_does_no_heavy_work(tmp_path, monkeypatch):
     assert SharedSessionStore(repo).entries()  # and the worker still shared it
 
 
+def test_auto_share_optin_persists_in_base_repo_state(tmp_path, monkeypatch):
+    # The opt-in must survive across aGiT runs: it has to live in the BASE repo
+    # state, not the session worktree (which is removed on exit).
+    from agit.config import AgitState
+
+    runner, repo = _runner_with_store(tmp_path, monkeypatch, _StubBackend())
+    (tmp_path / "worktree").mkdir()
+    runner.state = AgitState(tmp_path / "worktree")  # session state lives in the (ephemeral) worktree
+
+    runner._set_session_auto_share("sid-123", True)
+
+    assert AgitState(repo.repo).auto_share_enabled("sid-123") is True  # base repo → persists
+    assert AgitState(tmp_path / "worktree").auto_share_enabled("sid-123") is False  # not in the worktree
+    assert runner._session_auto_shared("sid-123") is True
+
+
+def test_my_shared_session_ids_lists_only_mine(tmp_path, monkeypatch):
+    runner, repo = _runner_with_store(tmp_path, monkeypatch, _StubBackend())  # github_login = "tester"
+    store = SharedSessionStore(repo)
+    store.publish(
+        github_id="tester",
+        name="s1",
+        transcript="t",
+        manifest={"github_id": "tester", "name": "s1", "session_id": "sid-mine", "updated": 1},
+    )
+    store.publish(
+        github_id="someoneelse",
+        name="s2",
+        transcript="t",
+        manifest={"github_id": "someoneelse", "name": "s2", "session_id": "sid-theirs", "updated": 1},
+    )
+    assert runner._my_shared_session_ids() == {"sid-mine"}
+
+
+def test_session_menu_marks_shared_sessions(tmp_path, monkeypatch):
+    runner, repo = _runner_with_store(tmp_path, monkeypatch, _StubBackend())
+    SharedSessionStore(repo).publish(
+        github_id="tester",
+        name="s1",
+        transcript="t",
+        manifest={"github_id": "tester", "name": "s1", "session_id": "sid-123", "updated": 1},
+    )
+    # Put the active session (backend_session_id == sid-123) in the list the menu
+    # iterates, and stub the menu's heavier collaborators.
+    runner.sessions = [runner.active]
+    runner.merge_ctx = None
+    runner._session_name = lambda i: "session-1"
+    runner._session_status = lambda i: "running"
+    runner._active_has_pending = lambda: False
+    runner._dormant_worktrees = lambda names: []
+    runner._resumable_sessions = lambda: []
+    captured = {}
+    runner._select_popup = lambda title, options: captured.update(options=options) or None
+
+    runner._session_menu()
+
+    assert any("⇪ shared" in opt for opt in captured["options"])  # the active session (sid-123) is marked
+
+
 def test_runner_auto_share_skipped_when_not_opted_in(tmp_path, monkeypatch):
     runner, repo = _runner_with_store(tmp_path, monkeypatch, _StubBackend())
     runner._maybe_auto_share_active()  # session not opted in

@@ -108,15 +108,21 @@ See [Repository dashboard](#repository-dashboard) below for the full breakdown.
 
 You can share a full agent conversation with collaborators through the repo's git remote, and resume each other's sessions. It's **opt-in** — nothing is ever uploaded until you explicitly share a session. (Claude only for now: it has a portable transcript; OpenCode does not.)
 
-From the `session` menu (`Ctrl-G` → `session`):
+From the `session` menu (`Ctrl-G` → `session`) — where each session is also marked **⇪ shared** or **⇪ auto-share** if you've shared it:
 
-- **Share this session** — publishes the current conversation to the remote. The first time, aGiT asks you to confirm; a transcript can contain file contents, command output, and secrets, so **review what's in the session before sharing** (aGiT also applies best-effort secret masking, but that is *not* a guarantee — don't rely on it). You can choose to keep the shared copy **updated automatically** as you add turns, or re-share manually.
+- **Share this session** — publishes the current conversation to the remote. The first time, aGiT asks you to confirm; a transcript can contain file contents, command output, and secrets, so **review what's in the session before sharing** (aGiT also applies best-effort secret masking, but that is *not* a guarantee — don't rely on it). You can choose to keep the shared copy **updated automatically**, or re-share manually.
 - **Resume a shared session** — lists teammates' sessions as `<github-id>/<name>` and continues one in a fresh session worktree.
 - **Manage shared sessions** — see what *you've* shared (with "up to date" vs "local has newer turns"), push the latest turns, toggle auto-update, or unshare.
 
 Shared sessions also appear in the [dashboard](#dashboard) under **shared sessions**.
 
-How it's stored: sessions live on a dedicated, history-free git ref `refs/agit/shared-sessions` — a single rewritten commit that keeps only the latest copy (so it never bloats history) and is pushed to `origin`. Because it's a custom ref (not a branch or tag), **it won't appear on GitHub's web UI**; confirm a share with `git ls-remote origin 'refs/agit/*'` or via the menus above. Sessions are scoped by the repo's root commit, so only *this* repo's sessions are ever stored or listed.
+### How it works
+
+- **Only the latest copy is kept — git history never grows.** Shared sessions live on a dedicated custom ref `refs/agit/shared-sessions`, stored as a *single, parent-less commit*. Every update (manual or auto) **rewrites** that ref to a brand-new parent-less commit holding only the current snapshot; the previous one becomes unreferenced and is garbage-collected. So no matter how many times a session is updated, the ref is always one commit deep — it never accumulates history or bloats the repo. (This is the git trick that makes "keep only the newest version of a file" possible.)
+- **Resuming makes your own copy (a clone).** Picking a teammate's session downloads its transcript into your local Claude store and continues it in a fresh worktree under the same conversation. From then on it's *independent* — your new turns are yours and don't touch the original; if you later share your continued version it's published under *your* `<github-id>/<name>`, never overwriting theirs.
+- **Auto-update rides your commits.** When a session is set to auto-update, aGiT re-pushes the latest turns **at commit time** (in the background, only when the content changed) rather than on a busy timer — so it won't hammer the remote. The opt-in is remembered across aGiT runs.
+- **No manual git needed.** The Resume menu and the dashboard fetch the shared ref for you. (A plain `git clone`/`git fetch` does *not* pull custom refs, so teammates rely on those menus; to inspect by hand: `git ls-remote origin 'refs/agit/*'`.) Because it's a custom ref, not a branch or tag, **it won't appear on GitHub's web UI**.
+- **Scoped and bounded.** Sessions are namespaced by the repo's root commit, so only *this* repo's sessions are ever uploaded or listed; each contributor keeps their most-recent few, with older ones auto-pruned.
 
 
 ## How It Works
