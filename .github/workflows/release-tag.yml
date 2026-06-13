@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   release:
@@ -61,13 +62,43 @@ jobs:
           ))
           PY
 
-      - name: Commit and push to main
+      - name: Sync version files to main via PR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          BRANCH="release/sync-v${VERSION}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
           git add pyproject.toml agit/__init__.py
-          git commit -m "Release v${{ steps.version.outputs.version }}"
-          git push origin main
+          # The version files may already match the tag (e.g. the tag was placed
+          # on an already-bumped commit). Only open a PR when there's a change —
+          # main cannot be pushed to directly, so the sync goes through a PR.
+          if git diff --cached --quiet; then
+            echo "Version files already at v${VERSION}; nothing to sync."
+          else
+            git commit -m "Release v${VERSION}"
+            git push origin "$BRANCH"
+            gh pr create --base main --head "$BRANCH" \
+              --title "Release v${VERSION}" \
+              --body "Sync version files to tag v${VERSION}."
+            for attempt in 1 2 3 4 5 6; do
+              if gh pr merge "$BRANCH" --squash --delete-branch; then
+                merged=1
+                break
+              fi
+              echo "merge attempt ${attempt} failed; retrying in 5s..."
+              sleep 5
+            done
+            if [ "${merged:-0}" != 1 ]; then
+              echo "::error::could not merge the version-sync PR for v${VERSION}"
+              exit 1
+            fi
+          fi
+          git fetch origin main
+          git switch main
+          git reset --hard origin/main
 
       - name: Build
         run: uv build

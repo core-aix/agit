@@ -7,10 +7,13 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    # Don't react to the bump commit itself. (Merges made with GITHUB_TOKEN do
+    # not trigger workflows, so this is also belt-and-suspenders against a loop.)
     if: github.event.head_commit.author.name != 'github-actions[bot]'
 
     steps:
@@ -31,46 +34,62 @@ jobs:
       - name: Bump patch version
         id: bump
         run: |
-          python3 <<'PY'
+          python3 <<'PY' >> "$GITHUB_OUTPUT"
           import re, pathlib
 
           pp = pathlib.Path("pyproject.toml")
           m = re.search(r'^version = "(\d+)\.(\d+)\.(\d+)"', pp.read_text(), re.M)
           if not m:
               raise SystemExit("could not find version in pyproject.toml")
-          major, minor, patch = int(m.group(1)), int(m.group(2)), int(m.group(3))
-          patch += 1
-          new_version = f"{major}.{minor}.{patch}"
+          major, minor, patch = (int(g) for g in m.groups())
+          new_version = f"{major}.{minor}.{patch + 1}"
 
           pp.write_text(re.sub(
-              r'^version = "[^"]+"',
-              f'version = "{new_version}"',
-              pp.read_text(),
-              count=1,
-              flags=re.M
+              r'^version = "[^"]+"', f'version = "{new_version}"',
+              pp.read_text(), count=1, flags=re.M,
           ))
-
           ip = pathlib.Path("agit/__init__.py")
           ip.write_text(re.sub(
-              r'^__version__ = "[^"]+"',
-              f'__version__ = "{new_version}"',
-              ip.read_text(),
-              count=1,
-              flags=re.M
+              r'^__version__ = "[^"]+"', f'__version__ = "{new_version}"',
+              ip.read_text(), count=1, flags=re.M,
           ))
-
           print(f"version={new_version}")
           PY
 
-      - name: Commit and push
+      - name: Open and merge the version-bump PR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION=$(python3 -c "import re; print(re.search(r'version = \"([^\"]+)\"', open('pyproject.toml').read()).group(1))")
+          VERSION="${{ steps.bump.outputs.version }}"
+          BRANCH="release/v${VERSION}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
           git add pyproject.toml agit/__init__.py
           git commit -m "Release v${VERSION}"
-          git tag -a "v${VERSION}" -m "Release v${VERSION}"
-          git push origin main --tags
+          git push origin "$BRANCH"
+          gh pr create --base main --head "$BRANCH" \
+            --title "Release v${VERSION}" \
+            --body "Automated patch version bump to v${VERSION}."
+          # main requires changes via a PR (0 approvals, no required checks), so
+          # the bump PR can be merged straight away. Retry while GitHub is still
+          # computing the PR's mergeable state.
+          for attempt in 1 2 3 4 5 6; do
+            if gh pr merge "$BRANCH" --squash --delete-branch; then
+              merged=1
+              break
+            fi
+            echo "merge attempt ${attempt} failed; retrying in 5s..."
+            sleep 5
+          done
+          if [ "${merged:-0}" != 1 ]; then
+            echo "::error::could not merge the release PR for v${VERSION}"
+            exit 1
+          fi
+          # Build/publish from the merged state.
+          git fetch origin main
+          git switch main
+          git reset --hard origin/main
 
       - name: Build
         run: uv build
@@ -84,8 +103,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION=$(python3 -c "import re; print(re.search(r'version = \"([^\"]+)\"', open('pyproject.toml').read()).group(1))")
+          VERSION="${{ steps.bump.outputs.version }}"
           gh release create "v${VERSION}" \
             --title "v${VERSION}" \
+            --target main \
             --generate-notes \
             dist/*
