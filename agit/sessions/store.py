@@ -25,7 +25,10 @@ from agit.sessions.identity import slug
 
 REF = "refs/agit/shared-sessions"
 DEFAULT_KEEP = 5  # most-recent shared sessions retained per contributor
-_FETCH_TTL = 60.0  # throttle remote fetches when the dashboard polls
+# Throttle remote fetches when the dashboard polls. Your OWN shared sessions land
+# in the local ref directly (no fetch needed); this only pulls collaborators'
+# newly-shared sessions, so a long interval is fine and keeps load off the remote.
+_FETCH_TTL = 300.0
 _fetch_at: dict[str, float] = {}
 
 

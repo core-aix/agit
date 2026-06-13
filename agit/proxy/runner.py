@@ -505,9 +505,8 @@ class ProxyRunner:
         self._base_poll_at = 0.0  # throttle for the base-HEAD poll
         self._warned_backend_session = False  # one-shot "use agit to start sessions" notice
         # Auto-share (issue #55): for sessions the user opted to keep shared, the
-        # last push time and last-pushed content hash per backend session id, plus
-        # the in-flight background push thread (only one at a time).
-        self._auto_share_at: dict[str, float] = {}
+        # last-pushed content hash per backend session id, plus the in-flight
+        # background push thread (only one at a time). Triggered per commit.
         self._auto_share_hash: dict[str, str] = {}
         self._auto_share_thread: threading.Thread | None = None
         # Lifecycle flags read before their first conditional assignment. These
@@ -698,7 +697,6 @@ class ProxyRunner:
                 "_precompact_result": None,
                 "_base_poll_at": 0.0,
                 "_warned_backend_session": False,
-                "_auto_share_at": {},
                 "_auto_share_hash": {},
                 "_auto_share_thread": None,
                 "_user_declined": [],
@@ -2730,14 +2728,13 @@ class ProxyRunner:
 
     # --- auto-share: keep an opted-in session's shared copy current ---------
 
-    AUTO_SHARE_MIN_INTERVAL = 45.0  # seconds between background auto-share pushes
-
     def _maybe_auto_share_active(self) -> None:
+        # Called when a commit lands (see _announce_agent_commit), so the GitHub
+        # round-trip happens at the commit cadence — not on a frequent timer.
         # Reactor-thread part: only cheap checks, then hand ALL the heavy work
-        # (read transcript, redact, hash, push) to a background thread. Nothing
-        # here may block the UI loop. The throttle is stamped BEFORE the work so a
-        # quiet session can't trigger the (potentially large) read+redact every
-        # reactor tick — the original cause of the "terminal becomes slow" bug.
+        # (read transcript, redact, hash, push) to a background thread, so the UI
+        # loop never blocks. The in-flight guard + the worker's content-hash gate
+        # keep it from pushing redundantly on rapid commits.
         backend = self.backend
         if not getattr(backend, "supports_session_sharing", False):
             return
@@ -2746,10 +2743,6 @@ class ProxyRunner:
             return
         if self._auto_share_thread is not None and self._auto_share_thread.is_alive():
             return
-        now = time.monotonic()
-        if now - self._auto_share_at.get(sid, 0.0) < self.AUTO_SHARE_MIN_INTERVAL:
-            return
-        self._auto_share_at[sid] = now  # throttle regardless of whether anything changed
         # Snapshot everything the worker needs on the main thread (these touch the
         # active session / config, which can change underneath a thread).
         ctx = {
@@ -3466,7 +3459,6 @@ class ProxyRunner:
             self._warn_if_cwd_drifted()
             self._maybe_check_for_update()
             self._maybe_apply_pending_update()
-            self._maybe_auto_share_active()  # keep an opted-in shared session current (#55)
         self._service_session_notices()  # expire/refresh per-session status lines
         if self._base_advanced:
             self._base_advanced = False
@@ -4333,6 +4325,10 @@ class ProxyRunner:
         self._commit_merged_pending = False
         self._set_session_notice(self._session_label(), self._agent_commit_message())
         self._commit_summarized = False
+        # Sync an opted-in shared session to GitHub HERE — piggy-backing on the
+        # commit so the network round-trip happens at the commit cadence, not on a
+        # frequent timer (issue #55, avoid hammering the remote).
+        self._maybe_auto_share_active()
 
     # ------------------------------------------------------------------
     # Background commit summarization (#8)

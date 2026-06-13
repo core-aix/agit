@@ -334,23 +334,36 @@ def test_runner_resume_shared_imports_and_resumes(tmp_path, monkeypatch):
     assert resumed == [("bob-cool-fix", "bob-sid")]  # resumed under <id>-<name>
 
 
-def test_runner_auto_share_publishes_in_background(tmp_path, monkeypatch):
-    backend = _StubBackend(transcript='{"t":"a new turn"}')
+def test_runner_auto_share_pushes_on_change_only(tmp_path, monkeypatch):
+    # Auto-share is now triggered per commit (not a timer). It pushes the first
+    # time, re-pushes when the transcript changes, and the worker's content-hash
+    # gate skips a push when nothing changed — so it never hammers the remote.
+    backend = _StubBackend(transcript="turn one")
     runner, repo = _runner_with_store(tmp_path, monkeypatch, backend)
     runner.state.set_auto_share("sid-123", True)
 
-    runner._maybe_auto_share_active()
-    if runner._auto_share_thread is not None:
-        runner._auto_share_thread.join(timeout=10)
+    def fire_commit():
+        runner._auto_share_thread = None
+        runner._maybe_auto_share_active()
+        if runner._auto_share_thread is not None:
+            runner._auto_share_thread.join(timeout=10)
 
-    entries = SharedSessionStore(repo).entries()
-    assert len(entries) == 1 and entries[0].manifest["session_id"] == "sid-123"
-    # The throttle timestamp is stamped on every check, so an immediate re-check is
-    # debounced and does NOT re-do the (potentially large) read/redact or re-spawn —
-    # this is the fix for the "terminal becomes slow" bug.
-    runner._auto_share_thread = None
-    runner._maybe_auto_share_active()
-    assert runner._auto_share_thread is None
+    def shared_transcript():
+        store = SharedSessionStore(repo)
+        return store.read_transcript(store.entries()[0])
+
+    fire_commit()
+    assert shared_transcript() == "turn one"  # first commit shares it
+
+    backend._transcript = "turn one\nturn two"  # new turn arrived
+    fire_commit()
+    assert shared_transcript() == "turn one\nturn two"  # changed ⇒ re-pushed
+
+    # Unchanged content: the worker's hash gate means no new push (a no-op).
+    last_updated = SharedSessionStore(repo).entries()[0].manifest["updated"]
+    monkeypatch.setattr("time.time", lambda: 10**10)  # would change `updated` IF it pushed
+    fire_commit()
+    assert SharedSessionStore(repo).entries()[0].manifest["updated"] == last_updated
 
 
 def test_auto_share_main_thread_does_no_heavy_work(tmp_path, monkeypatch):
