@@ -167,6 +167,52 @@ def test_squash_parses_constituents_and_counts_their_tokens(tmp_path):
     assert dash.by_backend["claude"]["commits"] == 1
 
 
+def test_same_commit_in_multiple_squashes_counts_tokens_once(tmp_path):
+    # An original commit can be rolled into more than one squash (a branch is
+    # squash-merged, then that result squashed again). Its metadata block — and so
+    # its tokens — is copied into every squash; the dashboard must count it once.
+    repo = GitRepo.init(tmp_path)
+
+    def block(started_at: str, output: int) -> str:
+        return (
+            "# aGiT Metadata\ncommit_type: agent\nbackend: claude\nmodel: claude-opus-4-8\n"
+            f"agent_started_at: {started_at}\n"
+            f"tokens_since_last_commit_output: {output}\ntokens_since_last_commit_input: 1\n"
+        )
+
+    shared = block("2026-06-01T00:00:00Z", 1000)
+
+    # Two genuine squashes (each concatenates >1 metadata block) that both contain
+    # the shared turn — the byte-identical block is what marks it as one commit.
+    _write_lines(repo, "first.txt", 100)
+    repo.commit(
+        "First squash (#1)\n\n* shared agent work\n\n"
+        + shared
+        + "\n* only in first\n\n"
+        + block("2026-06-02T00:00:00Z", 20)
+    )
+    _write_lines(repo, "second.txt", 200)
+    repo.commit(
+        "Second squash (#2)\n\n* shared agent work\n\n"
+        + shared
+        + "\n* only in second\n\n"
+        + block("2026-06-03T00:00:00Z", 7)
+    )
+
+    dash = build_dashboard(repo)
+    first = next(s for s in dash.stats if s.subject.startswith("First"))
+    second = next(s for s in dash.stats if s.subject.startswith("Second"))
+
+    # The older squash keeps the shared turn; the newer one drops the repeat and is
+    # left with only its own distinct turn.
+    assert first.tokens["output"] == 1020
+    assert [c.tokens.get("output") for c in second.constituents] == [7]
+    assert second.tokens["output"] == 7
+    # Counted once across the repo (1000 + 20 + 7), not 2027, in both totals and rollup.
+    assert dash.token_totals["output"] == 1027
+    assert dash.by_model["claude-opus-4-8"]["output_tokens"] == 1027
+
+
 def test_dashboard_sums_tokens_and_efficiency(tmp_path):
     dash = build_dashboard(_demo_repo(tmp_path))
 

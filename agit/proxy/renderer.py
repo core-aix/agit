@@ -614,13 +614,28 @@ class ScreenRenderer:
         width = min(max(52, cols // 2), cols - 4)
         row = 2
         col = max(2, (cols - width) // 2)
-        lines = [
+        header = [
             "aGiT commands",
             f"> {input_text}",
             "Up/Down selects. Tab completes. Enter runs. Esc/Ctrl-C cancels.",
             "",
         ]
-        lines.extend(input_matches[:8])
+        # Size the match window to whatever fits below the header: append_box caps
+        # the body at rows-row-2, so emitting more than that would push the last
+        # commands off the bottom of the box (the bug this replaces, where a fixed
+        # 8-row slice hid "update"/"exit"). Count the header's *wrapped* height the
+        # same way append_box does, since the instruction line wraps on a narrow box.
+        inner = max(width - 2, 1)
+        header_height = sum(len(textwrap.wrap(line, width=inner)) or 1 for line in header)
+        visible = max(rows - row - 2 - header_height, 1)
+        matches = input_matches
+        if len(matches) > visible:
+            # Scroll a window so the selected row is always on screen — otherwise a
+            # selection past the window is both invisible and unhighlighted.
+            idx = matches.index(input_selected) if input_selected in matches else 0
+            start = min(max(idx - visible + 1, 0), len(matches) - visible)
+            matches = matches[start : start + visible]
+        lines = header + list(matches)
         self.append_box(parts, row, col, width, lines, highlight=input_selected, rows=rows)
 
     def append_message_popup(

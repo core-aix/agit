@@ -386,7 +386,31 @@ def collect_commit_stats(repo: GitRepo, ref: str = "HEAD") -> list[CommitStat]:
             stat.kind = "covered"
 
     stats.reverse()  # oldest first
+    _dedupe_squash_constituents(stats)
     return stats
+
+
+def _dedupe_squash_constituents(stats: list[CommitStat]) -> None:
+    """Count each original commit's tokens once, even when it lands in several squashes.
+
+    Tokens are recorded per original commit, inside that commit's metadata block.
+    Squashing copies the block verbatim, so if the same commit is rolled into more
+    than one squash (e.g. a branch is squash-merged, then that result is squashed
+    again), its block — and its tokens — appears in every such squash. Walking
+    oldest first, the first squash to contain a commit keeps it; later squashes drop
+    the repeat and have their token totals recomputed from the constituents that
+    remain. Repeats *within* a single squash are left intact: two byte-identical
+    blocks squashed together are genuine back-to-back turns, not one commit seen
+    twice, so a squash's own constituents are marked seen only after it is filtered."""
+    seen: set[str] = set()
+    for stat in stats:
+        if not stat.constituents:
+            continue
+        kept = [p for p in stat.constituents if not (p.metadata_block and p.metadata_block in seen)]
+        seen.update(p.metadata_block for p in stat.constituents if p.metadata_block)
+        if len(kept) != len(stat.constituents):
+            stat.constituents = kept
+            stat.tokens = _sum_tokens(kept)
 
 
 def _drop_inherited_metadata(repo: GitRepo, ref: str, stats: list[CommitStat]) -> list[CommitStat]:
@@ -569,6 +593,10 @@ def _constituent(segment_lines: list[str]) -> CommitStat:
         backend=metadata.get("backend"),
         model=metadata.get("model"),
         tokens=_parse_tokens(metadata),
+        # The metadata block identifies the original commit this constituent was
+        # parsed from: if the same commit is captured in more than one squash, the
+        # block is byte-identical, which lets us count its tokens only once.
+        metadata_block=_metadata_block(text),
         message=text,
     )
 
@@ -586,10 +614,7 @@ def _build_squash(
     summed tokens of its constituents, classified by what they contain (any AI
     constituent ⇒ aGiT-tracked AI). Its backend/model is the dominant agent
     constituent's, for line attribution and display."""
-    tokens: dict[str, int] = defaultdict(int)
-    for part in constituents:
-        for key, value in part.tokens.items():
-            tokens[key] += value
+    tokens = _sum_tokens(constituents)
     ai_parts = [part for part in constituents if part.kind in ("agent", "covered", "agent-merge")]
     if ai_parts:
         kind = "agent"
@@ -611,6 +636,14 @@ def _build_squash(
         message=body.strip(),
         constituents=constituents,
     )
+
+
+def _sum_tokens(parts: list[CommitStat]) -> dict[str, int]:
+    tokens: dict[str, int] = defaultdict(int)
+    for part in parts:
+        for key, value in part.tokens.items():
+            tokens[key] += value
+    return dict(tokens)
 
 
 def _metadata_block(body: str) -> str:

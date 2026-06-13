@@ -94,38 +94,59 @@ _KITTY_CTRL_KEY_RE = re.compile(rb"\x1b\[(\d+);5u")
 # Kitty keyboard protocol encoding for Escape key: CSI 27 u or CSI 27 ; 1 u
 # We decode this back to plain \x1b so Esc handling works in kitty mode.
 _KITTY_ESC_KEY_RE = re.compile(rb"\x1b\[27(?:;1)?u")
+# xterm modifyOtherKeys (formatOtherKeys=0) encoding: CSI 27 ; <modifier> ; <code> ~
+# This is the OTHER way a terminal can report modified keys (the kitty form above
+# is CSI <code> ; <modifier> u). iTerm2 answers the backend's modifyOtherKeys
+# negotiation with THIS ~-terminated form, so e.g. Ctrl-C arrives as \x1b[27;5;99~
+# and Ctrl-G as \x1b[27;5;103~. Without decoding it, those are forwarded to the
+# backend instead of opening aGiT's exit/menu. modifier 5 = Ctrl (1 + 4).
+_MODIFY_OTHER_KEYS_RE = re.compile(rb"\x1b\[27;(\d+);(\d+)~")
 # A bracketed paste (CSI 200~ ... CSI 201~, possibly split across reads, hence
 # the `|$`): newlines inside it are pasted CONTENT, not prompt submissions.
 _BRACKETED_PASTE_RE = re.compile(rb"\x1b\[200~.*?(?:\x1b\[201~|$)", re.S)
 
 
 def _decode_kitty_ctrl_keys(data: bytes) -> bytes:
-    """Decode kitty keyboard protocol control keys and Escape to plain bytes.
+    """Decode enhanced-keyboard-protocol control keys and Escape to plain bytes.
 
-    When the terminal is in kitty keyboard protocol mode:
-    - Ctrl-A through Ctrl-Z are sent as escape sequences like \\x1b[97;5u (Ctrl-A)
-      instead of plain bytes like \\x01.
-    - Escape is sent as \\x1b[27u instead of plain \\x1b.
+    When the backend negotiates an enhanced keyboard protocol, the host terminal
+    starts reporting modified keys as escape sequences instead of plain bytes. Two
+    encodings exist, and which one a terminal uses depends on the terminal:
+    - kitty keyboard protocol:  Ctrl-A → \\x1b[97;5u,  Escape → \\x1b[27u
+    - xterm modifyOtherKeys:    Ctrl-A → \\x1b[27;5;97~, Escape → \\x1b[27;1;27~
+      (iTerm2 answers with this ~-terminated form).
 
-    This function converts them back to plain bytes so the menu key matching
-    and Esc handling work correctly.
+    This function converts both back to plain bytes so the menu key matching and
+    Esc handling work regardless of which form the host terminal uses.
 
-    Only decodes Ctrl keys (modifier 5 = Ctrl+base) and Escape. Other keys are left unchanged.
+    Only decodes pure-Ctrl keys (modifier 5 = Ctrl) and Escape; every other
+    modified key is left untouched so it still reaches the backend encoded.
     """
-    # First decode Escape key
+    # First decode Escape key (both encodings).
     data = _KITTY_ESC_KEY_RE.sub(b"\x1b", data)
 
-    # Then decode control keys
-    def replace_kitty_ctrl(match: re.Match) -> bytes:
-        keycode = int(match.group(1))
-        # keycode 97-122 = lowercase a-z
-        # Ctrl-A = 0x01, Ctrl-B = 0x02, ..., Ctrl-Z = 0x1a
+    def _ctrl_letter_byte(keycode: int) -> bytes | None:
+        # keycode 97-122 = lowercase a-z → Ctrl-A=0x01 .. Ctrl-Z=0x1a.
         if 97 <= keycode <= 122:
             return bytes([keycode - 96])
-        # Not a letter, return unchanged
+        return None
+
+    # kitty form: CSI <code> ; 5 u
+    def replace_kitty_ctrl(match: re.Match) -> bytes:
+        return _ctrl_letter_byte(int(match.group(1))) or match.group(0)
+
+    data = _KITTY_CTRL_KEY_RE.sub(replace_kitty_ctrl, data)
+
+    # modifyOtherKeys form: CSI 27 ; <modifier> ; <code> ~
+    def replace_modify_other_keys(match: re.Match) -> bytes:
+        modifier, keycode = int(match.group(1)), int(match.group(2))
+        if keycode == 27 and modifier == 1:  # bare Escape
+            return b"\x1b"
+        if modifier == 5:  # pure Ctrl
+            return _ctrl_letter_byte(keycode) or match.group(0)
         return match.group(0)
 
-    return _KITTY_CTRL_KEY_RE.sub(replace_kitty_ctrl, data)
+    return _MODIFY_OTHER_KEYS_RE.sub(replace_modify_other_keys, data)
 
 
 def _short_session(session_id: str | None) -> str:
@@ -493,6 +514,11 @@ class ProxyRunner:
         self._relaunch_times: list[float] = []
         self._exiting = False
         self._finalized_on_exit = False
+        # Set once the interactive exit flow has committed to quitting (worktree
+        # removed). The reactor loop checks this after running a menu command so an
+        # "exit"/"quit" command breaks the loop instead of falling through to the
+        # timers phase and running git in the deleted worktree.
+        self._exit_requested = False
         # The user's intentionally-unstaged files belong to the base working tree
         # (their repo), not the ephemeral session worktree; cache the list so the
         # status line can show its count without a per-frame disk read.
@@ -682,6 +708,7 @@ class ProxyRunner:
                 "_relaunch_times": [],
                 "_exiting": False,
                 "_finalized_on_exit": False,
+                "_exit_requested": False,
                 # Self-update fields (production sets these in __init__).
                 "_updater": None,
                 "_update_status": None,
@@ -3007,6 +3034,13 @@ class ProxyRunner:
                 self.active.process.write(b"".join(forwarded))
         if command:
             self._run_command(command)
+            # An "exit"/"quit" command runs the same finalize-and-teardown flow as
+            # Ctrl-C, which removes the worktree. It must break the loop here just
+            # like the Ctrl-C path above — otherwise this iteration falls through to
+            # the timers phase and _maybe_agent_commit runs git in the deleted
+            # worktree (FileNotFoundError on exit).
+            if self._exit_requested:
+                return "break"
         return None
 
     def _reactor_timers_phase(self) -> None:
@@ -3531,7 +3565,9 @@ class ProxyRunner:
     def _run_command(self, command: str) -> None:
         # aGiT commands in proxy mode are triggered via Ctrl-G and are plain
         # names; ":" is not a command trigger here (it is forwarded to the
-        # backend like any other input).
+        # backend like any other input). On a confirmed "exit"/"quit" this runs
+        # the teardown flow (which sets self._exiting); the caller checks that
+        # flag to break the reactor loop.
         name, _, arg = command.partition(" ")
         if name in {"exit", "quit"}:
             if not self._run_exit_flow():
@@ -4201,6 +4237,7 @@ class ProxyRunner:
             # A second Ctrl-C, inside one of the exit-confirmation popups: take
             # it as an emphatic yes — skip the questions, keep the finalize.
             self._popup_exit_force = True
+            self._exit_requested = True
             return True
         self._popup_exit_pending = True
         self._popup_exit_force = False
@@ -4212,6 +4249,7 @@ class ProxyRunner:
                     return False
             self._finalize_pending_work()
             self._exit_child()
+            self._exit_requested = True
             return True
         finally:
             self._popup_exit_pending = False
