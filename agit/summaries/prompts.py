@@ -7,7 +7,7 @@ COMMIT_SUMMARY_SYSTEM = """You are a technical summarizer for a coding session. 
 
 Be concise but preserve important context. Focus on the "why" and "how" rather than just listing what changed.
 
-Output only the summary text, no additional commentary or formatting, no heading or opening sentence saying that this is a summary either."""
+Output only the summary text, no additional commentary or formatting, no heading or opening sentence saying that this is a summary either. The first sentence should be a topic sentence summarizing everything, before explaining the details afterwards."""
 
 SESSION_UPDATE_SYSTEM = """You are maintaining a running session summary for a coding session. Given the current session summary and new changes, produce an updated summary that:
 
@@ -18,7 +18,7 @@ SESSION_UPDATE_SYSTEM = """You are maintaining a running session summary for a c
 
 If this is the first summary (no current summary exists), create an initial summary from the new changes.
 
-Output only the updated summary text, no additional commentary or formatting, no heading or opening sentence saying that this is a summary either."""
+Output only the updated summary text, no additional commentary or formatting, no heading or opening sentence saying that this is a summary either. The first sentence should be a topic sentence summarizing everything, before explaining the details afterwards."""
 
 PRE_COMPACTION_SYSTEM = """You are capturing the full context of a coding session before it is compacted. This summary will be the only record of the session's history, so it must preserve:
 
@@ -32,7 +32,7 @@ PRE_COMPACTION_SYSTEM = """You are capturing the full context of a coding sessio
 
 Be comprehensive but organized. This summary will be used to restore context if the session history is lost.
 
-Output only the summary text, no additional commentary or formatting, no heading or opening sentence saying that this is a summary either."""
+Output only the summary text, no additional commentary or formatting, no heading or opening sentence saying that this is a summary either. The first sentence should be a topic sentence summarizing everything, before explaining the details afterwards."""
 
 MODEL_SELECTION_SYSTEM = """You are helping select the most cost-effective model for summarization tasks. Given a list of available models, identify which one is likely the cheapest to use for text summarization while still being capable of producing quality summaries.
 
