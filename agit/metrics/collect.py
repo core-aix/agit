@@ -89,6 +89,10 @@ class CommitStat:
     user_prompts: list[str] = field(default_factory=list)  # trace ## User entries
     metadata_block: str = ""  # raw `# aGiT Metadata` text, for duplicate detection
     message: str = ""  # the full commit message (shown when a log entry is opened)
+    # For a squash / PR-merge that concatenated several commits' metadata blocks:
+    # the original commits, each parsed from its block, so their tokens and
+    # model/backend usage are counted and the squash is expandable in the UI.
+    constituents: list[CommitStat] = field(default_factory=list)
 
     @property
     def short(self) -> str:
@@ -188,6 +192,22 @@ class Dashboard:
 
         groups: dict[str, dict[str, int]] = {}
         for stat in self.stats:
+            # A squash counts each original commit it contains under that
+            # original's own model/backend (so the usage is split correctly),
+            # while its single combined diff is attributed to the dominant one.
+            if stat.constituents:
+                ai_parts = [p for p in stat.constituents if p.kind in ("agent", "covered", "agent-merge")]
+                for part in ai_parts:
+                    bucket = groups.setdefault(label_fn(part) or "unknown", defaultdict(int))
+                    bucket["commits"] += 1
+                    bucket["output_tokens"] += part.tokens.get("output", 0)
+                    bucket["input_tokens"] += part.tokens.get("input", 0)
+                dominant = max(ai_parts, key=lambda p: p.tokens.get("output", 0), default=None)
+                if dominant is not None:
+                    bucket = groups.setdefault(label_fn(dominant) or "unknown", defaultdict(int))
+                    bucket["insertions"] += stat.insertions
+                    bucket["deletions"] += stat.deletions
+                continue
             if stat.kind != "agent":
                 continue
             label = label_fn(by_sha[stat.sha]) or "unknown"
@@ -436,20 +456,12 @@ def _parse_commit(sha: str, author: str, email: str, committed_at: str, body: st
     timestamp = int(committed_at) if committed_at.isdigit() else 0
     # A clean aGiT turn carries exactly one metadata block. More than one means
     # the message is an aggregate — a squash or PR merge that concatenated
-    # several commits' blocks — whose first `commit_type` would otherwise credit
-    # the WHOLE squashed diff to one person (e.g. a 1,800-line squash counted as
-    # "human" because its first block happened to be a user commit). Its
-    # provenance cannot be cleanly attributed, so treat it as non-tracked.
+    # several commits' blocks (possibly across several rounds of squashing, which
+    # git flattens). Parse each original commit so its tokens and model/backend
+    # usage are still counted, and so the squash can be expanded in the UI.
     if body.count(METADATA_HEADER) > 1:
-        return CommitStat(
-            sha=sha,
-            author=author,
-            email=email,
-            subject=subject,
-            kind="untracked",
-            timestamp=timestamp,
-            message=body.strip(),
-        )
+        constituents = _parse_constituents(body)
+        return _build_squash(sha, author, email, subject, timestamp, body, constituents)
     metadata = _parse_metadata(body)
     commit_type = metadata.get("commit_type")
     if commit_type == "agent":
@@ -469,12 +481,6 @@ def _parse_commit(sha: str, author: str, email: str, committed_at: str, body: st
         kind = "agit-ops"
     else:
         kind = "untracked"
-    tokens: dict[str, int] = {}
-    for key, value in metadata.items():
-        if key.startswith(_TOKEN_KEY_PREFIX) and value.isdigit():
-            tokens[key.removeprefix(_TOKEN_KEY_PREFIX)] = int(value)
-        elif key in ("summary_tokens_input", "summary_tokens_output") and value.isdigit():
-            tokens["summary_" + key.removeprefix("summary_tokens_")] = int(value)
     return CommitStat(
         sha=sha,
         author=author,
@@ -486,12 +492,124 @@ def _parse_commit(sha: str, author: str, email: str, committed_at: str, body: st
         ended_at=metadata.get("agent_ended_at", ""),
         backend=metadata.get("backend"),
         model=metadata.get("model"),
-        tokens=tokens,
+        tokens=_parse_tokens(metadata),
         covered_commits=(metadata.get("covered_commits") or "").split(),
         prompt=_extract_prompt(body, subject, kind),
         user_prompts=_extract_user_prompts(body),
         metadata_block=_metadata_block(body),
         message=body.strip(),
+    )
+
+
+def _parse_tokens(metadata: dict[str, str]) -> dict[str, int]:
+    tokens: dict[str, int] = {}
+    for key, value in metadata.items():
+        if key.startswith(_TOKEN_KEY_PREFIX) and value.isdigit():
+            tokens[key.removeprefix(_TOKEN_KEY_PREFIX)] = int(value)
+        elif key in ("summary_tokens_input", "summary_tokens_output") and value.isdigit():
+            tokens["summary_" + key.removeprefix("summary_tokens_")] = int(value)
+    return tokens
+
+
+def _kind_from_metadata(metadata: dict[str, str]) -> str:
+    commit_type = metadata.get("commit_type")
+    if commit_type in ("agent", "agent-merge", "user"):
+        return commit_type
+    return "agent"  # a metadata block without a commit_type is agent work
+
+
+def _is_metadata_kv(line: str) -> bool:
+    """A `key: value` metadata line (key has no spaces and isn't a `#` header)."""
+    if line.startswith("#") or ":" not in line:
+        return False
+    key = line.split(":", 1)[0].strip()
+    return bool(key) and " " not in key
+
+
+def _parse_constituents(body: str) -> list[CommitStat]:
+    """Split a squashed message into one :class:`CommitStat` per original commit.
+
+    git concatenates the squashed commits' messages, so each ``# aGiT Metadata``
+    block marks one original aGiT commit. A constituent spans from the end of the
+    previous block to the end of its own block (its subject is the nearest ``*``
+    bullet, the format GitHub's squash uses). Constituents carry the original's
+    kind/backend/model/tokens/span but no line counts — the squash holds the one
+    combined diff."""
+    lines = body.splitlines()
+    headers = [i for i, line in enumerate(lines) if line.strip() == METADATA_HEADER]
+    constituents: list[CommitStat] = []
+    prev_end = 0
+    for header in headers:
+        end = len(lines)
+        for j in range(header + 1, len(lines)):
+            if not _is_metadata_kv(lines[j]):
+                end = j
+                break
+        segment = lines[prev_end:end]
+        constituents.append(_constituent(segment))
+        prev_end = end
+    return constituents
+
+
+def _constituent(segment_lines: list[str]) -> CommitStat:
+    text = "\n".join(segment_lines).strip()
+    metadata = _parse_metadata(text)
+    subject = next(
+        (line[2:].strip() for line in segment_lines if line.startswith("* ")),
+        next((line for line in segment_lines if line.strip() and not line.startswith("#")), ""),
+    )
+    return CommitStat(
+        sha="",
+        author="",
+        email="",
+        subject=subject,
+        kind=_kind_from_metadata(metadata),
+        started_at=metadata.get("agent_started_at", ""),
+        ended_at=metadata.get("agent_ended_at", ""),
+        backend=metadata.get("backend"),
+        model=metadata.get("model"),
+        tokens=_parse_tokens(metadata),
+        message=text,
+    )
+
+
+def _build_squash(
+    sha: str,
+    author: str,
+    email: str,
+    subject: str,
+    timestamp: int,
+    body: str,
+    constituents: list[CommitStat],
+) -> CommitStat:
+    """The parent stat for a squash: it keeps the combined diff and carries the
+    summed tokens of its constituents, classified by what they contain (any AI
+    constituent ⇒ aGiT-tracked AI). Its backend/model is the dominant agent
+    constituent's, for line attribution and display."""
+    tokens: dict[str, int] = defaultdict(int)
+    for part in constituents:
+        for key, value in part.tokens.items():
+            tokens[key] += value
+    ai_parts = [part for part in constituents if part.kind in ("agent", "covered", "agent-merge")]
+    if ai_parts:
+        kind = "agent"
+    elif any(part.kind == "user" for part in constituents):
+        kind = "user"
+    else:
+        kind = "untracked"
+    dominant = max(ai_parts, key=lambda part: part.tokens.get("output", 0), default=None)
+    return CommitStat(
+        sha=sha,
+        author=author,
+        email=email,
+        subject=subject,
+        kind=kind,
+        timestamp=timestamp,
+        backend=dominant.backend if dominant else None,
+        model=dominant.model if dominant else None,
+        tokens=dict(tokens),
+        message=body.strip(),
+        constituents=constituents,
     )
 
 

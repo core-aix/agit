@@ -27,13 +27,17 @@ aGiT needs **git** and at least one backend CLI — [Claude Code](https://docs.c
 
 ## Install
 
-For local development:
+```bash
+pip install agit-cli
+```
+
+This installs the `agit` command and the terminal UI dependency used for status bars and contextual command hints. (The PyPI distribution is named `agit-cli` because the `agit` name is taken by an unrelated project; the command you run and the importable package are both still `agit`.) Once installed, aGiT keeps itself up to date — see [Self-update](#self-update).
+
+For local development, install from a checkout instead:
 
 ```bash
 python3 -m pip install -e .
 ```
-
-This installs the `agit` command and the terminal UI dependency used for status bars and contextual command hints.
 
 ### Contributing
 

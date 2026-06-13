@@ -27,6 +27,11 @@ from typing import NoReturn, cast
 
 import agit
 
+# The PyPI distribution name. The import package and the installed command are
+# both ``agit``; the plain ``agit`` name on PyPI belongs to an unrelated project,
+# so aGiT is published as ``agit-cli`` (see pyproject.toml / scripts/publish.sh).
+DIST_NAME = "agit-cli"
+
 # How aGiT was installed, as reported by ``UpdateStatus.kind`` / ``Updater.kind``.
 KIND_SOURCE = "source"
 KIND_PACKAGE = "package"
@@ -80,7 +85,9 @@ def detect_source_repo() -> Path | None:
 
     We trust an install as source-linked only when the directory containing the
     ``agit`` package both is a git work tree *and* carries aGiT's own
-    ``pyproject.toml`` (``name = "agit"``). That avoids mistaking, say, a wheel
+    ``pyproject.toml``. We key off the console-script entry point
+    (``agit.cli:main``) rather than the distribution ``name`` so the check keeps
+    working if the published name changes. That avoids mistaking, say, a wheel
     that happens to sit under some unrelated repository for the real source.
     """
     try:
@@ -95,7 +102,7 @@ def detect_source_repo() -> Path | None:
         text = pyproject.read_text(encoding="utf-8")
     except OSError:
         return None
-    if 'name = "agit"' not in text:
+    if "agit.cli:main" not in text:
         return None
     result = _git(["rev-parse", "--show-toplevel"], root)
     if result.returncode != 0:
@@ -193,7 +200,7 @@ class Updater:
         try:
             from importlib import metadata
 
-            return metadata.version("agit")
+            return metadata.version(DIST_NAME)
         except Exception:
             return getattr(agit, "__version__", "0")
 
@@ -203,7 +210,7 @@ class Updater:
         # experimental but degrades gracefully: any failure returns None and the
         # caller reports "could not determine the latest version".
         result = subprocess.run(
-            [sys.executable, "-m", "pip", "index", "versions", "agit"],
+            [sys.executable, "-m", "pip", "index", "versions", DIST_NAME],
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -212,12 +219,13 @@ class Updater:
         )
         if result.returncode != 0:
             return None
+        prefix = f"{DIST_NAME.lower()} ("
         for line in result.stdout.splitlines():
             line = line.strip()
-            # e.g. "agit (1.2.3)" or "LATEST: 1.2.3"
+            # e.g. "agit-cli (1.2.3)" or "LATEST: 1.2.3"
             if line.upper().startswith("LATEST:"):
                 return line.split(":", 1)[1].strip() or None
-            if line.lower().startswith("agit (") and line.endswith(")"):
+            if line.lower().startswith(prefix) and line.endswith(")"):
                 return line[line.index("(") + 1 : -1].strip() or None
         return None
 
@@ -276,7 +284,7 @@ class Updater:
     def _apply_package(self) -> UpdateStatus:
         status = UpdateStatus(kind=KIND_PACKAGE)
         result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "--upgrade", "agit"],
+            [sys.executable, "-m", "pip", "install", "--upgrade", DIST_NAME],
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

@@ -75,6 +75,9 @@ def dashboard_data(dash: Dashboard) -> dict:
                 "ended": stat.ended_at,
                 "message": stat.message,  # full message, shown when a log entry opens
                 "url": (dash.commit_base + stat.sha) if dash.commit_base else "",
+                # Original commits of a squash, so the log entry can expand into
+                # them (recursive, for multiple rounds of squashing).
+                "parts": [_part_payload(part) for part in stat.constituents],
             }
         )
 
@@ -88,6 +91,22 @@ def dashboard_data(dash: Dashboard) -> dict:
         "backends": sorted({c["eff_backend"] for c in commits if c["eff_backend"]}),
         "models": sorted({c["eff_model"] for c in commits if c["eff_model"]}),
         "commits": commits,
+    }
+
+
+def _part_payload(part: CommitStat) -> dict:
+    """A squash constituent (an original commit), serialized for the expandable
+    log view — recursive in case a constituent is itself a squash."""
+    return {
+        "subject": part.subject,
+        "kind": part.kind,
+        "backend": part.backend,
+        "model": part.model,
+        "tokens": part.tokens,
+        "started": part.started_at,
+        "ended": part.ended_at,
+        "message": part.message,
+        "parts": [_part_payload(child) for child in part.constituents],
     }
 
 
@@ -475,9 +494,10 @@ function render(){
   const head = ordered.slice(0, LOG_CAP).map((c, i) => {
     const cls = AI_KINDS.has(c.kind) ? "ai" : (c.kind==="agit-ops" ? "ops" : "nontracked");
     const badge = `<span class="badge ${cls}">${esc(KIND_LABEL[c.kind]||c.kind)}</span>`;
+    const squash = (c.parts&&c.parts.length)?`<span class="squash">⧉ ${c.parts.length} squashed</span>`:"";
     const lc = (c.ins||c.del)?`<span class="lc"><span class="add">+${fmt(c.ins)}</span> <span class="rem">−${fmt(c.del)}</span></span>`:"";
     const m = c.eff_model?`<span class="lc">${esc(c.eff_model)}</span>`:"";
-    return `<div class="entry ${cls}" data-i="${i}"><span class="sha">${esc(c.short)}</span>${badge}`+
+    return `<div class="entry ${cls}" data-i="${i}"><span class="sha">${esc(c.short)}</span>${badge}${squash}`+
       `<span class="ksub">${esc(c.subject)}</span>${lc}${tokenBrief(c.tokens)}${m}`+
       `<div class="detail" id="detail-${i}" hidden></div></div>`;
   }).join("");
@@ -494,6 +514,21 @@ function tokenBrief(t){
   if(t.cache_read) parts.push(`<span class="tok dim">${kfmt(t.cache_read)} cache</span>`);
   return parts.length ? `<span class="lc">${parts.join(" ")}</span>` : "";
 }
+function partsHtml(parts){
+  // Squash constituents as a nested, expandable tree (native <details>, so the
+  // nesting works for multiple rounds of squashing with no extra JS).
+  if(!parts || !parts.length) return "";
+  const items = parts.map(p => {
+    const pcls = AI_KINDS.has(p.kind) ? "ai" : (p.kind==="user" ? "user" : "nt");
+    const out = (p.tokens&&p.tokens.output) ? ` · ${kfmt(p.tokens.output)} out` : "";
+    const mdl = p.model ? ` · ${esc(p.model)}` : "";
+    return `<details class="part"><summary><span class="pkind ${pcls}">${esc(KIND_LABEL[p.kind]||p.kind)}</span> `+
+      `${esc(p.subject||"(no subject)")}<span class="pmeta">${mdl}${out}</span></summary>`+
+      `<pre class="dmsg">${esc(p.message||"")}</pre>${partsHtml(p.parts)}</details>`;
+  }).join("");
+  return `<div class="phead">squashed from ${parts.length} original commit${parts.length>1?"s":""} `+
+    `— tokens &amp; models counted from these:</div>${items}`;
+}
 function toggleDetail(i){
   const c = LOG_ENTRIES[i], detail = $("detail-"+i);
   if(!c || !detail) return;
@@ -502,7 +537,7 @@ function toggleDetail(i){
     const span = (c.started||c.ended)
       ? `<div class="dmeta">AI conversation: ${esc(c.started||"?")} → ${esc(c.ended||"?")}</div>` : "";
     detail.innerHTML = `<div class="dhead">${esc(c.short)} ${link}</div>${span}`+
-      `<pre class="dmsg">${esc(c.message||"(no message recorded)")}</pre>`;
+      `<pre class="dmsg">${esc(c.message||"(no message recorded)")}</pre>${partsHtml(c.parts)}`;
     detail.hidden = false;
   } else {
     detail.hidden = true;
@@ -579,9 +614,10 @@ function init(){
     $("f-period").value=""; $("f-from").value=""; $("f-to").value="";
     syncFilters(); render();
   };
-  // Click a commit-log line to open its full message + GitHub link.
+  // Click a commit-log line to open its full message + GitHub link. Clicks
+  // inside the opened detail (links, the squash <details> tree) are left alone.
   $("commitlog").addEventListener("click", e => {
-    if(e.target.closest("a")) return;  // let the GitHub link work
+    if(e.target.closest("a") || e.target.closest(".detail")) return;
     const entry = e.target.closest(".entry");
     if(entry) toggleDetail(+entry.dataset.i);
   });

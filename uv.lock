@@ -7,8 +7,8 @@ resolution-markers = [
 ]
 
 [[package]]
-name = "agit"
-version = "0.0.1"
+name = "agit-cli"
+version = "0.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "prompt-toolkit" },
