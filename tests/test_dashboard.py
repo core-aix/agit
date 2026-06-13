@@ -605,6 +605,18 @@ def test_timeseries_fills_empty_periods_with_zero():
     assert ts["commits"] == [1, 0, 0, 1]
 
 
+def test_aggregates_payload_reports_full_history_span(tmp_path):
+    from agit.metrics.web import aggregates_payload
+
+    dash = build_dashboard(_demo_repo(tmp_path))
+    span = aggregates_payload(dash)["span"]
+    times = [s.timestamp for s in dash.stats if s.timestamp]
+    # The from/to date inputs use this to show the real date range, not a blank.
+    assert span == {"from": min(times), "to": max(times)}
+    # The span is the FULL history, so a committer filter does not shrink it.
+    assert aggregates_payload(dash, backend="claude")["span"] == span
+
+
 def test_timeseries_respects_filters(tmp_path):
     from agit.metrics.web import aggregates_payload
 

@@ -328,10 +328,14 @@ def aggregates_payload(
     response stays small no matter how large the repository is. Filter options
     come from the full history so the dropdowns never lose entries."""
     stats = _filter_stats(dash, author=author, backend=backend, model=model, frm=frm, to=to)
+    # Full-history commit-date span (unfiltered) so the from/to date inputs can show
+    # — and be bounded to — the real range the dashboard covers.
+    dated = [s.timestamp for s in dash.stats if s.timestamp]
     return {
         "head": dash.stats[-1].sha if dash.stats else "",
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         "options": _options(dash),
+        "span": {"from": min(dated), "to": max(dated)} if dated else {"from": 0, "to": 0},
         "agg": _aggregates(_filtered_dashboard(dash, stats)),
         "timeseries": _timeseries(stats, granularity=granularity),
     }
@@ -707,6 +711,7 @@ const INIT = JSON.parse(document.getElementById("agit-data").textContent);
 const PAGE_SIZE = INIT.page_size || 50;
 let HEAD = INIT.head, AGG = INIT.agg, LOGPAGE = INIT.log, OPTIONS = INIT.options, GENERATED = INIT.generated_at;
 let TS = INIT.timeseries || {t:[]};  // per-period series for the activity-over-time plot
+let SPAN = INIT.span || {from:0, to:0};  // full-history commit-date range (epoch seconds)
 let LOG_ENTRIES = [];  // entries of the page currently rendered (for toggleDetail)
 
 // The plottable series and which are currently shown. Each is normalised to its
@@ -758,7 +763,7 @@ function qs(extra){
 async function loadAgg(){
   try{ const r = await fetch("data?"+qs(), {cache:"no-store"}); if(r.ok){
     const d = await r.json(); HEAD=d.head; AGG=d.agg; OPTIONS=d.options; GENERATED=d.generated_at;
-    TS = d.timeseries || {t:[]};
+    TS = d.timeseries || {t:[]}; if(d.span) SPAN = d.span;
     setOffline(false); return true; } }
   catch(e){ if(LIVE) setOffline(true); }  // network failure ⇒ server unreachable
   return false;
@@ -1150,13 +1155,14 @@ function syncFilters(){
 // lookback is re-applied to the new bucket set (its old pixel window can't carry).
 async function applyFilters(){
   await loadAgg(); await loadLog(0);
-  reapplyLookback();
+  reapplyLookback(); setDateBounds(); syncPeriodDates();
   syncFilters(); renderAgg(); renderLog();
 }
 async function refresh(){
   const prev = HEAD;
   if(await loadAgg() && HEAD !== prev){  // new commits landed — refresh the view
     reapplyLookback();  // keep the chosen SHOW window over the new buckets
+    setDateBounds(); syncPeriodDates();  // extend the shown range to new commits
     await loadLog(LOGPAGE.offset||0);
     syncFilters(); renderAgg(); renderLog();
   }
@@ -1168,15 +1174,34 @@ function dateToTs(value, endOfDay){
   const ts = Date.parse(value + "T00:00:00Z")/1000;
   return isNaN(ts) ? 0 : (endOfDay ? ts + DAY - 1 : ts);
 }
+const ymd = ts => ts ? new Date(ts*1000).toISOString().slice(0,10) : "";
+// Bound the native date pickers to the actual history span.
+function setDateBounds(){
+  const lo = ymd(SPAN.from), hi = ymd(SPAN.to);
+  for(const id of ["f-from","f-to"]){ const el=$(id); el.min=lo; el.max=hi; }
+}
+// Reflect the active period in the from/to inputs so they always show the real
+// range being viewed — the full history span for "all time", the rolling window
+// for a preset. Hand-picked custom dates are left untouched.
+function syncPeriodDates(){
+  const v = $("f-period").value;
+  if(v === "custom") return;
+  if(v === ""){ $("f-from").value = ymd(SPAN.from); $("f-to").value = ymd(SPAN.to); }
+  else { $("f-from").value = ymd(Math.floor(Date.now()/1000) - (+v)*DAY); $("f-to").value = ymd(SPAN.to || Math.floor(Date.now()/1000)); }
+}
 function applyPeriod(){
   const v = $("f-period").value;
-  if(v === "" ){ state.fromTs = 0; state.toTs = 0; $("f-from").value=""; $("f-to").value=""; }
+  if(v === ""){ state.fromTs = 0; state.toTs = 0; }
   else if(v === "custom"){ state.fromTs = dateToTs($("f-from").value,false); state.toTs = dateToTs($("f-to").value,true); }
-  else { state.fromTs = Math.floor(Date.now()/1000) - (+v)*DAY; state.toTs = 0; $("f-from").value=""; $("f-to").value=""; }
+  else { state.fromTs = Math.floor(Date.now()/1000) - (+v)*DAY; state.toTs = 0; }
+  syncPeriodDates();
 }
 
 function init(){
   syncFilters();
+  // Show the real range from the first paint: bound the pickers to the history
+  // span and fill from/to with it (default period is "all time" = full history).
+  setDateBounds(); applyPeriod();
   $("f-author").onchange = e => { state.author = e.target.value; applyFilters(); };
   $("f-backend").onchange = e => { state.backend = e.target.value; applyFilters(); };
   $("f-model").onchange = e => { state.model = e.target.value; applyFilters(); };
@@ -1185,8 +1210,8 @@ function init(){
   $("f-from").onchange = onDate;
   $("f-to").onchange = onDate;
   $("reset").onclick = () => {
-    state.author=state.backend=state.model=""; state.fromTs=state.toTs=0;
-    $("f-period").value=""; $("f-from").value=""; $("f-to").value="";
+    state.author=state.backend=state.model="";
+    $("f-period").value=""; applyPeriod();  // back to all time → from/to show the full span
     applyFilters();
   };
   // Click a commit-log line to open its full message + GitHub link. Clicks
