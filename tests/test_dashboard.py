@@ -624,6 +624,9 @@ def test_render_html_wires_the_activity_chart(tmp_path):
     assert "activity over time" in html
     assert 'id="ts-canvas"' in html and 'id="ts-legend"' in html
     assert 'id="ts-gran"' in html and "function renderChart" in html and "const tsOn" in html
+    # x-axis zoom/pan over the loaded buckets: wheel zoom, drag pan, dblclick reset.
+    assert "function onChartWheel" in html and 'addEventListener("wheel"' in html
+    assert "function tsBounds" in html and 'addEventListener("dblclick"' in html
     data = _embedded_data(html)
     assert "timeseries" in data and sum(data["timeseries"]["commits"]) == 7
 

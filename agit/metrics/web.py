@@ -653,7 +653,7 @@ footer{margin-top:46px;padding-top:22px;border-top:1px dashed var(--line);color:
         <option value="month">month</option>
       </select></div>
     </div>
-    <div class="chartwrap"><canvas id="ts-canvas"></canvas><div class="tip" id="ts-tip" hidden></div></div>
+    <div class="chartwrap"><canvas id="ts-canvas" title="Scroll to zoom the time axis · drag to pan · double-click to reset"></canvas><div class="tip" id="ts-tip" hidden></div></div>
     <div class="chart-empty" id="ts-empty" hidden>no dated commits in view</div>
   </div>
 
@@ -709,7 +709,9 @@ const SERIES = [
   {key:"input_tokens", label:"input tokens", color:"#ff6b6b"},
 ];
 const tsOn = {commits:true, ai_lines:true, output_tokens:true, input_tokens:false};
-let tsHover = -1;  // hovered bucket index, or -1
+let tsHover = -1;     // hovered bucket index, or -1
+let tsView = null;    // visible x window as [loIdx, hiIdx] floats; null = full range
+let tsDrag = null;    // in-progress pan: {x, lo, hi}; null when not dragging
 
 const AI_KINDS = new Set(["agent","covered","agent-merge"]);
 const KIND_LABEL = {"agit-ops":"aGiT-ops","agent-merge":"agent-merge"};
@@ -906,6 +908,22 @@ function renderLegend(){
   }).join("");
 }
 
+// The visible x window as a clamped [lo, hi] pair of (fractional) bucket indices.
+// null tsView ⇒ the whole range; zoom/pan narrow it without refetching.
+function tsBounds(){
+  const n = (TS.t||[]).length;
+  if(n<=1 || !tsView) return [0, Math.max(0, n-1)];
+  let lo = Math.max(0, Math.min(tsView[0], n-1));
+  let hi = Math.max(lo, Math.min(tsView[1], n-1));
+  return [lo, hi];
+}
+const PAD_L=10, PAD_R=10;
+function tsPlotW(){ return Math.max(1, $("ts-canvas").parentElement.clientWidth - PAD_L - PAD_R); }
+// Screen x (CSS px) of bucket index i within the current window.
+function tsXAt(i){ const [lo,hi]=tsBounds(), span=hi-lo; return PAD_L + (span<=0 ? tsPlotW()/2 : (i-lo)/span*tsPlotW()); }
+// Bucket index nearest a screen x (CSS px from the canvas left edge).
+function tsIndexAt(px){ const [lo,hi]=tsBounds(), rel=Math.max(0,Math.min(1,(px-PAD_L)/tsPlotW())); return Math.round(lo+rel*(hi-lo)); }
+
 function renderChart(){
   const cv = $("ts-canvas"), t = TS.t||[], has = t.length>0;
   $("ts-empty").hidden = has;
@@ -916,15 +934,18 @@ function renderChart(){
   cv.width = Math.round(cssW*dpr); cv.height = Math.round(cssH*dpr);
   const ctx = cv.getContext("2d"); ctx.setTransform(dpr,0,0,dpr,0,0);
   ctx.clearRect(0,0,cssW,cssH);
-  const padL=10, padR=10, padT=12, padB=22, W=cssW-padL-padR, H=cssH-padT-padB, n=t.length;
-  const xAt = i => padL + (n<=1 ? W/2 : i/(n-1)*W);
+  const padT=12, padB=22, W=cssW-PAD_L-PAD_R, H=cssH-padT-padB, n=t.length;
+  const [lo,hi] = tsBounds(), span = hi-lo;
+  const xAt = i => PAD_L + (span<=0 ? W/2 : (i-lo)/span*W);
   ctx.strokeStyle="rgba(29,42,33,.9)"; ctx.lineWidth=1;
-  for(let g=0; g<=4; g++){ const y=padT+g/4*H; ctx.beginPath(); ctx.moveTo(padL,y); ctx.lineTo(padL+W,y); ctx.stroke(); }
-  // Each series is normalised to its own peak so all of them fit one plot. The
-  // values are per-period activity, so a marker is drawn at each bucket (when the
-  // buckets aren't too dense) — that also makes a single/sparse period visible.
+  for(let g=0; g<=4; g++){ const y=padT+g/4*H; ctx.beginPath(); ctx.moveTo(PAD_L,y); ctx.lineTo(PAD_L+W,y); ctx.stroke(); }
+  // Clip to the plot area so a zoomed-in window doesn't paint points outside it.
+  ctx.save(); ctx.beginPath(); ctx.rect(PAD_L,padT,W,H); ctx.clip();
+  // Each series is normalised to its own peak so all of them fit one plot. Values
+  // are per-period activity; a marker is drawn at each visible bucket (when not
+  // too dense) so a single/sparse period — or a zoomed-in view — stays legible.
   ctx.lineWidth=2; ctx.lineJoin="round";
-  const dots = n<=60;
+  const dots = span<=60;
   for(const s of SERIES){
     if(!tsOn[s.key]) continue;
     const arr = TS[s.key]||[], max = Math.max(1, ...arr);
@@ -937,11 +958,7 @@ function renderChart(){
       arr.forEach((v,i)=>{ const x=xAt(i), y=padT+H-(v/max)*H; ctx.beginPath(); ctx.arc(x,y,2.5,0,Math.PI*2); ctx.fill(); });
     }
   }
-  ctx.shadowBlur=0;
-  ctx.fillStyle="#7e998a"; ctx.font="11px IBM Plex Mono, monospace";
-  ctx.textAlign="left";  ctx.fillText(tsLabel(t[0]), padL, cssH-7);
-  if(n>1){ ctx.textAlign="right"; ctx.fillText(tsLabel(t[n-1]), padL+W, cssH-7); }
-  if(tsHover>=0 && tsHover<n){
+  if(tsHover>=lo-1e-9 && tsHover<=hi+1e-9 && tsHover>=0 && tsHover<n){
     const x = xAt(tsHover);
     ctx.strokeStyle="rgba(207,231,216,.28)"; ctx.lineWidth=1;
     ctx.beginPath(); ctx.moveTo(x,padT); ctx.lineTo(x,padT+H); ctx.stroke();
@@ -953,34 +970,75 @@ function renderChart(){
       ctx.beginPath(); ctx.arc(x,y,3,0,Math.PI*2); ctx.fill(); ctx.shadowBlur=0;
     }
   }
+  ctx.restore(); ctx.shadowBlur=0;
+  // Axis labels reflect the *visible* window's first and last bucket.
+  ctx.fillStyle="#7e998a"; ctx.font="11px IBM Plex Mono, monospace";
+  const li = Math.max(0, Math.round(lo)), ri = Math.min(n-1, Math.round(hi));
+  ctx.textAlign="left";  ctx.fillText(tsLabel(t[li]), PAD_L, cssH-7);
+  if(ri>li){ ctx.textAlign="right"; ctx.fillText(tsLabel(t[ri]), PAD_L+W, cssH-7); }
+  // A small "zoomed" cue when the window is narrower than the full range.
+  if(tsView){ ctx.textAlign="center"; ctx.fillStyle="#67b8d6";
+    ctx.fillText("zoomed — double-click to reset", cssW/2, cssH-7); }
 }
 
 function showTip(i){
   const tip = $("ts-tip"), t = TS.t||[];
   const live = SERIES.filter(s=>tsOn[s.key]);
-  if(i<0 || i>=t.length || !live.length){ tip.hidden = true; return; }
+  const [lo,hi] = tsBounds();
+  if(i<lo-1e-9 || i>hi+1e-9 || i<0 || i>=t.length || !live.length){ tip.hidden = true; return; }
   const rows = live.map(s => {
     const arr = TS[s.key]||[];
     return `<div class="tr" style="--c:${s.color}"><span class="sw"></span>${esc(s.label)}<b>${fmt(arr[i]||0)}</b></div>`;
   }).join("");
   tip.innerHTML = `<div class="td">${tsLabel(t[i])}</div>${rows}`;
-  const wrap = $("ts-canvas").parentElement, n=t.length, padL=10, W=wrap.clientWidth-padL-10;
-  const x = padL + (n<=1 ? W/2 : i/(n-1)*W);
+  const wrap = $("ts-canvas").parentElement, x = tsXAt(i);
   tip.style.left = Math.max(58, Math.min(wrap.clientWidth-58, x))+"px";
   tip.style.top = "4px";
   tip.hidden = false;
 }
 
+// Narrow/widen tsView to [nlo, nhi], clamped into [0, n-1]; clearing it to null
+// (full range) when the window covers everything.
+function tsSetWindow(nlo, nhi, n){
+  if(nlo<0){ nhi -= nlo; nlo = 0; }
+  if(nhi>n-1){ nlo -= (nhi-(n-1)); nhi = n-1; }
+  nlo = Math.max(0, nlo);
+  tsView = (nhi-nlo >= n-1-1e-9) ? null : [nlo, nhi];
+}
+
 function onChartMove(e){
   const t = TS.t||[]; if(!t.length) return;
   const rect = $("ts-canvas").getBoundingClientRect();
-  const padL=10, W=rect.width-padL-10, n=t.length;
-  const rel = Math.max(0, Math.min(1, (e.clientX-rect.left-padL)/(W||1)));
-  const i = n<=1 ? 0 : Math.round(rel*(n-1));
+  const px = e.clientX-rect.left, n = t.length;
+  if(tsDrag){  // panning: shift the window opposite the drag
+    const span = tsDrag.hi-tsDrag.lo, ddx = (e.clientX-tsDrag.x)/tsPlotW()*span;
+    tsSetWindow(tsDrag.lo-ddx, tsDrag.hi-ddx, n);
+    tsHover=-1; $("ts-tip").hidden=true; renderChart(); return;
+  }
+  const i = n<=1 ? 0 : tsIndexAt(px);
   if(i!==tsHover){ tsHover=i; renderChart(); }
   showTip(i);
 }
-function onChartLeave(){ tsHover=-1; $("ts-tip").hidden=true; renderChart(); }
+function onChartLeave(){ if(tsDrag) return; tsHover=-1; $("ts-tip").hidden=true; renderChart(); }
+
+function onChartWheel(e){
+  const n = (TS.t||[]).length; if(n<=1) return;
+  e.preventDefault();
+  const [lo,hi] = tsBounds(), rect = $("ts-canvas").getBoundingClientRect();
+  const rel = Math.max(0, Math.min(1, (e.clientX-rect.left-PAD_L)/tsPlotW()));
+  const focus = lo + rel*(hi-lo);                       // bucket under the cursor
+  let span = Math.max(1, Math.min(n-1, (hi-lo)*(e.deltaY<0?0.8:1.25)));  // zoom in/out
+  tsSetWindow(focus-rel*span, focus-rel*span+span, n);  // keep the cursor anchored
+  tsHover=-1; renderChart();
+}
+function onChartDown(e){
+  const n = (TS.t||[]).length; if(n<=1) return;
+  const [lo,hi] = tsBounds();
+  tsDrag = {x:e.clientX, lo, hi};
+  $("ts-canvas").style.cursor = "grabbing"; $("ts-tip").hidden = true;
+}
+function onChartUp(){ if(tsDrag){ tsDrag=null; $("ts-canvas").style.cursor=""; } }
+function resetZoom(){ tsView=null; tsHover=-1; }
 function renderTimeseries(){ renderLegend(); renderChart(); }
 
 function renderLog(){
@@ -1054,13 +1112,16 @@ function syncFilters(){
 }
 
 // A filter change refetches the aggregates and resets the log to its first page.
+// The plot's zoom window is tied to the old bucket set, so reset it too.
 async function applyFilters(){
+  resetZoom();
   await loadAgg(); await loadLog(0);
   syncFilters(); renderAgg(); renderLog();
 }
 async function refresh(){
   const prev = HEAD;
   if(await loadAgg() && HEAD !== prev){  // new commits landed — refresh the view
+    resetZoom();  // the bucket set changed; an old window would mis-map
     await loadLog(LOGPAGE.offset||0);
     syncFilters(); renderAgg(); renderLog();
   }
@@ -1107,12 +1168,18 @@ function init(){
     const key = btn.dataset.key; tsOn[key] = !tsOn[key];
     renderTimeseries();
   });
-  // Bucket granularity: refetch the (re-bucketed) series and redraw just the plot.
+  // Bucket granularity: refetch the (re-bucketed) series, reset zoom, redraw plot.
   $("ts-gran").value = state.granularity;
-  $("ts-gran").onchange = async e => { state.granularity = e.target.value; if(await loadAgg()) renderTimeseries(); };
+  $("ts-gran").onchange = async e => { state.granularity = e.target.value; resetZoom(); if(await loadAgg()) renderTimeseries(); };
+  // Zoom/pan the x axis over the loaded buckets: wheel zooms (anchored on the
+  // cursor), drag pans, double-click resets — all client-side, no refetch.
   const cv = $("ts-canvas");
   cv.addEventListener("mousemove", onChartMove);
   cv.addEventListener("mouseleave", onChartLeave);
+  cv.addEventListener("wheel", onChartWheel, {passive:false});
+  cv.addEventListener("mousedown", onChartDown);
+  window.addEventListener("mouseup", onChartUp);
+  cv.addEventListener("dblclick", () => { resetZoom(); renderChart(); });
   // The canvas backing store is sized in px, so it must be repainted on resize.
   let rz; window.addEventListener("resize", () => { clearTimeout(rz); rz = setTimeout(renderChart, 120); });
   renderAgg(); renderLog();
