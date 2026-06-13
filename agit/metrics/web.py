@@ -393,6 +393,7 @@ h2.section::before{content:"# ";color:var(--amber)}
 .row .num{text-align:right;color:var(--fg-dim);font-size:12.5px}
 .row .num b{color:var(--phosphor);font-weight:600}
 .empty{padding:16px 18px;color:var(--fg-dim)}
+.hint{padding:8px 18px 0;color:var(--fg-dim);font-size:11.5px;font-style:italic}
 .kindcounts{padding:11px 18px;border-top:1px solid var(--line);font-size:12.5px;color:var(--fg-dim);line-height:1.9}
 .kindcounts .klabel{color:var(--amber);margin-right:4px}
 .kindcounts .kc{white-space:nowrap;cursor:help;border-bottom:1px dotted var(--fg-dim)}
@@ -673,9 +674,14 @@ function renderAgg(){
     `</div>`;
 
   const shown = TOKEN_ORDER.filter(([k])=>tok[k]);
-  const maxTok = Math.max(1, ...shown.map(([k])=>tok[k]));
+  // Token kinds span orders of magnitude (cache reads dwarf everything), so a
+  // linear bar would shrink the small kinds to invisible slivers. Scale the bar
+  // widths by log10 instead; the numbers shown on each row remain the real counts.
+  const logTok = v => Math.log10((v||0)+1);
+  const maxLog = Math.max(1, ...shown.map(([k])=>logTok(tok[k])));
   $("tokens").innerHTML = shown.length
-    ? shown.map(([k,label]) => barRow(label, "", tok[k], maxTok, `<b>${fmt(tok[k])}</b>`, k==="output")).join("")
+    ? `<div class="hint">bar widths are log-scaled</div>` +
+      shown.map(([k,label]) => barRow(label, "", logTok(tok[k]), maxLog, `<b>${fmt(tok[k])}</b>`, k==="output")).join("")
     : `<div class="empty">no token metadata recorded</div>`;
 
   $("by-backend").innerHTML = groupPanel(AGG.by_backend);
