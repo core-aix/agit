@@ -276,14 +276,19 @@ class IntegrationService:
     def advance_base_to(self, repo: GitRepo, source_branch: str) -> None:
         """Fast-forward the base to ``source_branch``, detach the session, delete the turn branch.
 
-        Raises ``RuntimeError`` if the base repo is not on ``self.base_branch``
-        (safety guard against advancing the wrong branch after an out-of-band
-        ``git checkout``).
+        The session already merged the base into its turn branch, so the turn
+        branch is a descendant of the base and this is always a fast-forward. When
+        the base branch is the checked-out one in the base repo, advance it with a
+        working-tree fast-forward; when the user has ``git checkout``ed a different
+        branch in the directory, advance the base ref directly (still a true
+        fast-forward, never a force) so integration keeps landing on the original
+        base instead of stalling.
         """
-        current = self.base_repo.current_branch()
-        if current != self.base_branch:
-            raise RuntimeError(f"base repo is on '{current}', not the integration branch '{self.base_branch}'")
-        self.base_repo.merge_ff_only(source_branch)
+        if self.base_repo.current_branch() == self._base:
+            self.base_repo.merge_ff_only(source_branch)
+        else:
+            # Raises GitError if not a real fast-forward — never drops commits.
+            self.base_repo.fast_forward_branch(self._base, source_branch)
         repo.switch_detach(self._base)
         if repo.current_branch() != source_branch:
             self.base_repo.delete_branch(source_branch, force=True)
@@ -565,43 +570,11 @@ class IntegrationService:
     # ------------------------------------------------------------------
     # Base-drift / poll helpers
     # ------------------------------------------------------------------
-
-    def check_base_drift(
-        self,
-        base_branch: str,
-        integration_paused: bool,
-        last_check_at: float,
-        drift_check_seconds: float,
-    ) -> tuple[bool, float, str | None]:
-        """Check whether the base repo drifted off ``base_branch``.
-
-        Returns ``(paused, new_check_at, message_or_none)``.  ``paused`` is the
-        new value for ``_integration_paused``; ``message_or_none`` is a UI
-        string to show (None = no change, no message needed).
-        """
-        now = time.monotonic()
-        if now - last_check_at < drift_check_seconds:
-            return integration_paused, last_check_at, None
-        try:
-            current = self.base_repo.current_branch()
-        except Exception:
-            return integration_paused, now, None
-        drifted = current != base_branch
-        if drifted and not integration_paused:
-            msg = (
-                f"⚠ Base branch changed outside aGiT — the repo is now on '{current}', but\n"
-                f"aGiT integrates into '{base_branch}'. Worktree merging is PAUSED so\n"
-                f"your work isn't merged into the wrong branch (sessions keep running and\n"
-                f"committing to their own branches).\n"
-                f"To resume: run  git checkout {base_branch}  in the repo — merging\n"
-                f"continues automatically. To instead make '{current}' the base, quit and\n"
-                f"relaunch aGiT from there."
-            )
-            return True, now, msg
-        if not drifted and integration_paused:
-            msg = f"Base branch back on '{base_branch}' — worktree merging resumed."
-            return False, now, msg
-        return integration_paused, now, None
+    #
+    # Base-branch drift (the user `git checkout`ed a different branch in the
+    # directory) is handled by ProxyRunner._check_base_branch_drift, which
+    # prompts the user to switch the base, keep integrating into the original
+    # (advance_base_to fast-forwards its ref directly), or pause.
 
     def poll_base_advanced(
         self,

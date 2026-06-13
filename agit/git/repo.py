@@ -241,6 +241,30 @@ class GitRepo:
     def merge_ff_only(self, ref: str) -> None:
         self._run(["git", "merge", "--ff-only", ref])
 
+    def is_ancestor(self, ancestor: str, descendant: str) -> bool:
+        """True if ``ancestor`` is reachable from ``descendant`` — i.e. moving a
+        branch from ``ancestor`` to ``descendant`` would be a fast-forward."""
+        return (
+            self._run(
+                ["git", "merge-base", "--is-ancestor", ancestor, descendant],
+                check=False,
+            ).returncode
+            == 0
+        )
+
+    def fast_forward_branch(self, branch: str, target: str) -> None:
+        """Fast-forward ``branch`` (which need NOT be checked out) to ``target``.
+
+        Refuses unless ``target`` is a descendant of ``branch``, so this can only
+        ever advance the branch along its own history — never a force-move that
+        could drop commits. Lets aGiT integrate into the base branch even when the
+        user has `git checkout`ed a different branch in the directory."""
+        if not self.is_ancestor(branch, target):
+            raise GitError(f"'{target}' is not a fast-forward of '{branch}'")
+        # -f updates the ref in place; git itself still refuses if `branch` is
+        # checked out in any worktree, so this only runs for a non-checked-out base.
+        self._run(["git", "branch", "-f", branch, target])
+
     def merge_abort(self) -> None:
         self._run(["git", "merge", "--abort"], check=False)
 

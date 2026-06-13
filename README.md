@@ -13,7 +13,7 @@ agit --dashboard        # serve on localhost and open the browser (Ctrl-C to sto
 agit -d text            # one-shot plain-text report instead (pipe it, paste it into an issue)
 ```
 
-![The aGiT dashboard](docs/images/dashboard.png)
+![The aGiT dashboard](https://raw.githubusercontent.com/core-aix/agit/main/docs/images/dashboard-v2.png)
 
 - **aGiT-tracked AI vs non-tracked lines** — what the agents wrote (tracked by aGiT) versus everything else; it never claims a human wrote what the model did.
 - **Filter live** — narrow the whole dashboard to one committer (merged to their GitHub ID), a backend, a model, or a time range.

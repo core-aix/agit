@@ -10,7 +10,6 @@ import subprocess
 import time
 import types
 
-import pytest
 
 from agit.git import GitRepo
 from agit.proxy.integration import (
@@ -287,15 +286,27 @@ def test_advance_base_to_fast_forwards_base(tmp_path):
     assert turn not in main.list_branches("agit/")
 
 
-def test_advance_base_refuses_wrong_base_branch(tmp_path):
+def test_advance_base_when_base_not_checked_out_fast_forwards_ref(tmp_path):
+    # The directory drifted to another branch, so the base ('main') is no longer
+    # checked out. A turn branch that descends from base is integrated by
+    # advancing the base ref directly (a true fast-forward), not via the working
+    # tree — so integration keeps landing on the original base.
     main = _init_repo(tmp_path)
     base = main.current_branch()
+    main.create_branch("turn", base)
+    main.switch("turn")
+    _commit(main, "t.txt", "t\n", "turn work")
+    turn_sha = main.rev_parse("HEAD")
     main.create_branch("other", base)
-    main.switch("other")  # base_repo is now on "other"
+    main.switch("other")  # base 'main' is now NOT checked out (drifted directory)
 
-    svc = _svc(main, base)  # service thinks base is still "main/master"
-    with pytest.raises(RuntimeError, match="not the integration branch"):
-        svc.advance_base_to(main, "some-branch")
+    work = GitRepo.discover(main.repo)
+    _svc(main, base).advance_base_to(work, "turn")
+
+    assert main.rev_parse(base) == turn_sha  # base ref advanced to the turn work
+    assert main.current_branch() != base  # directory stayed on its drifted branch
+    # The not-a-fast-forward guard (no force-move, no dropped commits) is covered
+    # at the primitive level by test_fast_forward_branch_advances_only_on_true_ff.
 
 
 # ---------------------------------------------------------------------------
@@ -511,57 +522,8 @@ def test_repoint_to_base_skips_dirty(tmp_path):
     assert result is None
 
 
-# ---------------------------------------------------------------------------
-# check_base_drift
-# ---------------------------------------------------------------------------
-
-
-def test_check_base_drift_pauses_when_drifted(tmp_path):
-    main = _init_repo(tmp_path)
-    base = main.current_branch()
-    main.create_branch("other", base)
-    main.switch("other")  # base_repo now on "other", but svc thinks target is base
-
-    svc = _svc(main, base)
-    paused, _, message = svc.check_base_drift(
-        base_branch=base,
-        integration_paused=False,
-        last_check_at=0.0,
-        drift_check_seconds=0.0,
-    )
-    assert paused is True
-    assert message is not None
-    assert "PAUSED" in message
-
-
-def test_check_base_drift_resumes_when_restored(tmp_path):
-    main = _init_repo(tmp_path)
-    base = main.current_branch()
-    # base_repo is already on base; was previously paused
-
-    svc = _svc(main, base)
-    paused, _, message = svc.check_base_drift(
-        base_branch=base,
-        integration_paused=True,  # was paused
-        last_check_at=0.0,
-        drift_check_seconds=0.0,
-    )
-    assert paused is False
-    assert message is not None
-    assert "resumed" in message
-
-
-def test_check_base_drift_throttled():
-    svc = IntegrationService.__new__(IntegrationService)
-    # last_check_at is very recent → should not run
-    paused, check_at, message = svc.check_base_drift(
-        base_branch="main",
-        integration_paused=False,
-        last_check_at=time.monotonic(),
-        drift_check_seconds=999.0,
-    )
-    assert message is None
-    assert paused is False
+# Base-branch drift is now handled by ProxyRunner._check_base_branch_drift (it
+# prompts the user); see test_base_branch_drift_* in test_proxy.py.
 
 
 # ---------------------------------------------------------------------------

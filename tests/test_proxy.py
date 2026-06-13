@@ -2685,34 +2685,56 @@ def test_resume_switches_to_already_live_conversation():
 # --- base branch switched out-of-band ---
 
 
-def _base_drift_runner(current_branch):
+def _base_drift_runner(current_branch, *, choice="Pause merging until I decide"):
     import types
 
     runner = make_runner(
         _base_branch="dev",
         _integration_paused=False,
         _base_drift_check_at=0.0,
+        _drift_acknowledged_branch=None,
         base_repo=types.SimpleNamespace(current_branch=lambda: current_branch),
     )
     runner._debug = lambda *a, **k: None
     runner.messages = []
     runner._set_message = lambda m, **k: runner.messages.append(m)
     runner._render = lambda: None
+    runner.popups = []
+    runner._select_popup = lambda title, options: runner.popups.append((title, options)) or choice
     return runner
 
 
-def test_base_branch_drift_pauses_then_resumes():
-    runner = _base_drift_runner("feature-x")
+def test_base_branch_drift_prompts_and_pauses_when_dismissed():
+    # On drift the user is prompted; choosing "Pause" keeps the safe default.
+    runner = _base_drift_runner("feature-x", choice="Pause merging until I decide")
     runner._check_base_branch_drift()
+    assert runner.popups and "feature-x" in runner.popups[0][0]
     assert runner._integration_paused is True
     assert any("PAUSED" in m and "feature-x" in m for m in runner.messages)
 
+    # The prompt fires once per checkout, not every drift check.
+    runner.popups.clear()
+    runner._base_drift_check_at = 0.0
+    runner._check_base_branch_drift()
+    assert runner.popups == []
+
     runner.base_repo.current_branch = lambda: "dev"  # user switches back
-    runner._base_drift_check_at = 0.0  # bypass the 2s throttle
+    runner._base_drift_check_at = 0.0  # bypass the throttle
     runner.messages.clear()
     runner._check_base_branch_drift()
     assert runner._integration_paused is False
+    assert runner._drift_acknowledged_branch is None
     assert any("resumed" in m for m in runner.messages)
+
+
+def test_base_branch_drift_keep_resumes_integration_into_original():
+    # Choosing "Keep integrating" leaves merging ON (into the original base),
+    # never paused — advance_base_to handles the not-checked-out base safely.
+    runner = _base_drift_runner("feature-x", choice="Keep integrating into 'dev'")
+    runner._check_base_branch_drift()
+    assert runner._integration_paused is False
+    assert runner._drift_acknowledged_branch == "feature-x"
+    assert any("Keeping base 'dev'" in m for m in runner.messages)
 
 
 def test_integrate_turn_skips_while_paused():
@@ -2727,24 +2749,29 @@ def test_integrate_turn_skips_while_paused():
     assert runner._integrate_turn_or_conflict() == "skip"
 
 
-def test_advance_base_refuses_when_base_switched_out_of_band():
+def test_advance_base_when_base_not_checked_out_uses_safe_fast_forward():
+    # The user `git checkout`ed a different branch in the directory, so the base
+    # ('dev') is not the checked-out branch. Integration must NOT use the
+    # working-tree fast-forward (which would move the WRONG branch); it advances
+    # the base ref directly, and only when that is a true fast-forward.
     import types
 
-    runner = make_runner(
-        _base_branch="dev",
-        base_repo=types.SimpleNamespace(
-            current_branch=lambda: "feature-x",
-            merge_ff_only=lambda ref: merged.append(ref),
-        ),
-    )
-    merged = []
+    merged, ff = [], []
+    runner = make_runner(_base_branch="dev")
+    runner.repo = types.SimpleNamespace(switch_detach=lambda ref: None, current_branch=lambda: "HEAD")
     runner.base_repo = types.SimpleNamespace(
-        current_branch=lambda: "feature-x",
+        current_branch=lambda: "feature-x",  # base 'dev' is not checked out
         merge_ff_only=lambda ref: merged.append(ref),
+        is_ancestor=lambda a, b: True,  # turn branch descends from 'dev' → real ff
+        fast_forward_branch=lambda branch, target: ff.append((branch, target)),
+        delete_branch=lambda name, force=False: None,
     )
-    with pytest.raises(RuntimeError):
-        runner._advance_base_to("agit/claude/session-1/t1")
-    assert merged == []  # never fast-forwarded the wrong branch
+    runner._integration.base_repo = runner.base_repo
+
+    runner._advance_base_to("agit/claude/session-1/t1")
+
+    assert merged == []  # never moved the checked-out 'feature-x'
+    assert ff == [("dev", "agit/claude/session-1/t1")]  # advanced base's ref only
 
 
 def _exit_removal_runner(*, log_range_result="", rev_parse_raises=False):

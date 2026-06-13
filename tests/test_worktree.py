@@ -473,6 +473,63 @@ def test_base_switch_candidates_excludes_agit_and_current(tmp_path):
     assert all(not name.startswith("agit/") for name in candidates)
 
 
+def test_fast_forward_branch_advances_only_on_true_ff(tmp_path):
+    from agit.git import GitError
+
+    main = _init_repo(tmp_path)
+    base = main.current_branch()
+    base_sha = main.rev_parse("HEAD")
+    # 'ahead' descends from base (a real fast-forward).
+    main.create_branch("ahead", base)
+    main.switch("ahead")
+    _commit(main, "a.txt", "a\n", "ahead work")
+    ahead_sha = main.rev_parse("HEAD")
+    # 'diverged' starts from the same base commit but takes its own path.
+    main.create_branch("diverged", base_sha)
+    main.switch("diverged")
+    _commit(main, "b.txt", "b\n", "diverged work")
+    main.switch("ahead")  # leave base un-checked-out, like a drifted directory
+
+    # `is_ancestor` reflects fast-forward-ability; base never moved.
+    assert main.rev_parse(base) == base_sha
+    assert main.is_ancestor(base, "ahead") is True
+    assert main.is_ancestor("ahead", base) is False
+
+    # Advancing base to its descendant is allowed (a true ff) and moves the ref.
+    main.fast_forward_branch(base, "ahead")
+    assert main.rev_parse(base) == ahead_sha
+
+    # 'diverged' is not a descendant of 'ahead', so advancing would drop commits
+    # → refused.
+    with pytest.raises(GitError):
+        main.fast_forward_branch("ahead", "diverged")
+
+
+def test_base_switch_keeps_session_alive(tmp_path):
+    # Regression: _perform_base_switch used the EXIT finalizer, which terminated
+    # the agent child and removed the worktree — so switching the base quit aGiT
+    # with an error. A base switch must keep every session running.
+    main = _init_repo(tmp_path)
+    base = main.current_branch()
+    main.create_branch("feature", base)
+    info, work = _make_session(main, "s1", base)
+
+    runner = _integration_runner(main, work, base, "s1")
+    runner.worktree = info  # a real WorktreeInfo so repoint + survival checks work
+    runner.sessions = [runner.active]
+    runner._commit_latest_turn_sync = lambda: None  # no real backend to parse
+    terminated: list[bool] = []
+    runner._terminate_child = lambda *a, **k: terminated.append(True)
+
+    runner._perform_base_switch("feature")
+
+    assert runner._base_branch == "feature"
+    assert main.current_branch() == "feature"
+    assert info.path.exists()  # worktree kept
+    assert runner.worktree is not None  # session not torn down
+    assert terminated == []  # the backend child was never killed
+
+
 def test_log_range_lists_commits(tmp_path):
     repo = _init_repo(tmp_path)
     base_sha = repo.rev_parse("HEAD")

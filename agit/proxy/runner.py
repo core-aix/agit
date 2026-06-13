@@ -388,6 +388,9 @@ class ProxyRunner:
         self._base_branch: str | None = None  # integration target branch (set at startup)
         self._integration_paused = False  # set when the base repo is switched off _base_branch out-of-band
         self._base_drift_check_at = 0.0
+        # The drifted branch the user has already been prompted about, so the
+        # drift prompt fires once per checkout rather than every drift check.
+        self._drift_acknowledged_branch: str | None = None
         self.turn = 0  # per-session transient-branch counter
         self.merge_ctx: MergeContext | None = None  # in-progress agent merge resolution
         self._pending_enter_at: float | None = None  # deferred submit of an injected prompt
@@ -574,6 +577,7 @@ class ProxyRunner:
                 "base_repo": None,
                 "_base_branch": None,
                 "_integration_paused": False,
+                "_drift_acknowledged_branch": None,
                 "_base_drift_check_at": 0.0,
                 "_pending_enter_at": None,
                 "_pending_enter_fd": None,
@@ -784,34 +788,77 @@ class ProxyRunner:
         self._render()
 
     def _check_base_branch_drift(self) -> None:
-        # The user can `git checkout` another branch in the base repo while aGiT is
+        # The user can `git checkout` another branch in the directory while aGiT is
         # running. aGiT integrates session work into the branch it launched on
-        # (`self._base_branch`) by fast-forwarding the base repo's checkout, so a
-        # switch would target the wrong branch. Detect it, PAUSE worktree merging,
-        # and tell the user; resume automatically when they switch back. (Sessions
-        # keep running and committing to their own branches throughout.)
+        # (`self._base_branch`). When the directory drifts to another branch, ask
+        # the user once what to do: follow the directory (switch the base), keep
+        # integrating into the original (aGiT advances its ref directly — a safe
+        # fast-forward — even though it is no longer checked out), or pause.
+        # Sessions keep running and committing to their own branches throughout.
         if self._base_branch is None:
             return
-        paused, new_check_at, message = self._integration.check_base_drift(
-            base_branch=self._base_branch,
-            integration_paused=self._integration_paused,
-            last_check_at=self._base_drift_check_at,
-            drift_check_seconds=self.BASE_DRIFT_CHECK_SECONDS,
+        now = time.monotonic()
+        if now - self._base_drift_check_at < self.BASE_DRIFT_CHECK_SECONDS:
+            return
+        self._base_drift_check_at = now
+        try:
+            current = self.base_repo.current_branch()
+        except Exception:
+            return
+        if current == self._base_branch:
+            # Back on (or never left) the integration branch: clear drift state.
+            if self._drift_acknowledged_branch is not None or self._integration_paused:
+                resumed = self._integration_paused
+                self._drift_acknowledged_branch = None
+                self._integration_paused = False
+                if resumed:
+                    self._debug(f"base restored to '{self._base_branch}'; merging resumed")
+                    self._set_message(f"Repo back on '{self._base_branch}'; merging resumed.", seconds=6.0)
+                    self._render()
+            return
+        if current == self._drift_acknowledged_branch:
+            return  # already handled this drift; nothing to ask again
+        self._handle_base_drift(current)
+
+    def _handle_base_drift(self, current: str) -> None:
+        # Prompt once per drifted checkout. Mark it acknowledged up front so a
+        # dismissed prompt (or a switch that re-enters here) does not loop.
+        self._debug(f"base drift: repo on '{current}', integration target '{self._base_branch}'")
+        self._drift_acknowledged_branch = current
+        choice = self._select_popup(
+            f"The repository was switched to '{current}', but aGiT integrates into "
+            f"'{self._base_branch}'. What should aGiT do?",
+            [
+                f"Switch base to '{current}' (re-point every session)",
+                f"Keep integrating into '{self._base_branch}'",
+                "Pause merging until I decide",
+            ],
         )
-        self._base_drift_check_at = new_check_at
-        if message is not None:
-            if paused and not self._integration_paused:
-                try:
-                    _cur = self.base_repo.current_branch()
-                except Exception:
-                    _cur = "?"
-                self._debug(f"base branch drift: repo on '{_cur}', integration target '{self._base_branch}'")
-                self._set_message(message, seconds=30.0)
-            elif not paused and self._integration_paused:
-                self._debug(f"base branch restored to '{self._base_branch}'; integration resumed")
-                self._set_message(message, seconds=8.0)
-            self._integration_paused = paused
+        if choice and choice.startswith("Switch base"):
+            self._drift_acknowledged_branch = None  # the switch resolves the drift
+            self._integration_paused = False
+            self._perform_base_switch(current)
+            return
+        if choice and choice.startswith("Keep integrating"):
+            # Keep landing turns on the original base. Care is taken in
+            # IntegrationService.advance_base_to: with the base no longer checked
+            # out it advances the ref only on a true fast-forward, never a force.
+            self._integration_paused = False
+            self._set_message(
+                f"Keeping base '{self._base_branch}': aGiT integrates into it while the repo is on '{current}'.",
+                seconds=8.0,
+            )
             self._render()
+            return
+        # Pause (chosen explicitly, or the prompt was dismissed): the safe
+        # default — nothing merges until the user switches back or picks a base.
+        self._integration_paused = True
+        self._set_message(
+            f"Merging PAUSED: repo is on '{current}', not '{self._base_branch}'. "
+            f"Switch base or resume via {self._menu_label()} → git-base-branch.",
+            seconds=12.0,
+        )
+        self._render()
 
     def _warn_if_base_edited(self) -> None:
         # Fallback for un-sandboxed platforms: detect the agent editing the base
@@ -1647,10 +1694,12 @@ class ProxyRunner:
         # turn branch. A fresh turn branch is created lazily on the next commit,
         # so a fully-merged session leaves no branch behind — only its worktree,
         # whose conversation context can still be resumed.
-        # Hard safety: never fast-forward if the base repo was checked out onto a
-        # different branch out-of-band — `git merge --ff-only` advances whatever is
-        # currently checked out, so this would move the WRONG branch. Callers wrap
-        # this in try/except and treat the failure as "not integrated".
+        # When the base is the checked-out branch this is a working-tree
+        # fast-forward; when the user has checked out a different branch in the
+        # directory, advance_base_to advances the base's ref directly — but only
+        # on a true fast-forward, never a force, so it can never move the wrong
+        # branch or drop commits. Callers wrap this in try/except and treat a
+        # failure (e.g. not a fast-forward) as "not integrated".
         self._integration.advance_base_to(self.repo, source_branch)
         # The base moved; other idle sessions should fast-forward onto it.
         self._base_advanced = True
@@ -1956,11 +2005,35 @@ class ProxyRunner:
                 blocked.append(name)
         return blocked
 
+    def _integrate_session_keeping_alive(self) -> None:
+        # Commit the latest turn and integrate it into the current base WITHOUT
+        # the exit semantics of _finalize_pending_work — the backend child keeps
+        # running and the worktree is kept. With _exiting set by the caller, a
+        # conflict is left on the branch (no resolve popup) for the caller's
+        # unintegrated-sessions check to report.
+        self._commit_latest_turn_sync()
+        if self._summary_thread is not None and self._summary_thread.is_alive():
+            self._summary_thread.join(timeout=10)
+        self._service_commit_summary()
+        self._integrate_session_turn()
+
+    def _integrate_all_sessions_into_base(self) -> None:
+        # Integrate every live session into the CURRENT base, keeping each
+        # session's worktree and backend alive (base-switching is not an exit).
+        self._integrate_session_keeping_alive()  # active, in place
+        for session in list(self.sessions):
+            if session is not self.active:
+                self._with_session(session, self._integrate_session_keeping_alive)
+
     def _perform_base_switch(self, new_base: str) -> None:
-        self._exiting = True
+        self._exiting = True  # suppress the conflict-resolve popup during integration
         self._set_message("Integrating session work before switching base…", seconds=30)
         self._render()
-        self._finalize_pending_work()  # commit + integrate every session into the current base
+        # NB: never _finalize_pending_work() here — that is the EXIT path, which
+        # terminates the agent child and removes the worktree, killing the very
+        # sessions a base switch is meant to keep running (the source of the
+        # "switching base quits with an error" crash).
+        self._integrate_all_sessions_into_base()
         blocked = self._unintegrated_session_names()
         if blocked:
             self._exiting = False
