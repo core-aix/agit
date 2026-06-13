@@ -1,12 +1,9 @@
 from __future__ import annotations
 
 import argparse
-import re
 import shutil
 import subprocess
 import sys
-import tempfile
-import webbrowser
 from pathlib import Path
 
 from agit.backends.setup import select_default_backend
@@ -46,16 +43,17 @@ def main(argv: list[str] | None = None) -> int:
         "commands, e.g. --prompt ':status'",
     )
     parser.add_argument(
+        "-d",
         "--dashboard",
         nargs="?",
-        const="text",
+        const="html",
         choices=["text", "html"],
         default=None,
         help="show repository metrics computed from aGiT commit metadata "
-        "(coverage, AI vs human line changes, tokens, per-backend/model/"
-        "committer breakdowns, loop detection) and exit. Bare or `text` prints "
-        "to the terminal; `html` writes a filterable web dashboard and opens it "
-        "in the browser",
+        "(coverage, AI / human / non-tracked line changes, tokens, per-backend/"
+        "model/committer breakdowns, loop detection). Bare or `html` serves a "
+        "filterable, auto-refreshing dashboard on localhost and opens it in the "
+        "browser (Ctrl-C to stop); `text` prints a one-shot report and exits",
     )
     parser.add_argument(
         "--backend",
@@ -99,16 +97,18 @@ def main(argv: list[str] | None = None) -> int:
         # acknowledgment and no repo initialization offer.
         try:
             dashboard_repo = GitRepo.discover(Path(args.repo).expanduser())
-            if args.dashboard == "html":
-                return _open_html_dashboard(dashboard_repo)
-            from agit.metrics import render_dashboard
+            if args.dashboard == "text":
+                from agit.metrics import render_dashboard
 
-            print(render_dashboard(dashboard_repo))
+                print(render_dashboard(dashboard_repo))
+                return 0
+            from agit.metrics import serve_dashboard
+
+            return serve_dashboard(dashboard_repo)
         except (GitError, OSError) as error:
             # OSError: --repo points at a directory that does not exist.
             print(error)
             return 1
-        return 0
 
     # If backend is asked for help, run it directly without TUI.
     if backend_args and any(arg in ("--help", "-h") for arg in backend_args):
@@ -183,24 +183,6 @@ _RESERVED_PASSTHROUGH = {
     "claude": {"--session-id", "--resume", "-r", "--continue", "-c"},
     "opencode": {"--session", "-s", "--continue", "-c"},
 }
-
-
-def _open_html_dashboard(repo: GitRepo) -> int:
-    """Write the filterable web dashboard to a temp file and open it in the
-    browser. Like the text report it is read-only and computed entirely from
-    commit metadata, so the file is self-contained and safe to reopen."""
-    from agit.metrics import render_html
-
-    html = render_html(repo)
-    slug = re.sub(r"[^A-Za-z0-9_.-]", "-", Path(repo.repo).name) or "repo"
-    path = Path(tempfile.gettempdir()) / f"agit-dashboard-{slug}.html"
-    path.write_text(html, encoding="utf-8")
-    print(f"aGiT dashboard written to {path}")
-    try:
-        webbrowser.open(path.as_uri())
-    except webbrowser.Error:
-        print("Could not open a browser automatically; open the file above manually.")
-    return 0
 
 
 def _warn_reserved_passthrough(backend: str, backend_args: list[str]) -> None:

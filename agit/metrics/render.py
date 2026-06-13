@@ -48,12 +48,14 @@ def format_dashboard(dash: Dashboard) -> str:
 
     ai_ins, ai_del = dash.ai_lines
     human_ins, human_del = dash.human_lines
-    total_lines = ai_ins + ai_del + human_ins + human_del
+    nt_ins, nt_del = dash.nontracked_lines
+    total_lines = ai_ins + ai_del + human_ins + human_del + nt_ins + nt_del
     lines.append("Code changes (lines)")
-    lines.append(f"  AI (agent + covered):     +{ai_ins:,} / -{ai_del:,}{_share(ai_ins + ai_del, total_lines)}")
+    lines.append(f"  AI (agent + covered):       +{ai_ins:,} / -{ai_del:,}{_share(ai_ins + ai_del, total_lines)}")
     lines.append(
-        f"  Human (user + untracked): +{human_ins:,} / -{human_del:,}{_share(human_ins + human_del, total_lines)}"
+        f"  Human (user commits, aGiT): +{human_ins:,} / -{human_del:,}{_share(human_ins + human_del, total_lines)}"
     )
+    lines.append(f"  Non-tracked (outside aGiT): +{nt_ins:,} / -{nt_del:,}{_share(nt_ins + nt_del, total_lines)}")
     lines.append("")
 
     lines.append("Tokens (from aGiT commit metadata)")

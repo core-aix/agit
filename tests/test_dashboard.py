@@ -11,11 +11,15 @@ from pathlib import Path
 
 import json
 import re
+import threading
+import urllib.error
+import urllib.request
 
+import agit.metrics as metrics
 from agit import cli
 from agit.commits import build_agent_commit_message, build_agent_merge_message, build_user_commit_message
 from agit.git import GitRepo
-from agit.metrics import build_dashboard, dashboard_data, render_dashboard, render_html
+from agit.metrics import build_dashboard, build_server, dashboard_data, render_dashboard, render_html
 from agit.metrics.collect import CommitStat, _detect_loops
 
 
@@ -98,16 +102,21 @@ def test_dashboard_classifies_every_commit_kind(tmp_path):
     assert abs(dash.coverage - 5 / 7) < 1e-9
 
 
-def test_dashboard_attributes_lines_to_ai_and_human(tmp_path):
+def test_dashboard_attributes_lines_to_ai_human_and_nontracked(tmp_path):
     dash = build_dashboard(_demo_repo(tmp_path))
 
     ai_ins, _ = dash.ai_lines
     human_ins, _ = dash.human_lines
+    nt_ins, _ = dash.nontracked_lines
     # AI: agent.txt (20) + backend.txt (8, via the covered commit); the cover
     # commit itself is a merge and contributes no numstat — no double count.
     assert ai_ins == 28
-    # Human: human.txt (10) + user.txt (4).
-    assert human_ins == 14
+    # Human is only the user commit made inside aGiT — user.txt (4).
+    assert human_ins == 4
+    # Non-tracked is the plain git commit (10); the seed commit adds no lines.
+    # It is deliberately NOT folded into "human": it could be agent work made
+    # outside aGiT just as easily as a human's.
+    assert nt_ins == 10
 
 
 def test_dashboard_sums_tokens_and_efficiency(tmp_path):
@@ -148,6 +157,11 @@ def test_render_dashboard_contains_all_sections(tmp_path):
         assert heading in text
     assert "aGiT-tracked commits: 5/7" in text
     assert "claude-opus-4-8" in text
+    # The three line-provenance classes are spelled out, never conflating
+    # untracked changes with human ones.
+    assert "AI (agent + covered)" in text
+    assert "Human (user commits, aGiT)" in text
+    assert "Non-tracked (outside aGiT)" in text
 
 
 def test_pr_merge_commit_does_not_double_count_the_cover_turn(tmp_path):
@@ -255,6 +269,7 @@ def test_dashboard_data_serializes_every_commit_with_filters(tmp_path):
 
     assert len(data["commits"]) == 7
     assert data["branch"]
+    assert data["head"]  # HEAD sha, so the live page can skip no-op re-renders
     # Filter option lists are derived from the (effective) commit fields.
     assert data["backends"] == ["claude"]
     assert data["models"] == ["claude-opus-4-8"]
@@ -277,21 +292,121 @@ def test_render_html_is_self_contained_with_embedded_data(tmp_path):
 
     assert html.startswith("<!DOCTYPE html>")
     assert "aGiT dashboard" in html
-    # The page ships its data inline (no server, no fetch) and the filter UI.
+    # The page ships its data inline so it renders instantly, then polls /data
+    # to stay live. The filter UI is present.
     data = _embedded_data(html)
     assert len(data["commits"]) == 7
     for control in ('id="f-author"', 'id="f-backend"', 'id="f-model"'):
         assert control in html
 
 
+# --- live localhost server -----------------------------------------------------
+
+
+def _serve(repo: GitRepo):
+    server = build_server(repo, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    return server, thread, base
+
+
+def _get(url: str) -> str:
+    with urllib.request.urlopen(url, timeout=5) as response:
+        return response.read().decode("utf-8")
+
+
+def test_dashboard_server_serves_html_and_live_data(tmp_path):
+    repo = _demo_repo(tmp_path)
+    server, thread, base = _serve(repo)
+    try:
+        html = _get(base + "/")
+        assert "<!DOCTYPE html>" in html and 'id="f-author"' in html
+
+        data = json.loads(_get(base + "/data"))
+        assert len(data["commits"]) == 7
+        first_head = data["head"]
+
+        # /data is recomputed each request, so a new commit shows up live.
+        _write_lines(repo, "live.txt", 3)
+        repo.commit(_agent_message("add a live change", tokens=_TOKENS))
+        refreshed = json.loads(_get(base + "/data"))
+        assert refreshed["head"] != first_head
+        assert len(refreshed["commits"]) == 8
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_dashboard_server_404s_unknown_paths(tmp_path):
+    server, thread, base = _serve(_demo_repo(tmp_path))
+    try:
+        try:
+            _get(base + "/nope")
+            raise AssertionError("expected HTTP 404")
+        except urllib.error.HTTPError as error:
+            assert error.code == 404
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 # --- CLI -----------------------------------------------------------------------
 
 
-def test_cli_dashboard_prints_report_and_exits(tmp_path, capsys, monkeypatch):
+def test_cli_dashboard_html_is_default_and_serves_on_localhost(tmp_path, monkeypatch):
+    _demo_repo(tmp_path)
+    served: dict[str, GitRepo] = {}
+
+    def fake_serve(repo, **kwargs):
+        served["repo"] = repo
+        return 0
+
+    monkeypatch.setattr(metrics, "serve_dashboard", fake_serve)
+
+    # Bare --dashboard now means html, which serves on localhost.
+    rc = cli.main(["--dashboard", "--repo", str(tmp_path)])
+
+    assert rc == 0
+    assert served["repo"].repo == GitRepo.discover(tmp_path).repo
+
+
+def test_cli_dashboard_shorthand_d_serves_like_dashboard(tmp_path, monkeypatch):
+    _demo_repo(tmp_path)
+    served: dict[str, GitRepo] = {}
+
+    def fake_serve(repo, **kwargs):
+        served["repo"] = repo
+        return 0
+
+    monkeypatch.setattr(metrics, "serve_dashboard", fake_serve)
+
+    # `-d` is shorthand for `--dashboard`; bare form defaults to html (serve).
+    assert cli.main(["-d", "--repo", str(tmp_path)]) == 0
+    assert served["repo"].repo == GitRepo.discover(tmp_path).repo
+
+
+def test_cli_dashboard_shorthand_d_accepts_text(tmp_path, capsys, monkeypatch):
+    _demo_repo(tmp_path)
+    monkeypatch.setattr(
+        metrics, "serve_dashboard", lambda *a, **k: (_ for _ in ()).throw(AssertionError("text must not serve"))
+    )
+
+    assert cli.main(["-d", "text", "--repo", str(tmp_path)]) == 0
+    assert "aGiT Dashboard" in capsys.readouterr().out
+
+
+def test_cli_dashboard_text_prints_report_and_exits(tmp_path, capsys, monkeypatch):
     _demo_repo(tmp_path)
     monkeypatch.setattr("builtins.input", lambda *a: (_ for _ in ()).throw(AssertionError("dashboard must not prompt")))
+    # The text path must never start a server.
+    monkeypatch.setattr(
+        metrics, "serve_dashboard", lambda *a, **k: (_ for _ in ()).throw(AssertionError("text must not serve"))
+    )
 
-    rc = cli.main(["--dashboard", "--repo", str(tmp_path)])
+    rc = cli.main(["--dashboard", "text", "--repo", str(tmp_path)])
 
     assert rc == 0
     out = capsys.readouterr().out
@@ -299,25 +414,11 @@ def test_cli_dashboard_prints_report_and_exits(tmp_path, capsys, monkeypatch):
     assert "aGiT-tracked commits" in out
 
 
-def test_cli_dashboard_html_writes_file_and_opens_browser(tmp_path, capsys, monkeypatch):
-    _demo_repo(tmp_path)
-    opened: list[str] = []
-    monkeypatch.setattr(cli.webbrowser, "open", lambda uri: opened.append(uri) or True)
-    monkeypatch.setattr(cli.tempfile, "gettempdir", lambda: str(tmp_path / "out"))
-    (tmp_path / "out").mkdir()
-
-    rc = cli.main(["--dashboard", "html", "--repo", str(tmp_path)])
-
-    assert rc == 0
-    out = capsys.readouterr().out
-    written = next(Path(line.split("written to ", 1)[1]) for line in out.splitlines() if "written to" in line)
-    assert written.exists() and written.suffix == ".html"
-    assert "<!DOCTYPE html>" in written.read_text(encoding="utf-8")
-    assert opened == [written.as_uri()]  # the browser was pointed at the file
-
-
-def test_cli_dashboard_outside_repo_fails_cleanly(tmp_path, capsys):
+def test_cli_dashboard_outside_repo_fails_cleanly(tmp_path, capsys, monkeypatch):
     (tmp_path / "plain").mkdir()
+    monkeypatch.setattr(
+        metrics, "serve_dashboard", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not serve"))
+    )
 
     rc = cli.main(["--dashboard", "--repo", str(tmp_path / "plain")])
 
@@ -325,5 +426,8 @@ def test_cli_dashboard_outside_repo_fails_cleanly(tmp_path, capsys):
     assert "Not a Git repository" in capsys.readouterr().out
 
 
-def test_cli_dashboard_missing_directory_fails_cleanly(tmp_path):
+def test_cli_dashboard_missing_directory_fails_cleanly(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        metrics, "serve_dashboard", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not serve"))
+    )
     assert cli.main(["--dashboard", "--repo", str(tmp_path / "nowhere")]) == 1

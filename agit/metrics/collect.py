@@ -114,11 +114,21 @@ class Dashboard:
 
     @property
     def ai_lines(self) -> tuple[int, int]:
+        # AI work: agent commits, the backend-made commits an aGiT cover commit
+        # accounts for (#58), and agent-resolved merges.
         return self.lines_changed("agent", "covered", "agent-merge")
 
     @property
     def human_lines(self) -> tuple[int, int]:
-        return self.lines_changed("user", "untracked")
+        # True human work: only user commits made *inside* aGiT carry the
+        # metadata that proves a human authored them.
+        return self.lines_changed("user")
+
+    @property
+    def nontracked_lines(self) -> tuple[int, int]:
+        # No aGiT metadata: could be a human commit made outside aGiT, or an
+        # agent's commit that was never tracked. Deliberately NOT called human.
+        return self.lines_changed("untracked")
 
     @property
     def token_totals(self) -> dict[str, int]:
