@@ -2585,6 +2585,7 @@ class ProxyRunner:
             "agit_session_id": self.state.session_id,
             "updated": int(time.time()),
             "content_hash": digest,
+            "transcript_bytes": backend.transcript_size(self.base_repo.repo, session_id),
         }
         return login, name, redacted, digest, manifest
 
@@ -2609,8 +2610,10 @@ class ProxyRunner:
         return message
 
     def _manage_shared_sessions_menu(self) -> None:
+        # Must open instantly: read only the LOCAL ref (no network fetch — your own
+        # shares are already here) and label each entry from cheap data only
+        # (manifest + a stat-sized "newer?" check), never a transcript read/redact.
         store = self._shared_store()
-        store.fetch()
         login = self.global_config.github_login or self._cached_or_resolve_login()
         mine = [entry for entry in store.entries() if entry.github_id == login]
         if not mine:
@@ -2632,13 +2635,15 @@ class ProxyRunner:
         self._manage_one_shared_session(mine[options.index(choice)])
 
     def _shared_entry_status(self, entry, session_id: str) -> str:
-        raw = self.backend.export_session_raw(self.base_repo.repo, session_id) if session_id else None
-        if not raw:
+        # Cheap "is the shared copy current?" — compare the transcript's byte size
+        # (a stat) to the size recorded when it was shared. No read, no redact.
+        shared_bytes = entry.manifest.get("transcript_bytes")
+        current = self.backend.transcript_size(self.base_repo.repo, session_id) if session_id else None
+        if not shared_bytes or current is None:
             return "shared"
-        from agit.sessions import redact_transcript
-
-        current = hashlib.sha256(redact_transcript(raw).encode("utf-8")).hexdigest()
-        return "shared (up to date)" if current == entry.manifest.get("content_hash") else "local has newer turns"
+        if current > shared_bytes:
+            return "local has newer turns — Update to push them"
+        return "shared (up to date)"
 
     def _manage_one_shared_session(self, entry) -> None:
         sid = entry.manifest.get("session_id", "")
@@ -2677,6 +2682,7 @@ class ProxyRunner:
             **entry.manifest,
             "updated": int(time.time()),
             "content_hash": hashlib.sha256(redacted.encode("utf-8")).hexdigest(),
+            "transcript_bytes": self.backend.transcript_size(self.base_repo.repo, sid),
         }
         try:
             result = self._shared_store().publish(
@@ -2787,6 +2793,7 @@ class ProxyRunner:
                 "agit_session_id": ctx["agit_session_id"],
                 "updated": int(time.time()),
                 "content_hash": digest,
+                "transcript_bytes": backend.transcript_size(ctx["base_repo_path"], sid),
             }
             ctx["store"].publish(github_id=ctx["login"], name=ctx["name"], transcript=redacted, manifest=manifest)
         except Exception as error:

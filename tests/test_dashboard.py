@@ -650,6 +650,28 @@ def test_shared_sessions_for_is_safe_without_sharing(tmp_path):
     assert shared_sessions_for(_demo_repo(tmp_path)) == []  # nothing shared ⇒ empty, no error
 
 
+def test_shared_sessions_survive_a_fetch_failure(tmp_path, monkeypatch):
+    # A transient fetch error (e.g. racing a concurrent auto-share push) must NOT
+    # blank the dashboard's list — fall back to the local ref. Regression for the
+    # "shared session disappeared from the dashboard" report.
+    from agit.metrics.web import shared_sessions_for
+    from agit.sessions import SharedSessionStore
+
+    repo = _demo_repo(tmp_path)
+    SharedSessionStore(repo).publish(
+        github_id="alice",
+        name="s",
+        transcript="t",
+        manifest={"github_id": "alice", "name": "s", "session_id": "x", "updated": 1},
+    )
+
+    def boom(self):
+        raise RuntimeError("network hiccup mid-push")
+
+    monkeypatch.setattr(SharedSessionStore, "fetch_throttled", boom)
+    assert [s["name"] for s in shared_sessions_for(repo)] == ["s"]  # still shown from the local ref
+
+
 def test_timeseries_respects_filters(tmp_path):
     from agit.metrics.web import aggregates_payload
 

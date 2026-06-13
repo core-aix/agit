@@ -25,6 +25,10 @@ class ProxyAgent(Protocol):
     def export_session_raw(self, repo: Path, session_id: str) -> str | None:
         """The full transcript text to share, or None if unavailable/unsupported."""
 
+    def transcript_size(self, repo: Path, session_id: str) -> int | None:
+        """Byte size of the session transcript (a cheap stat), or None — for a fast
+        'is the shared copy current?' check without reading the whole file."""
+
     def import_shared_session(self, repo: Path, session_id: str, transcript: str) -> bool:
         """Install a shared transcript so the session can be resumed in ``repo``.
         Returns True on success; False if unsupported."""
@@ -75,6 +79,9 @@ class OpenCodeProxyAgent:
 
     def export_session_raw(self, repo: Path, session_id: str) -> str | None:
         return None  # OpenCode has no portable per-session transcript file
+
+    def transcript_size(self, repo: Path, session_id: str) -> int | None:
+        return None
 
     def import_shared_session(self, repo: Path, session_id: str, transcript: str) -> bool:
         return False
@@ -127,6 +134,9 @@ class ClaudeProxyAgent:
 
     def export_session_raw(self, repo: Path, session_id: str) -> str | None:
         return claude_session.export_session_raw(repo, session_id)
+
+    def transcript_size(self, repo: Path, session_id: str) -> int | None:
+        return claude_session.session_transcript_size(repo, session_id)
 
     def import_shared_session(self, repo: Path, session_id: str, transcript: str) -> bool:
         return claude_session.import_shared_session(repo, session_id, transcript)

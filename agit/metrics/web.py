@@ -48,7 +48,16 @@ def shared_sessions_for(repo: GitRepo) -> list[dict]:
         from agit.sessions import SharedSessionStore
 
         store = SharedSessionStore(repo)
+    except Exception:
+        return []
+    # The remote fetch is a best-effort extra (others' shares); a transient failure
+    # (e.g. racing a concurrent auto-share push) must NOT blank the list — fall back
+    # to the local ref, which always holds your own shared sessions.
+    try:
         store.fetch_throttled()
+    except Exception:
+        pass
+    try:
         return [
             {
                 "github_id": entry.github_id,
@@ -1219,11 +1228,16 @@ async function applyFilters(){
 }
 async function refresh(){
   const prev = HEAD;
-  if(await loadAgg() && HEAD !== prev){  // new commits landed — refresh the view
+  if(!await loadAgg()) return;
+  if(HEAD !== prev){  // new commits landed — refresh the whole view
     reapplyLookback();  // keep the chosen SHOW window over the new buckets
     setDateBounds(); syncPeriodDates();  // extend the shown range to new commits
     await loadLog(LOGPAGE.offset||0);
-    syncFilters(); renderAgg(); renderLog();
+    syncFilters(); renderAgg(); renderLog();  // renderAgg() also repaints shared sessions
+  } else {
+    // No new commit, but shared sessions (and their "updated" age) still need to
+    // refresh every poll — e.g. an auto-share just bumped a session's timestamp.
+    renderShared();
   }
 }
 

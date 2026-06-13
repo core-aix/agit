@@ -21,6 +21,7 @@ __all__ = [
     "session_belongs_to_repo",
     "export_session",
     "export_session_raw",
+    "session_transcript_size",
     "import_shared_session",
     "prepare_resume",
     "link_session",
@@ -230,6 +231,23 @@ def export_session_raw(repo: Path, session_id: str) -> str | None:
         return None
     try:
         return path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
+def session_transcript_size(repo: Path, session_id: str) -> int | None:
+    """Byte size of a session's transcript file (a cheap ``stat``, no read) — used
+    to tell at a glance whether the local conversation has grown past the shared
+    copy without re-reading/redacting it. None when the transcript isn't found."""
+    if not session_id:
+        return None
+    path: Path | None = _session_path(Path(repo), session_id)
+    if path is None or not path.is_file():
+        path = _find_session_file(session_id)
+    if path is None:
+        return None
+    try:
+        return path.stat().st_size
     except OSError:
         return None
 

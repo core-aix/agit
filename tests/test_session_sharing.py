@@ -258,6 +258,9 @@ class _StubBackend:
     def export_session_raw(self, repo, session_id):
         return self._transcript
 
+    def transcript_size(self, repo, session_id):
+        return len(self._transcript.encode("utf-8"))
+
     def import_shared_session(self, repo, session_id, transcript):
         self.imported = (session_id, transcript)
         return True
@@ -406,6 +409,48 @@ def test_runner_manage_unshare_removes_session(tmp_path, monkeypatch):
     runner._manage_shared_sessions_menu()
 
     assert SharedSessionStore(repo).entries() == []
+
+
+def test_manage_menu_opens_without_fetch_or_transcript_read(tmp_path, monkeypatch):
+    # The menu must open instantly: no network fetch, and no transcript read/redact
+    # while building the list (the "takes a few seconds" bug).
+    backend = _StubBackend()
+    runner, repo = _runner_with_store(tmp_path, monkeypatch, backend)
+    SharedSessionStore(repo).publish(
+        github_id="tester",
+        name="s1",
+        transcript="t",
+        manifest={"github_id": "tester", "name": "s1", "session_id": "sid-123", "updated": 1, "transcript_bytes": 5},
+    )
+
+    def boom_fetch(*a, **k):
+        raise AssertionError("manage menu must not fetch from the network")
+
+    def boom_read(*a, **k):
+        raise AssertionError("manage menu must not read/redact transcripts to build the list")
+
+    monkeypatch.setattr(repo, "fetch_ref", boom_fetch)
+    backend.export_session_raw = boom_read
+    captured = {}
+    runner._select_popup = lambda title, options: captured.update(title=title, options=options) or None
+
+    runner._manage_shared_sessions_menu()
+
+    assert captured["title"].startswith("Your shared sessions")
+    assert len(captured["options"]) == 1 and "s1" in captured["options"][0]
+
+
+def test_shared_entry_status_is_size_based(tmp_path, monkeypatch):
+    from agit.sessions import SharedEntry
+
+    backend = _StubBackend(transcript="x" * 100)  # current transcript = 100 bytes
+    runner, _repo = _runner_with_store(tmp_path, monkeypatch, backend)
+    up_to_date = SharedEntry("tester", "s", {"session_id": "sid-123", "transcript_bytes": 100})
+    grown = SharedEntry("tester", "s", {"session_id": "sid-123", "transcript_bytes": 50})
+    unknown = SharedEntry("tester", "s", {"session_id": "sid-123"})  # no recorded size
+    assert "up to date" in runner._shared_entry_status(up_to_date, "sid-123")
+    assert "newer turns" in runner._shared_entry_status(grown, "sid-123")
+    assert runner._shared_entry_status(unknown, "sid-123") == "shared"
 
 
 def test_claude_backend_flags_sharing_support(tmp_path):
