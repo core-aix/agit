@@ -135,6 +135,119 @@ def test_kitty_escape_key_decoding():
     assert _decode_kitty_ctrl_keys(b"\x1b") == b"\x1b"
 
 
+def test_modify_other_keys_ctrl_decoding():
+    """iTerm2 answers modifyOtherKeys with CSI 27 ; mod ; code ~ — decode Ctrl keys.
+
+    Regression: in iTerm on macOS Ctrl-C / Ctrl-G arrived in this form and were
+    forwarded to the backend instead of opening aGiT's exit/menu.
+    """
+    from agit.proxy.runner import _decode_kitty_ctrl_keys
+
+    # Ctrl-C (c=99) → 0x03; Ctrl-G (g=103) → 0x07.
+    assert _decode_kitty_ctrl_keys(b"\x1b[27;5;99~") == b"\x03"
+    assert _decode_kitty_ctrl_keys(b"\x1b[27;5;103~") == b"\x07"
+    # Ctrl-A / Ctrl-Z bounds.
+    assert _decode_kitty_ctrl_keys(b"\x1b[27;5;97~") == b"\x01"
+    assert _decode_kitty_ctrl_keys(b"\x1b[27;5;122~") == b"\x1a"
+    # Mixed with surrounding text.
+    assert _decode_kitty_ctrl_keys(b"ab\x1b[27;5;103~cd") == b"ab\x07cd"
+    # Escape: CSI 27 ; 1 ; 27 ~ → \x1b.
+    assert _decode_kitty_ctrl_keys(b"\x1b[27;1;27~") == b"\x1b"
+    # Non-Ctrl modifiers are left encoded for the backend (Shift+Enter, mod 2,
+    # code 13 — must NOT be turned into a bare \r that would submit a prompt).
+    assert _decode_kitty_ctrl_keys(b"\x1b[27;2;13~") == b"\x1b[27;2;13~"
+
+
+def test_modify_other_keys_ctrl_g_opens_menu():
+    # End-to-end of the iTerm path: the modifyOtherKeys Ctrl-G decodes to \x07 and
+    # is matched as the (default) menu key rather than forwarded to the backend.
+    from agit.proxy.runner import _decode_kitty_ctrl_keys
+
+    decoded = _decode_kitty_ctrl_keys(b"\x1b[27;5;103~")
+    parser = ProxyInput(menu_key=b"\x07")  # default Ctrl-G
+    forwarded, _local_echo, command, should_exit = parser.feed(decoded + b"git-status\r")
+
+    assert forwarded == []
+    assert command == "git-status"
+    assert should_exit is False
+
+
+def test_modify_other_keys_ctrl_c_triggers_exit():
+    # The modifyOtherKeys Ctrl-C decodes to \x03 and starts aGiT's exit flow
+    # instead of being forwarded to the backend.
+    from agit.proxy.runner import _decode_kitty_ctrl_keys
+
+    decoded = _decode_kitty_ctrl_keys(b"\x1b[27;5;99~")
+    parser = ProxyInput(menu_key=b"\x07")
+    forwarded, _local_echo, _command, should_exit = parser.feed(decoded)
+
+    assert should_exit is True
+    assert forwarded == []
+
+
+def _drive_host_input(runner, parser, chunks):
+    """Mimic _reactor_stdin_phase's tail-hold → decode → feed pipeline.
+
+    Runs each chunk through the same steps the reactor does for host stdin so a
+    test can exercise the full path (including escape sequences split across
+    reads) for either keyboard protocol.
+    """
+    from agit.proxy.runner import _decode_kitty_ctrl_keys
+
+    forwarded_all: list[bytes] = []
+    command = None
+    should_exit = False
+    for chunk in chunks:
+        data = runner._input_tail + chunk
+        data, runner._input_tail = runner._hold_incomplete_tail(data)
+        data = _decode_kitty_ctrl_keys(data)
+        forwarded, _echo, cmd, ex = parser.feed(data)
+        forwarded_all.extend(forwarded)
+        command = cmd or command
+        should_exit = should_exit or ex
+    return forwarded_all, command, should_exit
+
+
+# The same Ctrl-G / Ctrl-C in each of the two enhanced keyboard encodings a host
+# terminal may use once the backend negotiates one: kitty (CSI code;5u, the
+# earlier fix) and xterm modifyOtherKeys (CSI 27;5;code~, what iTerm2 sends).
+_CTRL_G_ENCODINGS = {"kitty": b"\x1b[103;5u", "modifyOtherKeys": b"\x1b[27;5;103~"}
+_CTRL_C_ENCODINGS = {"kitty": b"\x1b[99;5u", "modifyOtherKeys": b"\x1b[27;5;99~"}
+
+
+@pytest.mark.parametrize("protocol", ["kitty", "modifyOtherKeys"])
+def test_menu_key_opens_under_both_keyboard_protocols(protocol):
+    runner = make_runner()
+    parser = ProxyInput(menu_key=b"\x07")  # default Ctrl-G
+    forwarded, command, should_exit = _drive_host_input(runner, parser, [_CTRL_G_ENCODINGS[protocol] + b"git-status\r"])
+    assert forwarded == []
+    assert command == "git-status"
+    assert should_exit is False
+
+
+@pytest.mark.parametrize("protocol", ["kitty", "modifyOtherKeys"])
+def test_ctrl_c_exits_under_both_keyboard_protocols(protocol):
+    runner = make_runner()
+    parser = ProxyInput(menu_key=b"\x07")
+    forwarded, _command, should_exit = _drive_host_input(runner, parser, [_CTRL_C_ENCODINGS[protocol]])
+    assert should_exit is True
+    assert forwarded == []
+
+
+@pytest.mark.parametrize("protocol", ["kitty", "modifyOtherKeys"])
+def test_menu_key_split_across_reads_under_both_protocols(protocol):
+    # The single-byte menu key relies on _hold_incomplete_tail to reassemble an
+    # escape sequence split across reads before decoding — verify for both forms.
+    runner = make_runner()
+    parser = ProxyInput(menu_key=b"\x07")
+    seq = _CTRL_G_ENCODINGS[protocol]
+    split = len(seq) - 2  # cut mid-sequence, before the final u / ~
+    forwarded, command, should_exit = _drive_host_input(runner, parser, [seq[:split], seq[split:] + b"exit\r"])
+    assert forwarded == []
+    assert command == "exit"
+    assert should_exit is False
+
+
 def test_proxy_menu_key_works_with_kitty_encoding():
     """Test that the menu key works even when terminal sends kitty-encoded keys."""
     from agit.proxy.runner import _decode_kitty_ctrl_keys
