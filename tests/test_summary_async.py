@@ -284,8 +284,9 @@ def test_failed_rolling_summary_does_not_discard_commit_summary(tmp_path, monkey
 
 
 def test_summary_popups_name_the_owning_session(tmp_path, monkeypatch):
-    # Background sessions summarize too, and a summary can land after the user
-    # switched away: every popup must say which session it is about.
+    # Background sessions summarize too: the "summarizing…" popup must say which
+    # session it is about, and a summary that lands after the user switched away
+    # must still be applied to the OWNING session's commit, not the active one.
     runner, repo = _summary_runner(tmp_path, monkeypatch)
     runner.name = "feature-x"
     sha = _commit_change(repo, "a.txt", "<aGiT> prompt subject")
@@ -295,7 +296,11 @@ def test_summary_popups_name_the_owning_session(tmp_path, monkeypatch):
 
     runner.name = "other"  # the user switched sessions before the summary landed
     _finish_summary(runner)
-    assert (runner.message or "").endswith("in session 'feature-x'.")
+    # The summary was amended into the owning session's commit (correct
+    # attribution) and the owning session is flagged as summarized so its
+    # eventual "created & merged" notice can say so.
+    assert repo.commit_message("HEAD").startswith("<aGiT> Implement the widget renderer")
+    assert runner._commit_summarized is True
 
 
 def test_failed_summary_popup_names_the_owning_session(tmp_path, monkeypatch):

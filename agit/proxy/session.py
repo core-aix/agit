@@ -71,6 +71,14 @@ class Session:
         "last_child_output",
         "last_child_output_sample",
         "_pre_spawn_session_ids",
+        # background commit summarization (#8) — per session so two sessions can
+        # summarize concurrently, each with its own worker/result/pending slot
+        "_summary_thread",
+        "_summary_result",
+        "_summary_pending",
+        "_last_agent_commit_id",
+        "_commit_merged_pending",
+        "_commit_summarized",
         # pending passthrough prompt
         "passthrough_prompt",
         "passthrough_escape",
@@ -90,11 +98,17 @@ class Session:
     __slots__ = tuple(f for f in FIELDS if f not in ("child_pid", "master_fd")) + ("process",)
 
     if TYPE_CHECKING:
-        # Per-session fields are set dynamically from FIELDS; annotate the one
-        # accessed with a concrete type so mypy can check it.
+        # Per-session fields are set dynamically from FIELDS; annotate the ones
+        # accessed directly on a Session object so mypy can check them.
         state: "AgitState | None"
         last_child_output: float
         last_poll: float
+        _summary_thread: "threading.Thread | None"
+        _summary_result: "dict | None"
+        _summary_pending: "dict | None"
+        _last_agent_commit_id: "str | None"
+        _commit_merged_pending: bool
+        _commit_summarized: bool
 
     def __init__(self, **fields) -> None:
         self.process = BackendProcess(
@@ -167,6 +181,12 @@ class Session:
             "last_child_output": 0.0,
             "last_child_output_sample": b"",
             "_pre_spawn_session_ids": None,
+            "_summary_thread": None,
+            "_summary_result": None,
+            "_summary_pending": None,
+            "_last_agent_commit_id": None,
+            "_commit_merged_pending": False,
+            "_commit_summarized": False,
             "passthrough_prompt": bytearray(),
             "passthrough_escape": None,
             "pending_forwarded": None,

@@ -604,9 +604,33 @@ def test_finish_agent_parse_does_not_block_on_cancelled_followup(tmp_path):
 
 
 def test_agent_commit_popup_includes_commit_id_and_session(tmp_path):
-    # The auto-commit confirmation names the short SHA so the user can find the
-    # commit aGiT just made, and the session it belongs to — background sessions
-    # auto-commit too, so the popup alone must say whose work it announces.
+    # The auto-commit confirmation — shown only once the commit is MERGED into the
+    # base — names the short SHA so the user can find the commit, the session it
+    # belongs to (background sessions auto-commit too), and the base it landed on.
+    runner = make_runner(
+        repo=FakeCommitRepo(),
+        state=AgitState(tmp_path),
+        verbose=False,
+        name="feature-x",
+        _base_branch="main",
+    )
+    runner._last_agent_commit_id = "abc1234"
+    runner._commit_merged_pending = True
+
+    runner._announce_commit_merged()
+
+    assert runner.message == "Created <aGiT> commit abc1234 in session 'feature-x' — merged into main."
+    # Summarized turns note that in the same line.
+    runner._last_agent_commit_id = "def5678"
+    runner._commit_merged_pending = True
+    runner._commit_summarized = True
+    runner._announce_commit_merged()
+    assert runner.message == "Created <aGiT> commit def5678 in session 'feature-x' — merged into main (summarized)."
+
+
+def test_agent_commit_not_announced_before_merge(tmp_path):
+    # The "created" popup must NOT appear at commit time — only after the turn is
+    # merged into the base. Committing just arms the deferred announcement.
     runner = make_runner(
         repo=FakeCommitRepo(),
         state=AgitState(tmp_path),
@@ -614,6 +638,7 @@ def test_agent_commit_popup_includes_commit_id_and_session(tmp_path):
         name="feature-x",
     )
     runner._review_untracked_popup = lambda include_declined: "No untracked files to review."
+    runner.state.summarization_enabled = False  # no summarizer popup either
 
     committed = runner._create_agent_commit_from_turns_popup(
         turns=[SessionTurn("u1", "a1", "do the thing", "done", TokenUsage(total=1, output=1), None)],
@@ -624,7 +649,8 @@ def test_agent_commit_popup_includes_commit_id_and_session(tmp_path):
     )
 
     assert committed is True
-    assert runner.message == "Created <aGiT> commit abc1234 in session 'feature-x'."
+    assert runner._commit_merged_pending is True  # armed, awaiting integration
+    assert runner.message is None  # nothing announced yet
 
 
 def _make_cell(data=" ", **attrs):
@@ -1047,6 +1073,76 @@ def test_set_message_requests_a_render():
     runner._set_message("Created <aGiT> commit.", sticky=True)
 
     assert runner._render_pending is True
+
+
+def test_session_notices_compose_into_multiline_popup():
+    # Concurrent sessions each get their own status line; the popup shows both.
+    runner = make_runner()
+    runner._set_session_notice("alpha", "aGiT is summarizing commit a1 in session 'alpha'…", seconds=30)
+    runner._set_session_notice("beta", "aGiT is summarizing commit b2 in session 'beta'…", seconds=30)
+
+    assert runner.message is not None
+    lines = runner.message.split("\n")
+    assert lines == [
+        "aGiT is summarizing commit a1 in session 'alpha'…",
+        "aGiT is summarizing commit b2 in session 'beta'…",
+    ]
+    assert runner._notice_shown is True
+
+
+def test_session_notice_replaces_same_session_line():
+    # A session's later notice replaces its own line in place (no duplicate line).
+    runner = make_runner()
+    runner._set_session_notice("alpha", "aGiT is summarizing commit a1 in session 'alpha'…", seconds=30)
+    runner._set_session_notice("beta", "aGiT is summarizing commit b2 in session 'beta'…", seconds=30)
+    runner._set_session_notice("alpha", "Created <aGiT> commit a1 in session 'alpha' — merged into main.")
+
+    lines = runner.message.split("\n")
+    assert lines == [
+        "Created <aGiT> commit a1 in session 'alpha' — merged into main.",
+        "aGiT is summarizing commit b2 in session 'beta'…",
+    ]
+
+
+def test_expired_session_notice_line_is_dropped_on_service():
+    runner = make_runner()
+    runner._set_session_notice("alpha", "alpha line", seconds=30)
+    runner._set_session_notice("beta", "beta line", seconds=30)
+    # Expire only beta's line.
+    text, _until, sticky = runner._session_notices["beta"]
+    runner._session_notices["beta"] = (text, time.monotonic() - 1, sticky)
+
+    runner._service_session_notices()
+
+    assert runner.message == "alpha line"
+    assert "beta" not in runner._session_notices
+
+
+def test_all_notices_expiring_clears_the_popup():
+    runner = make_runner()
+    runner._set_session_notice("alpha", "alpha line", seconds=30)
+    text, _until, sticky = runner._session_notices["alpha"]
+    runner._session_notices["alpha"] = (text, time.monotonic() - 1, sticky)
+
+    runner._service_session_notices()
+
+    assert runner.message is None
+    assert runner._notice_shown is False
+
+
+def test_one_off_message_takes_over_then_notices_reassert():
+    runner = make_runner()
+    runner._set_session_notice("alpha", "alpha line", seconds=30)
+    # A one-off message (e.g. an error) temporarily takes over the popup.
+    runner._set_message("Cancelled.", seconds=4)
+    assert runner.message == "Cancelled." and runner._notice_shown is False
+    # While the one-off is still live, the service tick leaves it alone.
+    runner._service_session_notices()
+    assert runner.message == "Cancelled."
+    # Once it expires, the live notice reasserts itself.
+    runner.message_until = time.monotonic() - 1
+    runner._service_session_notices()
+    assert runner.message == "alpha line"
 
 
 def test_track_sync_update_defers_then_releases_render():
@@ -2046,6 +2142,42 @@ def test_integrate_clean_merge_advances_base_without_prompt():
     assert calls == [("advance", "agit/session-1/t1")]
 
 
+def test_created_notice_fires_only_after_merge_into_base():
+    # The deferred "created" announcement appears when (and only when) the turn
+    # merges into the base — never at commit time.
+    runner = _integration_runner(merge_ok=True)
+    runner._advance_base_to = lambda src: None
+    runner._last_agent_commit_id = "abc1234"
+    runner._commit_merged_pending = True  # armed by the commit
+
+    result = runner._integrate_turn_or_conflict()
+
+    assert result == "integrated"
+    assert runner.message == "Created <aGiT> commit abc1234 in session 'session-1' — merged into main."
+    assert runner._commit_merged_pending is False  # consumed, won't repeat
+
+
+def test_no_created_notice_when_nothing_pending():
+    # Integrating with no just-made commit (e.g. a manual integrate of older
+    # work) stays silent rather than claiming a commit was created.
+    runner = _integration_runner(merge_ok=True)
+    runner._advance_base_to = lambda src: None
+    runner._commit_merged_pending = False
+
+    assert runner._integrate_turn_or_conflict() == "integrated"
+    assert runner.message is None
+
+
+def test_conflict_does_not_fire_created_notice():
+    runner = _integration_runner(merge_ok=False)
+    runner._prompt_resolve_conflict = lambda src: None
+    runner._commit_merged_pending = True
+
+    assert runner._integrate_turn_or_conflict() == "conflict"
+    assert runner.message is None  # not merged → not announced
+    assert runner._commit_merged_pending is True  # still armed for a later retry
+
+
 def test_integrate_conflict_on_exit_leaves_for_startup():
     runner = _integration_runner(merge_ok=False)
     runner._exiting = True
@@ -2200,6 +2332,22 @@ def test_switch_backend_noop_when_same_backend(monkeypatch):
     runner._switch_backend("claude")
 
     assert called == [] and any("Already using" in m for m in msgs)
+
+
+def test_background_integration_defers_while_its_summary_is_pending():
+    # A background session waits to integrate until its own summary is ready
+    # (same as the active path), so the summary lands in the message and the
+    # session's "summarizing…" status line stays up while it computes.
+    runner = make_runner(worktree=object(), _base_branch="main")
+    runner.repo = types.SimpleNamespace(has_changes=lambda: False)
+    runner._uncovered_backend_commits = lambda: []
+    runner._clear_agent_in_flight_if_idle = lambda: None
+    runner._summary_blocks_integration = lambda now: True
+    integrated = []
+    runner._integrate_turn_or_conflict = lambda: integrated.append(1) or "integrated"
+
+    assert runner._commit_and_integrate_background() == "skip"
+    assert integrated == []  # not integrated while the summary is still computing
 
 
 def test_service_background_integrates_idle_session_cleanly():

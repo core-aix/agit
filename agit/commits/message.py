@@ -147,16 +147,27 @@ def summary_metadata_lines(*, model: str | None, tokens_input: int = 0, tokens_o
     return lines
 
 
+def _is_summary_header(line: str) -> bool:
+    """A line that is only the word "summary" plus non-letters — e.g. ``Summary``,
+    ``Summary:``, ``## Summary``, ``**Summary**``. Models sometimes emit such a
+    header as the first line; left alone it becomes a useless commit subject."""
+    return re.sub(r"[^a-zA-Z]", "", line).lower() == "summary"
+
+
 def _summary_lead_lines(summary: str) -> list[str]:
     """Subject + leading body for a summarized message.
 
     Mirrors the prompt-led layout: the summary's first line is the subject
     (a truncated subject flows straight into its full text, no blank line),
     and the rest of the summary follows as the first paragraph of the body —
-    there is no separate ``# Summary`` section.
+    there is no separate ``# Summary`` section. A leading bare "Summary" header
+    line is skipped so the subject is never just the word "summary".
     """
     text_lines = _mask_secrets(summary).strip().splitlines()
-    first_index = next((i for i, line in enumerate(text_lines) if line.strip()), None)
+    first_index = next(
+        (i for i, line in enumerate(text_lines) if line.strip() and not _is_summary_header(line)),
+        None,
+    )
     first_line = text_lines[first_index] if first_index is not None else DEFAULT_SUBJECT
     remainder = text_lines[first_index + 1 :] if first_index is not None else []
     while remainder and not remainder[0].strip():
