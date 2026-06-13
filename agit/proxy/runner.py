@@ -2907,6 +2907,7 @@ class ProxyRunner:
             return None
         data = os.read(sys.stdin.fileno(), 4096)
         self._raw_capture(">", data)
+        self._debug(f"stdin: {data!r} menu_key={self.input.menu_key!r}")
         # Any keypress dismisses a sticky message (e.g. the auto-commit
         # confirmation) so it no longer overlays the live view; repaint to
         # remove the popup even if the key produces no child echo.
@@ -2915,8 +2916,10 @@ class ProxyRunner:
         data = self._input_tail + data
         data, self._input_tail = self._hold_incomplete_tail(data)
         data = self._intercept_scroll(data)
+        self._debug(f"after intercept: {data!r}")
         was_capturing = self.input.capturing
         forwarded, local_echo, command, should_exit = self.input.feed(data)
+        self._debug(f"feed result: forwarded={forwarded!r} command={command!r} capturing={self.input.capturing}")
         if should_exit:
             # One shared flow (also reachable from inside popups): a
             # second Ctrl-C during the confirmation popup exits
