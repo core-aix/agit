@@ -86,9 +86,46 @@ _PYTE_HOSTILE_CSI_RE = re.compile(rb"\x1b\[[<>=][0-9;:]*[ -/]*[@-~]")
 # Shift+Enter instead of the disambiguated encoding the backend's keybindings
 # (e.g. Claude's newline-in-input) expect.
 _KEYBOARD_PROTO_RE = re.compile(rb"\x1b\[(?:[><=][0-9;]*u|\?u|>4(?:;[0-9]+)?m)")
+# Kitty keyboard protocol encoding for control keys: CSI <keycode> ; <modifiers> u
+# For Ctrl-A through Ctrl-Z: keycode is 97-122 (lowercase a-z), modifier is 5 (Ctrl+base)
+# We decode these back to plain control bytes (0x01-0x1a) so the menu key works
+# even when the terminal is in kitty keyboard protocol mode.
+_KITTY_CTRL_KEY_RE = re.compile(rb"\x1b\[(\d+);5u")
+# Kitty keyboard protocol encoding for Escape key: CSI 27 u or CSI 27 ; 1 u
+# We decode this back to plain \x1b so Esc handling works in kitty mode.
+_KITTY_ESC_KEY_RE = re.compile(rb"\x1b\[27(?:;1)?u")
 # A bracketed paste (CSI 200~ ... CSI 201~, possibly split across reads, hence
 # the `|$`): newlines inside it are pasted CONTENT, not prompt submissions.
 _BRACKETED_PASTE_RE = re.compile(rb"\x1b\[200~.*?(?:\x1b\[201~|$)", re.S)
+
+
+def _decode_kitty_ctrl_keys(data: bytes) -> bytes:
+    """Decode kitty keyboard protocol control keys and Escape to plain bytes.
+
+    When the terminal is in kitty keyboard protocol mode:
+    - Ctrl-A through Ctrl-Z are sent as escape sequences like \\x1b[97;5u (Ctrl-A)
+      instead of plain bytes like \\x01.
+    - Escape is sent as \\x1b[27u instead of plain \\x1b.
+
+    This function converts them back to plain bytes so the menu key matching
+    and Esc handling work correctly.
+
+    Only decodes Ctrl keys (modifier 5 = Ctrl+base) and Escape. Other keys are left unchanged.
+    """
+    # First decode Escape key
+    data = _KITTY_ESC_KEY_RE.sub(b"\x1b", data)
+
+    # Then decode control keys
+    def replace_kitty_ctrl(match: re.Match) -> bytes:
+        keycode = int(match.group(1))
+        # keycode 97-122 = lowercase a-z
+        # Ctrl-A = 0x01, Ctrl-B = 0x02, ..., Ctrl-Z = 0x1a
+        if 97 <= keycode <= 122:
+            return bytes([keycode - 96])
+        # Not a letter, return unchanged
+        return match.group(0)
+
+    return _KITTY_CTRL_KEY_RE.sub(replace_kitty_ctrl, data)
 
 
 def _short_session(session_id: str | None) -> str:
@@ -139,9 +176,13 @@ class ProxyInput:
         self.buffer = bytearray()
         self.selected_index = 0
         self.escape_buffer: bytearray | None = None
-        # The control byte that opens the command menu (default Ctrl-G;
-        # configurable via "menu_key" in ~/.agit/config.json).
+        # The control byte or sequence that opens the command menu (default Ctrl-G;
+        # configurable via "menu_key" in ~/.agit/config.json). For shift-modified keys,
+        # this is a multi-byte kitty keyboard protocol escape sequence.
         self.menu_key = menu_key
+        # Buffer for accumulating partial matches of multi-byte menu key sequences.
+        # Only used when menu_key is longer than 1 byte.
+        self.menu_key_buffer = bytearray()
 
     def feed(self, data: bytes) -> tuple[list[bytes], bytes, str | None, bool]:
         forwarded: list[bytes] = []
@@ -202,13 +243,38 @@ class ProxyInput:
                     self.selected_index = 0
                 continue
 
-            if char == self.menu_key:
-                self.capturing = True
-                self.selected_index = 0
-                self.escape_buffer = None
-                continue
+            # Check for menu key match (single byte or multi-byte sequence)
+            if len(self.menu_key) == 1:
+                # Single byte menu key (plain ctrl-<letter>)
+                if char == self.menu_key:
+                    self.capturing = True
+                    self.selected_index = 0
+                    self.escape_buffer = None
+                    continue
+                forwarded.append(char)
+            else:
+                # Multi-byte menu key sequence (ctrl+shift+<letter>)
+                self.menu_key_buffer.append(byte)
+                buffer_bytes = bytes(self.menu_key_buffer)
 
-            forwarded.append(char)
+                # Check if we have a complete match
+                if buffer_bytes == self.menu_key:
+                    self.capturing = True
+                    self.selected_index = 0
+                    self.escape_buffer = None
+                    self.menu_key_buffer.clear()
+                    continue
+
+                # Check if we have a partial match (prefix of menu_key)
+                if self.menu_key.startswith(buffer_bytes):
+                    # Still accumulating, don't forward yet
+                    continue
+
+                # No match - forward the buffered bytes (which includes current byte)
+                # and clear the buffer
+                forwarded.append(buffer_bytes)
+                self.menu_key_buffer.clear()
+
         return forwarded, b"", command, should_exit
 
     def text(self) -> str:
@@ -290,7 +356,10 @@ class ProxyRunner:
         self.backend = make_proxy_agent(self.state.backend)
         self.actions = AgitActions(repo, self.state, verbose=verbose)
         self.verbose = verbose
-        self.input = ProxyInput(menu_key=self.global_config.menu_key_byte)
+        # Use the menu key sequence (single byte for ctrl-<letter>, multi-byte
+        # escape sequence for ctrl+shift+<letter>)
+        menu_key_seq = self.global_config.menu_key_sequence
+        self.input = ProxyInput(menu_key=menu_key_seq if menu_key_seq else self.global_config.menu_key_byte)
         self.child_pid: int | None = None
         self.master_fd: int | None = None
         self.last_poll = 0.0
@@ -331,6 +400,9 @@ class ProxyRunner:
         self.last_status_change = 0.0
         self.message: str | None = None
         self.message_until = 0.0
+        # Track whether we proactively enabled the kitty keyboard protocol for
+        # shift-modified menu keys. Used for cleanup on exit.
+        self._kitty_keyboard_enabled = False
         # A sticky message stays up until the user's next keypress instead of
         # timing out — used for the auto-commit confirmation so the user actually
         # sees that aGiT committed (and isn't misled by the backend asking to
@@ -2872,6 +2944,7 @@ class ProxyRunner:
             return None
         data = os.read(sys.stdin.fileno(), 4096)
         self._raw_capture(">", data)
+        self._debug(f"stdin: {data!r} menu_key={self.input.menu_key!r}")
         # Any keypress dismisses a sticky message (e.g. the auto-commit
         # confirmation) so it no longer overlays the live view; repaint to
         # remove the popup even if the key produces no child echo.
@@ -2880,8 +2953,16 @@ class ProxyRunner:
         data = self._input_tail + data
         data, self._input_tail = self._hold_incomplete_tail(data)
         data = self._intercept_scroll(data)
+        self._debug(f"after intercept: {data!r}")
+        # Decode kitty keyboard protocol control keys back to plain bytes.
+        # When the terminal is in kitty mode (enabled by the backend), Ctrl-A
+        # through Ctrl-Z are sent as escape sequences like \x1b[97;5u instead
+        # of plain bytes like \x01. We decode them so the menu key matching works.
+        data = _decode_kitty_ctrl_keys(data)
+        self._debug(f"after kitty decode: {data!r}")
         was_capturing = self.input.capturing
         forwarded, local_echo, command, should_exit = self.input.feed(data)
+        self._debug(f"feed result: forwarded={forwarded!r} command={command!r} capturing={self.input.capturing}")
         if should_exit:
             # One shared flow (also reachable from inside popups): a
             # second Ctrl-C during the confirmation popup exits
@@ -3113,6 +3194,24 @@ class ProxyRunner:
         # here because no PTY children are running yet and no reactor iteration
         # is live.  Do NOT convert to a modal — there is nothing to drain yet.
         TerminalHost.detect_host_terminal(self, debug_fn=self._debug if self.debug_proxy else None)
+        # If the menu key requires shift modifier, enable the kitty keyboard protocol
+        # so the terminal sends distinguishable escape sequences.
+        if self.global_config.is_shift_modified:
+            self._enable_kitty_keyboard()
+
+    def _enable_kitty_keyboard(self) -> None:
+        # Proactively enable the kitty keyboard protocol for shift-modified menu keys.
+        # This allows Ctrl+Shift+<letter> to be distinguished from Ctrl+<letter>.
+        # The protocol is: CSI > flags u, where flags=1 means "disambiguate escape codes"
+        try:
+            os.write(sys.stdout.fileno(), b"\x1b[>1u")
+            self._kitty_keyboard_enabled = True
+            if self.debug_proxy:
+                self._debug("Enabled kitty keyboard protocol for shift-modified menu key")
+        except OSError:
+            # Terminal doesn't support it or write failed
+            if self.debug_proxy:
+                self._debug("Failed to enable kitty keyboard protocol (terminal may not support it)")
 
     def _parse_host_terminal_responses(self, data: bytes) -> None:
         TerminalHost.parse_host_terminal_responses(self, data, debug_fn=self._debug if self.debug_proxy else None)

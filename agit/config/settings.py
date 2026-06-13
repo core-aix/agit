@@ -9,11 +9,15 @@ from typing import Any
 DEFAULT_BACKEND = "opencode"
 
 # The key that opens aGiT's command menu in proxy mode. Configurable as
-# "menu_key" in config.json ("ctrl-<letter>"); a few control keys are excluded
-# because the terminal or aGiT already gives them a meaning: Ctrl-C (exit
-# flow), Ctrl-H (Backspace), Ctrl-I (Tab), Ctrl-J/Ctrl-M (Enter).
+# "menu_key" in config.json. Supports:
+#   - "ctrl-<letter>" (e.g., "ctrl-g") — single control byte
+#   - "ctrl+shift+<letter>" (e.g., "ctrl+shift+g") — kitty keyboard protocol
+# A few control keys are excluded because the terminal or aGiT already gives
+# them a meaning: Ctrl-C (exit flow), Ctrl-H (Backspace), Ctrl-I (Tab),
+# Ctrl-J/Ctrl-M (Enter).
 DEFAULT_MENU_KEY = "ctrl-g"
 _MENU_KEY_RE = re.compile(r"^ctrl[-+]([a-bd-gk-ln-z])$")
+_MENU_KEY_SHIFT_RE = re.compile(r"^ctrl\+shift\+([a-bd-gk-ln-z])$")
 
 # Tunable timings (all in seconds) governing aGiT's polling / debounce behaviour.
 # Stored under the "timings" key in config.json; any subset may be overridden, and
@@ -106,22 +110,50 @@ class GlobalConfig:
 
     @property
     def menu_key(self) -> str:
-        # Normalized "ctrl-<letter>" spec for the aGiT menu key. Invalid or
-        # conflicting values fall back to the default so a config typo can
-        # never lock the user out of the menu.
+        # Normalized menu key spec. Supports "ctrl-<letter>" or "ctrl+shift+<letter>".
+        # Invalid or conflicting values fall back to the default so a config typo
+        # can never lock the user out of the menu.
         value = self.data.get("menu_key")
         if isinstance(value, str):
-            match = _MENU_KEY_RE.match(value.strip().lower())
+            normalized = value.strip().lower()
+            match = _MENU_KEY_SHIFT_RE.match(normalized)
+            if match:
+                return f"ctrl+shift+{match.group(1)}"
+            match = _MENU_KEY_RE.match(normalized)
             if match:
                 return f"ctrl-{match.group(1)}"
         return DEFAULT_MENU_KEY
 
     @property
     def menu_key_byte(self) -> bytes:
+        # For plain ctrl-<letter>, return the control byte (0x01-0x1a).
+        # For ctrl+shift+<letter>, return empty bytes (sequence-based matching).
+        if self.is_shift_modified:
+            return b""
         return bytes([ord(self.menu_key[-1]) - 96])  # ctrl-a..ctrl-z → 0x01..0x1a
 
     @property
+    def menu_key_sequence(self) -> bytes:
+        # Kitty keyboard protocol escape sequence for the menu key.
+        # For ctrl+shift+<letter>: CSI <unicode> ; <modifiers> u
+        # Modifiers: 1 (base) + 1 (shift) + 4 (ctrl) = 6
+        if self.is_shift_modified:
+            letter = self.menu_key.split("+")[-1]
+            unicode_codepoint = ord(letter)
+            return f"\x1b[{unicode_codepoint};6u".encode()
+        # For plain ctrl-<letter>, return the control byte
+        return self.menu_key_byte
+
+    @property
+    def is_shift_modified(self) -> bool:
+        # True if the menu key uses ctrl+shift+<letter> format
+        return self.menu_key.startswith("ctrl+shift+")
+
+    @property
     def menu_key_label(self) -> str:
+        if self.is_shift_modified:
+            letter = self.menu_key.split("+")[-1]
+            return f"Ctrl+Shift-{letter.upper()}"
         return f"Ctrl-{self.menu_key[-1].upper()}"
 
     @property

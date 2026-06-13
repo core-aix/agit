@@ -217,18 +217,49 @@ def test_menu_key_defaults_and_validation(tmp_path):
     assert config.menu_key == "ctrl-g"
     assert config.menu_key_byte == b"\x07"
     assert config.menu_key_label == "Ctrl-G"
+    assert config.is_shift_modified is False
 
     # A configured key is normalized and converted to its control byte.
     config.data["menu_key"] = "Ctrl+P"
     assert config.menu_key == "ctrl-p"
     assert config.menu_key_byte == b"\x10"
     assert config.menu_key_label == "Ctrl-P"
+    assert config.is_shift_modified is False
 
     # Conflicting or invalid values fall back to the default, so a config
     # typo can never lock the user out of the menu.
     for bad in ("ctrl-c", "ctrl-m", "ctrl-i", "ctrl-j", "ctrl-h", "shift-g", "g", 7, None):
         config.data["menu_key"] = bad
         assert config.menu_key == "ctrl-g"
+
+
+def test_menu_key_shift_modified(tmp_path):
+    from agit.config import GlobalConfig
+
+    config = GlobalConfig(tmp_path / "config.json")
+
+    # Test ctrl+shift+g format
+    config.data["menu_key"] = "ctrl+shift+g"
+    assert config.menu_key == "ctrl+shift+g"
+    assert config.is_shift_modified is True
+    assert config.menu_key_byte == b""  # Empty for shift-modified keys
+    assert config.menu_key_sequence == b"\x1b[103;6u"  # CSI 103 ; 6 u (g=103, modifiers=6)
+    assert config.menu_key_label == "Ctrl+Shift-G"
+
+    # Test normalization
+    config.data["menu_key"] = "Ctrl+Shift+P"
+    assert config.menu_key == "ctrl+shift+p"
+    assert config.is_shift_modified is True
+    assert config.menu_key_sequence == b"\x1b[112;6u"  # p=112
+    assert config.menu_key_label == "Ctrl+Shift-P"
+
+    # Test that plain ctrl-<letter> still works
+    config.data["menu_key"] = "ctrl-y"
+    assert config.menu_key == "ctrl-y"
+    assert config.is_shift_modified is False
+    assert config.menu_key_byte == b"\x19"
+    assert config.menu_key_sequence == b"\x19"  # Same as byte for plain keys
+    assert config.menu_key_label == "Ctrl-Y"
 
 
 # --- use_worktrees config (#9) ----------------------------------------------
