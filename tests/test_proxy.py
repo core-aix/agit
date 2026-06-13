@@ -1443,6 +1443,96 @@ def test_auto_session_names_are_not_persisted(tmp_path):
     assert AgitState(base).session_name_for("sess-1") is None
 
 
+def _resume_listing_runner(tmp_path, *, base_refs, worktree_sessions, worktree_names=()):
+    # A runner wired so the resume-list helpers can query a fake backend and
+    # worktree manager: ``base_refs`` is what list_sessions(base) returns,
+    # ``worktree_sessions`` is the (name, ref) list list_worktree_sessions
+    # returns, and ``worktree_names`` are directories present on disk.
+    base = tmp_path / "base"
+    base.mkdir()
+    root = tmp_path / "worktrees"
+    root.mkdir()
+    backend = types.SimpleNamespace(
+        name="opencode",
+        list_sessions=lambda repo: list(base_refs),
+        list_worktree_sessions=lambda r: list(worktree_sessions),
+    )
+    runner = make_runner(name="A", worktree=None, backend=backend)
+    runner._debug = lambda *a, **k: None
+    runner.base_repo = types.SimpleNamespace(repo=base)
+    runner.global_config = types.SimpleNamespace(default_backend="opencode")
+    runner.worktree_manager = types.SimpleNamespace(
+        root=root, list=lambda: [types.SimpleNamespace(name=n) for n in worktree_names]
+    )
+    runner.sessions = [runner.active]
+    return runner, base
+
+
+def test_resumable_sessions_includes_removed_worktree_conversations(tmp_path):
+    # Named sessions run in worktrees that are emptied on quit; their backend
+    # conversations must still surface for resume on the next run (issue: only
+    # the base-repo conversation was listed, so named sessions vanished).
+    runner, _base = _resume_listing_runner(
+        tmp_path,
+        base_refs=[SessionRef("base-1", 100.0)],
+        worktree_sessions=[("alpha", SessionRef("wt-alpha", 300.0)), ("beta", SessionRef("wt-beta", 200.0))],
+    )
+
+    ids = [ref.id for ref in runner._resumable_sessions()]
+
+    assert ids == ["wt-alpha", "wt-beta", "base-1"]  # merged, newest first
+
+
+def test_resumable_sessions_dedupes_by_id(tmp_path):
+    # A conversation reported by both the base list and a worktree list appears once.
+    runner, _base = _resume_listing_runner(
+        tmp_path,
+        base_refs=[SessionRef("shared", 100.0)],
+        worktree_sessions=[("alpha", SessionRef("shared", 100.0))],
+    )
+
+    assert [ref.id for ref in runner._resumable_sessions()] == ["shared"]
+
+
+def test_named_sessions_recovers_name_from_worktree_key(tmp_path):
+    # When the persisted record never linked a conversation's name, the worktree
+    # directory it ran in (its name) labels it in the resume list.
+    runner, _base = _resume_listing_runner(
+        tmp_path,
+        base_refs=[],
+        worktree_sessions=[("alpha", SessionRef("wt-alpha", 300.0))],
+    )
+
+    assert runner._agit_named_sessions().get("wt-alpha") == "alpha"
+
+
+def test_named_sessions_persisted_name_wins_over_worktree_key(tmp_path):
+    # The durable record follows id drift, so its name takes precedence over the
+    # worktree key for the same conversation id.
+    runner, base = _resume_listing_runner(
+        tmp_path,
+        base_refs=[],
+        worktree_sessions=[("old-dir", SessionRef("wt-1", 300.0))],
+    )
+    AgitState(base, default_backend="opencode").name_session("wt-1", "renamed")
+
+    assert runner._agit_named_sessions().get("wt-1") == "renamed"
+
+
+def test_new_session_name_cannot_clash_with_dormant_named_session(tmp_path):
+    # A fresh session must not reuse the name of a past/dormant conversation:
+    # resuming that one later recreates its worktree at the same path.
+    runner, _base = _resume_listing_runner(
+        tmp_path,
+        base_refs=[],
+        worktree_sessions=[("alpha", SessionRef("wt-alpha", 300.0))],
+    )
+
+    assert runner._session_name_taken("alpha") is True
+    assert "alpha" in runner._taken_session_names()
+    assert runner._session_name_taken("gamma") is False
+
+
 def test_new_session_not_applied_without_flag(tmp_path):
     runner = make_runner(
         _force_new_session=False,

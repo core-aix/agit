@@ -46,6 +46,11 @@ class ProxyAgent(Protocol):
     def list_sessions(self, repo: Path) -> list[SessionRef]:
         """Every session recorded for this repository, for listing/switching."""
 
+    def list_worktree_sessions(self, worktrees_root: Path) -> list[tuple[str, SessionRef]]:
+        """Every conversation recorded under an aGiT worktree of this repo, paired
+        with the worktree directory name (the session's name). Includes ones whose
+        worktree has since been removed, so named sessions stay resumable."""
+
     def export_session(self, repo: Path, session_id: str) -> ExportedSession | None: ...
 
     def is_event_blob(self, content: str) -> bool:

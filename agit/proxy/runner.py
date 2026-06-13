@@ -990,14 +990,24 @@ class ProxyRunner:
             return
         self._new_session(session_name, backend=name)
 
+    def _persisted_session_names(self) -> set[str]:
+        # Sanitized names recorded for past conversations — both the durable
+        # repo-root record and the worktree directory names the backend still
+        # knows. A new session must not reuse one of these: resuming that past
+        # conversation later recreates its worktree at worktree_path(name), so a
+        # collision would put two backends in one directory.
+        return {_sanitize_name(name) for name in self._agit_named_sessions().values() if name}
+
     def _taken_session_names(self) -> set[str]:
-        # Sanitized names already in use: live sessions plus on-disk worktrees.
+        # Sanitized names already in use: live sessions, on-disk worktrees, and
+        # names already claimed by a past (named/dormant) conversation.
         used: set[str] = set()
         try:
-            used.update(info.name for info in self._worktrees().list())
+            used.update(_sanitize_name(info.name) for info in self._worktrees().list())
         except Exception:
             pass
         used.update(_sanitize_name(self._session_name(index)) for index in range(len(self.sessions)))
+        used.update(self._persisted_session_names())
         return used
 
     def _next_session_name(self) -> str:
@@ -1175,13 +1185,21 @@ class ProxyRunner:
             root_state.name_session(resume_id, name)
         return name
 
-    def _first_free_session_name(self) -> str:
-        # `session-N` not already taken by a worktree on disk. (self.sessions is
-        # not built yet at startup, so this avoids the live-session check.)
+    def _startup_taken_names(self) -> set[str]:
+        # Sanitized names already claimed when the primary session is set up
+        # (self.sessions is not built yet): on-disk worktrees plus names recorded
+        # for past (named/dormant) conversations, so a fresh session can't reuse
+        # the name of one the user may resume later.
         try:
-            used = {info.name for info in self._worktrees().list()}
+            used = {_sanitize_name(info.name) for info in self._worktrees().list()}
         except Exception:
             used = set()
+        used |= self._persisted_session_names()
+        return used
+
+    def _first_free_session_name(self) -> str:
+        # `session-N` not already taken by a worktree or a past conversation.
+        used = self._startup_taken_names()
         number = 1
         while f"session-{number}" in used:
             number += 1
@@ -1195,10 +1213,7 @@ class ProxyRunner:
         # Do NOT convert this to a modal; modals require the reactor to be live.
         default = self._first_free_session_name()
         print("Continuing a conversation that has no name yet." if continuing else "Starting a new session.")
-        try:
-            taken = {info.name for info in self._worktrees().list()}
-        except Exception:
-            taken = set()
+        taken = self._startup_taken_names()
         while True:
             try:
                 raw = input(f"Name this session [{default}]: ").strip()
@@ -1937,23 +1952,50 @@ class ProxyRunner:
 
     RESUME_LIST_LIMIT = 20
 
-    def _resumable_sessions(self) -> list:
-        # Past conversations come straight from the backend agent's own session
-        # record for the repo aGiT was launched in. Worktrees are ephemeral
-        # (emptied on quit), so we never key the list off them; resuming is done
-        # by session id, which the backend resolves regardless of directory.
+    def _worktree_sessions(self) -> list:
+        # (worktree-name, SessionRef) for every conversation this backend recorded
+        # under any of the repo's aGiT worktrees — including ones whose worktree
+        # has since been removed (the backend keeps the transcript keyed by path
+        # or id). The worktree directory name IS the session's user-given name, so
+        # this is how a named session — and its name — survives across runs even
+        # after its worktree is gone.
         try:
-            refs = self.backend.list_sessions(self.base_repo.repo)
+            return list(self.backend.list_worktree_sessions(self._worktrees().root))
+        except Exception as error:
+            self._debug(f"list_worktree_sessions failed: {error!r}")
+            return []
+
+    def _resumable_sessions(self) -> list:
+        # Past conversations to offer for resume: those the backend recorded in
+        # the base repo (a plain claude/opencode run, or --no-worktree mode) plus
+        # every conversation recorded under an aGiT worktree of this repo. The
+        # worktree ones are the named sessions, and they are surfaced here even
+        # once their worktree has been emptied on quit — otherwise a named session
+        # that ran in a worktree (i.e. every normal session) would vanish from the
+        # list on the next run. Resuming is by session id, which the backend
+        # resolves regardless of directory.
+        try:
+            refs = list(self.backend.list_sessions(self.base_repo.repo))
         except Exception as error:
             self._debug(f"list_sessions failed: {error!r}")
-            return []
+            refs = []
+        seen = {ref.id for ref in refs}
+        for _name, ref in self._worktree_sessions():
+            if ref.id not in seen:
+                seen.add(ref.id)
+                refs.append(ref)
         refs = sorted(refs, key=lambda ref: getattr(ref, "updated", 0) or 0, reverse=True)
         return refs[: self.RESUME_LIST_LIMIT]
 
     def _agit_named_sessions(self) -> dict:
         # Friendly names for conversations aGiT itself created/named, keyed by
-        # backend session id, recovered from the durable repo-root record. Used
-        # only to label/resume the list that comes from the backend.
+        # backend session id. Used only to label/resume the list that comes from
+        # the backend. Two sources, in precedence order:
+        #   1. the durable repo-root record (user-given names, which follow id
+        #      drift across resumes), then
+        #   2. the worktree directory name a conversation ran in — which is the
+        #      session's name — recovered for any conversation the record missed
+        #      (its id drifted before being linked, or it was never persisted).
         names: dict = {}
         record = None
         try:
@@ -1964,6 +2006,9 @@ class ProxyRunner:
             record = None
         if record and record.get("id") and record.get("worktree"):
             names.setdefault(str(record["id"]), str(record["worktree"]))
+        for name, ref in self._worktree_sessions():
+            if name:
+                names.setdefault(str(ref.id), name)
         return names
 
     def _resume_session_menu(self) -> None:
