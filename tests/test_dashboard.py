@@ -9,10 +9,13 @@ commit (#58), and an agent-merge.
 
 from pathlib import Path
 
+import json
+import re
+
 from agit import cli
 from agit.commits import build_agent_commit_message, build_agent_merge_message, build_user_commit_message
 from agit.git import GitRepo
-from agit.metrics import build_dashboard, render_dashboard
+from agit.metrics import build_dashboard, dashboard_data, render_dashboard, render_html
 from agit.metrics.collect import CommitStat, _detect_loops
 
 
@@ -212,6 +215,49 @@ def test_dashboard_loops_from_real_history(tmp_path):
     assert "Possible loops" in render_dashboard(repo)
 
 
+# --- HTML dashboard (filterable web view) --------------------------------------
+
+
+def _embedded_data(html: str) -> dict:
+    match = re.search(r'id="agit-data">(.*?)</script>', html, re.S)
+    assert match is not None
+    return json.loads(match.group(1))
+
+
+def test_dashboard_data_serializes_every_commit_with_filters(tmp_path):
+    data = dashboard_data(build_dashboard(_demo_repo(tmp_path)))
+
+    assert len(data["commits"]) == 7
+    assert data["branch"]
+    # Filter option lists are derived from the (effective) commit fields.
+    assert data["backends"] == ["claude"]
+    assert data["models"] == ["claude-opus-4-8"]
+    assert data["committers"]  # at least the one git author
+
+
+def test_dashboard_data_covered_commit_inherits_effective_backend(tmp_path):
+    data = dashboard_data(build_dashboard(_demo_repo(tmp_path)))
+
+    covered = next(c for c in data["commits"] if c["kind"] == "covered")
+    # The backend-made commit carries no metadata of its own, but inherits the
+    # cover commit's backend/model so a per-backend filter buckets it correctly.
+    assert covered["backend"] is None
+    assert covered["eff_backend"] == "claude"
+    assert covered["eff_model"] == "claude-opus-4-8"
+
+
+def test_render_html_is_self_contained_with_embedded_data(tmp_path):
+    html = render_html(_demo_repo(tmp_path))
+
+    assert html.startswith("<!DOCTYPE html>")
+    assert "aGiT dashboard" in html
+    # The page ships its data inline (no server, no fetch) and the filter UI.
+    data = _embedded_data(html)
+    assert len(data["commits"]) == 7
+    for control in ('id="f-author"', 'id="f-backend"', 'id="f-model"'):
+        assert control in html
+
+
 # --- CLI -----------------------------------------------------------------------
 
 
@@ -225,6 +271,23 @@ def test_cli_dashboard_prints_report_and_exits(tmp_path, capsys, monkeypatch):
     out = capsys.readouterr().out
     assert "aGiT Dashboard" in out
     assert "aGiT-tracked commits" in out
+
+
+def test_cli_dashboard_html_writes_file_and_opens_browser(tmp_path, capsys, monkeypatch):
+    _demo_repo(tmp_path)
+    opened: list[str] = []
+    monkeypatch.setattr(cli.webbrowser, "open", lambda uri: opened.append(uri) or True)
+    monkeypatch.setattr(cli.tempfile, "gettempdir", lambda: str(tmp_path / "out"))
+    (tmp_path / "out").mkdir()
+
+    rc = cli.main(["--dashboard", "html", "--repo", str(tmp_path)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    written = next(Path(line.split("written to ", 1)[1]) for line in out.splitlines() if "written to" in line)
+    assert written.exists() and written.suffix == ".html"
+    assert "<!DOCTYPE html>" in written.read_text(encoding="utf-8")
+    assert opened == [written.as_uri()]  # the browser was pointed at the file
 
 
 def test_cli_dashboard_outside_repo_fails_cleanly(tmp_path, capsys):

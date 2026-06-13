@@ -248,7 +248,9 @@ scripts/demo.sh --model haiku --dir /tmp/agit-demo
 - **Breakdowns** by backend, by model (a cover commit's bucket includes the lines of the backend-made commits it covers), and by committer.
 - **Possible loops**: runs of three or more consecutive turns with near-identical prompts (or the same prompt repeated within one turn's trace), with the output tokens they consumed — a sign the conversation is going in circles.
 
-The dashboard is read-only: it never commits, never prompts, and skips the privacy acknowledgment.
+`agit --dashboard html` writes the same metrics to a self-contained web page (styled like the [project page](https://github.com/core-aix/agit/tree/main/docs)) and opens it in your browser. The page embeds the per-commit data and recomputes every metric client-side, so you can **filter live** — narrow the whole dashboard to one committer or view the entire team, and slice by backend or model. It also includes a filtered commit-log timeline. No server: the HTML opens straight from disk and works on any clone.
+
+The dashboard is read-only in either form: it never commits, never prompts, and skips the privacy acknowledgment.
 
 
 ## Configuration

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import webbrowser
 from pathlib import Path
 
 from agit.backends.setup import select_default_backend
@@ -44,10 +47,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--dashboard",
-        action="store_true",
-        help="print repository metrics computed from aGiT commit metadata "
+        nargs="?",
+        const="text",
+        choices=["text", "html"],
+        default=None,
+        help="show repository metrics computed from aGiT commit metadata "
         "(coverage, AI vs human line changes, tokens, per-backend/model/"
-        "committer breakdowns, loop detection) and exit",
+        "committer breakdowns, loop detection) and exit. Bare or `text` prints "
+        "to the terminal; `html` writes a filterable web dashboard and opens it "
+        "in the browser",
     )
     parser.add_argument(
         "--backend",
@@ -89,10 +97,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.dashboard:
         # Read-only: nothing is logged or committed, so no privacy
         # acknowledgment and no repo initialization offer.
-        from agit.metrics import render_dashboard
-
         try:
-            print(render_dashboard(GitRepo.discover(Path(args.repo).expanduser())))
+            dashboard_repo = GitRepo.discover(Path(args.repo).expanduser())
+            if args.dashboard == "html":
+                return _open_html_dashboard(dashboard_repo)
+            from agit.metrics import render_dashboard
+
+            print(render_dashboard(dashboard_repo))
         except (GitError, OSError) as error:
             # OSError: --repo points at a directory that does not exist.
             print(error)
@@ -172,6 +183,24 @@ _RESERVED_PASSTHROUGH = {
     "claude": {"--session-id", "--resume", "-r", "--continue", "-c"},
     "opencode": {"--session", "-s", "--continue", "-c"},
 }
+
+
+def _open_html_dashboard(repo: GitRepo) -> int:
+    """Write the filterable web dashboard to a temp file and open it in the
+    browser. Like the text report it is read-only and computed entirely from
+    commit metadata, so the file is self-contained and safe to reopen."""
+    from agit.metrics import render_html
+
+    html = render_html(repo)
+    slug = re.sub(r"[^A-Za-z0-9_.-]", "-", Path(repo.repo).name) or "repo"
+    path = Path(tempfile.gettempdir()) / f"agit-dashboard-{slug}.html"
+    path.write_text(html, encoding="utf-8")
+    print(f"aGiT dashboard written to {path}")
+    try:
+        webbrowser.open(path.as_uri())
+    except webbrowser.Error:
+        print("Could not open a browser automatically; open the file above manually.")
+    return 0
 
 
 def _warn_reserved_passthrough(backend: str, backend_args: list[str]) -> None:
