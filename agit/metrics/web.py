@@ -200,6 +200,59 @@ def _aggregates(fd: Dashboard) -> dict:
     }
 
 
+_AI_KINDS = ("agent", "covered", "agent-merge")
+
+
+def _timeseries(stats: list[CommitStat], *, max_buckets: int = 120) -> dict:
+    """Cumulative commits / AI lines / token usage over time for the (already
+    filtered) commits, bucketed into equal time intervals so the plot stays small
+    and smooth however deep the history is. Empty intervals carry the running
+    total forward — a flat segment reads as a quiet period. ``t`` holds the
+    bucket-centre epoch seconds; every series is the same length as ``t``.
+
+    The series are returned as raw cumulative counts; the browser normalises each
+    to its own peak so wildly different magnitudes (tens of commits vs millions of
+    tokens) share one plot, and shows the real value on hover."""
+    dated = [s for s in stats if s.timestamp]
+    if not dated:
+        empty: dict[str, list[int]] = {"t": [], "commits": [], "ai_lines": [], "output_tokens": [], "input_tokens": []}
+        return empty
+    lo = min(s.timestamp for s in dated)
+    hi = max(s.timestamp for s in dated)
+    span = hi - lo
+    n = 1 if span == 0 else min(max_buckets, max(2, len(dated)))
+    width = span / n if span else 1
+    commits = [0] * n
+    lines = [0] * n
+    out_tok = [0] * n
+    in_tok = [0] * n
+    ai = set(_AI_KINDS)
+    for s in dated:
+        idx = 0 if span == 0 else min(n - 1, int((s.timestamp - lo) / width))
+        commits[idx] += 1
+        if s.kind in ai:
+            lines[idx] += s.insertions + s.deletions
+        out_tok[idx] += s.tokens.get("output", 0)
+        in_tok[idx] += s.tokens.get("input", 0)
+
+    def _cumulative(values: list[int]) -> list[int]:
+        total = 0
+        running = []
+        for value in values:
+            total += value
+            running.append(total)
+        return running
+
+    centres = [int(lo + (i + 0.5) * width) for i in range(n)] if span else [lo]
+    return {
+        "t": centres,
+        "commits": _cumulative(commits),
+        "ai_lines": _cumulative(lines),
+        "output_tokens": _cumulative(out_tok),
+        "input_tokens": _cumulative(in_tok),
+    }
+
+
 def _options(dash: Dashboard) -> dict:
     covers = _covers(dash)
     committers, backends, models = set(), set(), set()
@@ -229,6 +282,7 @@ def aggregates_payload(
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         "options": _options(dash),
         "agg": _aggregates(_filtered_dashboard(dash, stats)),
+        "timeseries": _timeseries(stats),
     }
 
 
@@ -379,6 +433,26 @@ h2.section::before{content:"# ";color:var(--amber)}
 .card .value.amber{color:var(--amber);text-shadow:0 0 14px rgba(255,180,84,.3)}
 .card .note{font-size:12px;color:var(--fg-dim);margin-top:4px}
 
+/* ---- time-series chart ---- */
+.chartpanel{padding:14px 16px 10px;position:relative}
+.legend{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px}
+.legend .lg{display:inline-flex;align-items:center;gap:7px;cursor:pointer;background:var(--ink);
+  border:1px solid var(--line);color:var(--fg);font-family:var(--mono);font-size:12px;padding:5px 10px;transition:opacity .12s}
+.legend .lg .sw{width:11px;height:11px;border:1px solid var(--c);background:var(--c);box-shadow:0 0 7px var(--c)}
+.legend .lg b{color:var(--c)}
+.legend .lg.off{opacity:.4}
+.legend .lg.off .sw{background:transparent;box-shadow:none}
+.legend .lg:hover{border-color:var(--c)}
+.chartwrap{position:relative;width:100%;height:280px}
+.chartwrap canvas{display:block;width:100%;height:100%;cursor:crosshair}
+.chart-empty{color:var(--fg-dim);padding:40px 4px;text-align:center}
+.tip{position:absolute;pointer-events:none;z-index:5;background:var(--panel-2);border:1px solid var(--phosphor-dim);
+  padding:7px 10px;font-size:12px;color:var(--fg);white-space:nowrap;box-shadow:0 4px 16px rgba(0,0,0,.6);transform:translateX(-50%)}
+.tip .td{color:var(--amber);margin-bottom:3px}
+.tip .tr{display:flex;align-items:center;gap:6px}
+.tip .tr .sw{width:8px;height:8px;background:var(--c);box-shadow:0 0 6px var(--c)}
+.tip .tr b{color:var(--c);margin-left:auto;padding-left:10px}
+
 /* ---- bar / table ---- */
 .panel{background:var(--panel);border:1px solid var(--line);padding:6px 0}
 .row{display:grid;grid-template-columns:minmax(120px,1.4fr) 2.6fr minmax(150px,1fr);gap:14px;align-items:center;
@@ -502,6 +576,13 @@ footer{margin-top:46px;padding-top:22px;border-top:1px dashed var(--line);color:
   <h2 class="section">overview</h2>
   <div class="cards" id="cards"></div>
 
+  <h2 class="section">activity over time</h2>
+  <div class="panel chartpanel">
+    <div class="legend" id="ts-legend"></div>
+    <div class="chartwrap"><canvas id="ts-canvas"></canvas><div class="tip" id="ts-tip" hidden></div></div>
+    <div class="chart-empty" id="ts-empty" hidden>no dated commits in view</div>
+  </div>
+
   <h2 class="section">code changes &amp; tokens</h2>
   <div class="split">
     <div class="panel" id="lines"></div>
@@ -540,7 +621,20 @@ footer{margin-top:46px;padding-top:22px;border-top:1px dashed var(--line);color:
 const INIT = JSON.parse(document.getElementById("agit-data").textContent);
 const PAGE_SIZE = INIT.page_size || 50;
 let HEAD = INIT.head, AGG = INIT.agg, LOGPAGE = INIT.log, OPTIONS = INIT.options, GENERATED = INIT.generated_at;
+let TS = INIT.timeseries || {t:[]};  // cumulative series for the activity-over-time plot
 let LOG_ENTRIES = [];  // entries of the page currently rendered (for toggleDetail)
+
+// The plottable series and which are currently shown. Each is normalised to its
+// own peak so commits, lines, and tokens (orders of magnitude apart) share one
+// plot; the legend and hover tooltip show the real cumulative values.
+const SERIES = [
+  {key:"commits", label:"commits", color:"#3dffa0"},
+  {key:"ai_lines", label:"AI lines", color:"#ffb454"},
+  {key:"output_tokens", label:"output tokens", color:"#67b8d6"},
+  {key:"input_tokens", label:"input tokens", color:"#ff6b6b"},
+];
+const tsOn = {commits:true, ai_lines:true, output_tokens:true, input_tokens:false};
+let tsHover = -1;  // hovered bucket index, or -1
 
 const AI_KINDS = new Set(["agent","covered","agent-merge"]);
 const KIND_LABEL = {"agit-ops":"aGiT-ops","agent-merge":"agent-merge"};
@@ -575,6 +669,7 @@ function qs(extra){
 async function loadAgg(){
   try{ const r = await fetch("data?"+qs(), {cache:"no-store"}); if(r.ok){
     const d = await r.json(); HEAD=d.head; AGG=d.agg; OPTIONS=d.options; GENERATED=d.generated_at;
+    TS = d.timeseries || {t:[]};
     setOffline(false); return true; } }
   catch(e){ if(LIVE) setOffline(true); }  // network failure ⇒ server unreachable
   return false;
@@ -704,6 +799,9 @@ function renderAgg(){
           (l.output?` <span class="cost">${fmt(l.output)} output tokens</span>`:"")+`</div>`;
       }).join("")
     : `<div class="empty">none detected</div>`;
+
+  tsHover = -1;
+  renderTimeseries();
 }
 function groupPanel(groups){
   const entries = Object.entries(groups).sort((a,b)=>b[1].commits-a[1].commits ||
@@ -714,6 +812,87 @@ function groupPanel(groups){
     barRow(label, `${b.commits} commits`, b.insertions+b.deletions, max,
       `+${fmt(b.insertions)}/−${fmt(b.deletions)}${b.output_tokens?` · <b>${fmt(b.output_tokens)}</b> tok`:""}`)).join("");
 }
+
+// --- activity-over-time plot (multi-series, normalised, toggleable) ---
+const tsDate = e => new Date(e*1000).toISOString().slice(0,10);
+
+function renderLegend(){
+  $("ts-legend").innerHTML = SERIES.map(s => {
+    const arr = TS[s.key]||[], total = arr.length ? arr[arr.length-1] : 0;
+    return `<button class="lg${tsOn[s.key]?"":" off"}" data-key="${esc(s.key)}" style="--c:${s.color}">`+
+      `<span class="sw"></span>${esc(s.label)} <b>${kfmt(total)}</b></button>`;
+  }).join("");
+}
+
+function renderChart(){
+  const cv = $("ts-canvas"), t = TS.t||[], has = t.length>0;
+  $("ts-empty").hidden = has;
+  cv.parentElement.style.display = has ? "" : "none";
+  if(!has) return;
+  const wrap = cv.parentElement, dpr = window.devicePixelRatio||1;
+  const cssW = wrap.clientWidth, cssH = wrap.clientHeight;
+  cv.width = Math.round(cssW*dpr); cv.height = Math.round(cssH*dpr);
+  const ctx = cv.getContext("2d"); ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,cssW,cssH);
+  const padL=10, padR=10, padT=12, padB=22, W=cssW-padL-padR, H=cssH-padT-padB, n=t.length;
+  const xAt = i => padL + (n<=1 ? W/2 : i/(n-1)*W);
+  ctx.strokeStyle="rgba(29,42,33,.9)"; ctx.lineWidth=1;
+  for(let g=0; g<=4; g++){ const y=padT+g/4*H; ctx.beginPath(); ctx.moveTo(padL,y); ctx.lineTo(padL+W,y); ctx.stroke(); }
+  // Each series is normalised to its own peak so all of them fit one plot.
+  ctx.lineWidth=2; ctx.lineJoin="round";
+  for(const s of SERIES){
+    if(!tsOn[s.key]) continue;
+    const arr = TS[s.key]||[], max = Math.max(1, ...arr);
+    ctx.strokeStyle=s.color; ctx.shadowColor=s.color; ctx.shadowBlur=6;
+    ctx.beginPath();
+    arr.forEach((v,i)=>{ const x=xAt(i), y=padT+H-(v/max)*H; i?ctx.lineTo(x,y):ctx.moveTo(x,y); });
+    ctx.stroke();
+  }
+  ctx.shadowBlur=0;
+  ctx.fillStyle="#7e998a"; ctx.font="11px IBM Plex Mono, monospace";
+  ctx.textAlign="left";  ctx.fillText(tsDate(t[0]), padL, cssH-7);
+  ctx.textAlign="right"; ctx.fillText(tsDate(t[n-1]), padL+W, cssH-7);
+  if(tsHover>=0 && tsHover<n){
+    const x = xAt(tsHover);
+    ctx.strokeStyle="rgba(207,231,216,.28)"; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(x,padT); ctx.lineTo(x,padT+H); ctx.stroke();
+    for(const s of SERIES){
+      if(!tsOn[s.key]) continue;
+      const arr = TS[s.key]||[], max = Math.max(1, ...arr);
+      const y = padT+H-((arr[tsHover]||0)/max)*H;
+      ctx.fillStyle=s.color; ctx.shadowColor=s.color; ctx.shadowBlur=8;
+      ctx.beginPath(); ctx.arc(x,y,3,0,Math.PI*2); ctx.fill(); ctx.shadowBlur=0;
+    }
+  }
+}
+
+function showTip(i){
+  const tip = $("ts-tip"), t = TS.t||[];
+  const live = SERIES.filter(s=>tsOn[s.key]);
+  if(i<0 || i>=t.length || !live.length){ tip.hidden = true; return; }
+  const rows = live.map(s => {
+    const arr = TS[s.key]||[];
+    return `<div class="tr" style="--c:${s.color}"><span class="sw"></span>${esc(s.label)}<b>${fmt(arr[i]||0)}</b></div>`;
+  }).join("");
+  tip.innerHTML = `<div class="td">${tsDate(t[i])}</div>${rows}`;
+  const wrap = $("ts-canvas").parentElement, n=t.length, padL=10, W=wrap.clientWidth-padL-10;
+  const x = padL + (n<=1 ? W/2 : i/(n-1)*W);
+  tip.style.left = Math.max(58, Math.min(wrap.clientWidth-58, x))+"px";
+  tip.style.top = "4px";
+  tip.hidden = false;
+}
+
+function onChartMove(e){
+  const t = TS.t||[]; if(!t.length) return;
+  const rect = $("ts-canvas").getBoundingClientRect();
+  const padL=10, W=rect.width-padL-10, n=t.length;
+  const rel = Math.max(0, Math.min(1, (e.clientX-rect.left-padL)/(W||1)));
+  const i = n<=1 ? 0 : Math.round(rel*(n-1));
+  if(i!==tsHover){ tsHover=i; renderChart(); }
+  showTip(i);
+}
+function onChartLeave(){ tsHover=-1; $("ts-tip").hidden=true; renderChart(); }
+function renderTimeseries(){ renderLegend(); renderChart(); }
 
 function renderLog(){
   const entries = LOGPAGE.entries || [];
@@ -833,6 +1012,17 @@ function init(){
     const entry = e.target.closest(".entry");
     if(entry) toggleDetail(+entry.dataset.i);
   });
+  // Toggle a series on/off from the legend; redraw the plot in place.
+  $("ts-legend").addEventListener("click", e => {
+    const btn = e.target.closest(".lg"); if(!btn) return;
+    const key = btn.dataset.key; tsOn[key] = !tsOn[key];
+    renderTimeseries();
+  });
+  const cv = $("ts-canvas");
+  cv.addEventListener("mousemove", onChartMove);
+  cv.addEventListener("mouseleave", onChartLeave);
+  // The canvas backing store is sized in px, so it must be repainted on resize.
+  let rz; window.addEventListener("resize", () => { clearTimeout(rz); rz = setTimeout(renderChart, 120); });
   renderAgg(); renderLog();
   // Poll only when there's a live backend; the poll also clears the
   // "unreachable" banner automatically once the server is back.

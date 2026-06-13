@@ -536,6 +536,46 @@ def test_aggregates_payload_filters_server_side(tmp_path):
     assert full["options"]["backends"] == ["claude"]
 
 
+def test_aggregates_payload_includes_cumulative_timeseries(tmp_path):
+    from agit.metrics.web import aggregates_payload
+
+    dash = build_dashboard(_demo_repo(tmp_path))
+    ts = aggregates_payload(dash)["timeseries"]
+    # Every series is the same length as the bucket-centre axis.
+    n = len(ts["t"])
+    assert n >= 1
+    for key in ("commits", "ai_lines", "output_tokens", "input_tokens"):
+        assert len(ts[key]) == n
+    # Cumulative series are non-decreasing and end at the filtered totals.
+    assert all(b >= a for a, b in zip(ts["commits"], ts["commits"][1:]))
+    assert ts["commits"][-1] == 7  # all seven demo commits
+    # The two agent turns carry _TOKENS (1000 in / 50 out) each.
+    assert ts["output_tokens"][-1] == 100
+    assert ts["input_tokens"][-1] == 2000
+
+
+def test_timeseries_respects_filters(tmp_path):
+    from agit.metrics.web import aggregates_payload
+
+    dash = build_dashboard(_demo_repo(tmp_path))
+    full = aggregates_payload(dash)["timeseries"]
+    # A future-only window filters every commit out — an empty, still-valid series.
+    empty = aggregates_payload(dash, frm=4102444800)["timeseries"]  # year 2100
+    assert empty["t"] == [] and empty["commits"] == []
+    assert full["commits"][-1] == 7
+
+
+def test_render_html_wires_the_activity_chart(tmp_path):
+    html = render_html(_demo_repo(tmp_path))
+    # The plot section, canvas, legend, and toggle/redraw wiring are present, and
+    # the initial payload embeds the series so the first paint needs no fetch.
+    assert "activity over time" in html
+    assert 'id="ts-canvas"' in html and 'id="ts-legend"' in html
+    assert "function renderChart" in html and "const tsOn" in html
+    data = _embedded_data(html)
+    assert "timeseries" in data and data["timeseries"]["commits"][-1] == 7
+
+
 def test_dashboard_data_serializes_squash_constituents_for_expansion(tmp_path):
     repo = GitRepo.init(tmp_path)
     _write_lines(repo, "s.txt", 30)
