@@ -2,7 +2,7 @@
 
 Everything the page needs is the per-commit data computed from ``git log``;
 that data is serialized to JSON and embedded in a single static HTML file. All
-aggregation (coverage, AI vs human lines, tokens, per-backend/model/committer
+aggregation (coverage, tracked-AI vs non-tracked lines, tokens, per-backend/model/committer
 breakdowns, loop detection) happens client-side in JavaScript so the filters —
 "entire team" vs a single committer, by backend, by model — recompute every
 metric live without a server. The file opens straight from disk in any browser
@@ -54,7 +54,9 @@ def dashboard_data(dash: Dashboard) -> dict:
         commits.append(
             {
                 "short": stat.short,
-                "author": stat.author,
+                # The merged committer identity, so name variants of one person
+                # collapse to a single filter/breakdown entry (#54).
+                "author": dash.label_of(stat),
                 "subject": stat.subject,
                 "kind": stat.kind,
                 "backend": stat.backend,
@@ -75,7 +77,7 @@ def dashboard_data(dash: Dashboard) -> dict:
         # HEAD sha lets the live page skip re-rendering when nothing changed.
         "head": dash.stats[-1].sha if dash.stats else "",
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
-        "committers": sorted({stat.author for stat in dash.stats if stat.author}),
+        "committers": sorted({c["author"] for c in commits if c["author"]}),
         "backends": sorted({c["eff_backend"] for c in commits if c["eff_backend"]}),
         "models": sorted({c["eff_model"] for c in commits if c["eff_model"]}),
         "commits": commits,
@@ -202,14 +204,12 @@ h2.section::before{content:"# ";color:var(--amber)}
 .entry::before{content:"";position:absolute;left:-30px;top:15px;width:9px;height:9px;border-radius:50%;
   background:var(--ink);border:2px solid var(--phosphor-dim)}
 .entry.ai::before{border-color:var(--phosphor);box-shadow:0 0 8px rgba(61,255,160,.5)}
-.entry.human::before{border-color:var(--amber)}
-.entry.nontracked::before{border-color:var(--fg-dim);background:var(--panel-2)}
+.entry.nontracked::before{border-color:var(--amber)}
 .entry .sha{color:var(--amber);font-size:12.5px}
 .entry .ksub{flex:1;min-width:200px;color:var(--fg)}
 .entry .badge{font-size:10.5px;letter-spacing:.5px;text-transform:uppercase;padding:1px 7px;border:1px solid var(--line);color:var(--fg-dim)}
 .entry .badge.ai{color:var(--phosphor);border-color:var(--phosphor-dim)}
-.entry .badge.human{color:var(--amber);border-color:var(--amber-dim)}
-.entry .badge.nontracked{color:var(--fg-dim)}
+.entry .badge.nontracked{color:var(--amber);border-color:var(--amber-dim)}
 .entry .lc{font-size:12px;color:var(--fg-dim)}
 .entry .lc .add{color:var(--phosphor)} .entry .lc .rem{color:var(--red)}
 .more{padding:12px 0;color:var(--fg-dim);font-size:12.5px}
@@ -269,10 +269,9 @@ footer{margin-top:46px;padding-top:22px;border-top:1px dashed var(--line);color:
 "use strict";
 let DATA = JSON.parse(document.getElementById("agit-data").textContent);
 let COMMITS = DATA.commits;
-const AI_KINDS = new Set(["agent","covered","agent-merge"]);
-const HUMAN_KINDS = new Set(["user"]);          // user commits made inside aGiT — provably human
-const NONTRACKED_KINDS = new Set(["untracked"]); // no aGiT metadata — human OR agent outside aGiT
-const TRACKED = new Set(["agent","covered","agent-merge","user"]);
+const AI_KINDS = new Set(["agent","covered","agent-merge"]);        // aGiT-tracked AI work
+const NONTRACKED_KINDS = new Set(["user","untracked"]);             // everything aGiT didn't track as AI
+const TRACKED = new Set(["agent","covered","agent-merge","user"]);  // tracked *commits* (for coverage)
 const TOKEN_ORDER = [["input","input"],["output","output"],["reasoning","reasoning"],
   ["cache_read","cache read"],["cache_write","cache write"],
   ["subagent_input","subagent input"],["subagent_output","subagent output"],
@@ -314,11 +313,16 @@ function groupBy(cs, key){
   return g;
 }
 function byCommitter(cs){
+  // Per person: aGiT-tracked AI lines they drove vs everything aGiT did not
+  // track as AI. Agent commits are git-authored by whoever ran aGiT but written
+  // by the model, so they are the person's AI-driven lines, not their own.
   const g={};
   for(const c of cs){
     const label=c.author||"unknown";
-    const b=g[label]||(g[label]={commits:0,agit:0,ins:0,del:0});
-    b.commits+=1; if(c.kind!=="untracked") b.agit+=1; b.ins+=c.ins; b.del+=c.del;
+    const b=g[label]||(g[label]={commits:0,agit:0,ai:0,nt:0});
+    b.commits+=1; if(c.kind!=="untracked") b.agit+=1;
+    const lines=c.ins+c.del;
+    if(AI_KINDS.has(c.kind)) b.ai+=lines; else b.nt+=lines;
   }
   return g;
 }
@@ -364,8 +368,8 @@ function render(){
   const cs = filtered();
   const total = cs.length;
   const tracked = cs.filter(c=>TRACKED.has(c.kind)).length;
-  const ai = sumLines(cs, AI_KINDS), human = sumLines(cs, HUMAN_KINDS), nt = sumLines(cs, NONTRACKED_KINDS);
-  const allLines = ai.total + human.total + nt.total;
+  const ai = sumLines(cs, AI_KINDS), nt = sumLines(cs, NONTRACKED_KINDS);
+  const allLines = ai.total + nt.total;
   const tok = tokenTotals(cs);
   const eff = tok.output ? (ai.total/tok.output*1000) : null;
 
@@ -378,22 +382,20 @@ function render(){
   $("cards").innerHTML = [
     card("commits", fmt(total), `${fmt(tracked)} via aGiT`),
     card("aGiT coverage", pct(tracked,total), `${fmt(total-tracked)} non-tracked`, true),
-    card("AI lines", "+"+fmt(ai.ins), `−${fmt(ai.del)} · ${pct(ai.total, allLines)} of changes`),
-    card("human lines", "+"+fmt(human.ins), `−${fmt(human.del)} · user commits in aGiT`, true),
-    card("non-tracked lines", "+"+fmt(nt.ins), `−${fmt(nt.del)} · outside aGiT`),
+    card("aGiT-tracked AI lines", "+"+fmt(ai.ins), `−${fmt(ai.del)} · ${pct(ai.total, allLines)} of changes`),
+    card("non-tracked lines", "+"+fmt(nt.ins), `−${fmt(nt.del)} · not tracked as AI`, true),
     card("output tokens", fmt(tok.output||0), `${fmt(tok.input||0)} input`),
     card("efficiency", eff===null?"—":eff.toFixed(1), "AI lines / 1k output tok", true),
   ].join("");
 
-  // lines panel: three provenance classes, never conflating untracked with human
+  // lines panel: tracked AI vs everything aGiT did not track as AI
   const lineRow = (label, sub, v, amber) =>
     `<div class="row"><div class="name">${label} <small>${sub}</small></div>`+
       `<div class="bar"><i class="${amber?"amber":""}" style="width:${allLines?v.total/allLines*100:0}%"></i></div>`+
       `<div class="num"><b>+${fmt(v.ins)}</b> / −${fmt(v.del)}</div></div>`;
   $("lines").innerHTML =
-    lineRow("AI", "agent + covered + merge", ai, false) +
-    lineRow("Human", "user commits, tracked", human, true) +
-    lineRow("Non-tracked", "possibly human / outside aGiT", nt, false) +
+    lineRow("aGiT-tracked AI", "agent + covered + merge", ai, false) +
+    lineRow("Non-tracked", "user + plain commits", nt, true) +
     `<div class="row"><div class="name">agent ${kinds("agent")} · covered ${kinds("covered")} · merge ${kinds("agent-merge")}</div>`+
       `<div class="bar"></div><div class="num">user ${kinds("user")} · untracked ${kinds("untracked")}</div></div>`;
 
@@ -407,14 +409,15 @@ function render(){
   $("by-backend").innerHTML = groupPanel(groupBy(cs,"eff_backend"));
   $("by-model").innerHTML = groupPanel(groupBy(cs,"eff_model"));
 
-  // committer table (clickable to focus a person)
+  // committer table: the bar is the aGiT-tracked AI lines each person drove;
+  // non-tracked lines are shown as context.
   const comm = byCommitter(cs);
-  const maxC = Math.max(1, ...Object.values(comm).map(b=>b.commits));
-  const commEntries = Object.entries(comm).sort((a,b)=>b[1].commits-a[1].commits);
+  const maxC = Math.max(1, ...Object.values(comm).map(b=>b.ai));
+  const commEntries = Object.entries(comm).sort((a,b)=>b[1].ai-a[1].ai || b[1].commits-a[1].commits);
   $("by-committer").innerHTML = commEntries.length
     ? commEntries.map(([name,b]) =>
-        barRow(name, `${b.agit} via aGiT`, b.commits, maxC,
-          `<b>${fmt(b.commits)}</b> commits · +${fmt(b.ins)}/−${fmt(b.del)}`)).join("")
+        barRow(name, `${b.commits} commits · ${b.agit} via aGiT`, b.ai, maxC,
+          `AI-driven <b>${fmt(b.ai)}</b> · non-tracked ${fmt(b.nt)}`)).join("")
     : `<div class="empty">no commits</div>`;
 
   // loops
@@ -431,7 +434,7 @@ function render(){
   // commit log (newest first)
   const ordered = cs.slice().reverse();
   const head = ordered.slice(0, LOG_CAP).map(c => {
-    const cls = AI_KINDS.has(c.kind) ? "ai" : (HUMAN_KINDS.has(c.kind) ? "human" : "nontracked");
+    const cls = AI_KINDS.has(c.kind) ? "ai" : "nontracked";
     const badge = `<span class="badge ${cls}">${c.kind}</span>`;
     const lc = (c.ins||c.del)?`<span class="lc"><span class="add">+${fmt(c.ins)}</span> <span class="rem">−${fmt(c.del)}</span></span>`:"";
     const m = c.eff_model?` <span class="lc">${esc(c.eff_model)}</span>`:"";

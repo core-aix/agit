@@ -20,7 +20,7 @@ from agit import cli
 from agit.commits import build_agent_commit_message, build_agent_merge_message, build_user_commit_message
 from agit.git import GitRepo
 from agit.metrics import build_dashboard, build_server, dashboard_data, render_dashboard, render_html
-from agit.metrics.collect import CommitStat, _detect_loops
+from agit.metrics.collect import CommitStat, _detect_loops, resolve_committers
 
 
 def _write_lines(repo: GitRepo, name: str, count: int) -> None:
@@ -102,21 +102,40 @@ def test_dashboard_classifies_every_commit_kind(tmp_path):
     assert abs(dash.coverage - 5 / 7) < 1e-9
 
 
-def test_dashboard_attributes_lines_to_ai_human_and_nontracked(tmp_path):
+def test_dashboard_splits_lines_into_tracked_ai_and_nontracked(tmp_path):
     dash = build_dashboard(_demo_repo(tmp_path))
 
     ai_ins, _ = dash.ai_lines
-    human_ins, _ = dash.human_lines
     nt_ins, _ = dash.nontracked_lines
-    # AI: agent.txt (20) + backend.txt (8, via the covered commit); the cover
-    # commit itself is a merge and contributes no numstat — no double count.
+    # aGiT-tracked AI: agent.txt (20) + backend.txt (8, via the covered commit);
+    # the cover commit itself is a merge and contributes no numstat — no double
+    # count.
     assert ai_ins == 28
-    # Human is only the user commit made inside aGiT — user.txt (4).
-    assert human_ins == 4
-    # Non-tracked is the plain git commit (10); the seed commit adds no lines.
-    # It is deliberately NOT folded into "human": it could be agent work made
-    # outside aGiT just as easily as a human's.
-    assert nt_ins == 10
+    # Non-tracked: the user commit (user.txt, 4) + the plain commit (human.txt,
+    # 10). We do not claim these as "human" — a user commit's lines may still be
+    # AI-produced off the record; they are simply not tracked as AI.
+    assert nt_ins == 14
+
+
+def test_squash_or_pr_merge_with_many_metadata_blocks_is_non_tracked(tmp_path):
+    # A squash / PR-merge message concatenates several commits' metadata blocks.
+    # Its first block here is an agent commit, which would otherwise credit the
+    # whole squashed diff as aGiT-tracked AI. More than one metadata block ⇒
+    # aggregate of unknown provenance ⇒ non-tracked, not AI.
+    repo = GitRepo.init(tmp_path)
+    _write_lines(repo, "squashed.txt", 500)
+    message = (
+        "Stability improvements (#9)\n\n"
+        "# aGiT Metadata\ncommit_type: agent\nbackend: claude\n\n"
+        "# aGiT Metadata\ncommit_type: user\nagit_session_id: s1\n"
+    )
+    repo.commit(message)
+
+    dash = build_dashboard(repo)
+    squashed = next(s for s in dash.stats if s.subject.startswith("Stability"))
+    assert squashed.kind == "untracked"
+    assert dash.ai_lines == (0, 0)  # none of the 500 lines counted as AI
+    assert dash.nontracked_lines[0] == 500
 
 
 def test_dashboard_sums_tokens_and_efficiency(tmp_path):
@@ -139,6 +158,11 @@ def test_dashboard_groups_by_backend_model_and_author(tmp_path):
     (author_stats,) = dash.by_author.values()
     assert author_stats["commits"] == 7
     assert author_stats["agit_commits"] == 5
+    # The agent/covered lines this committer git-authored are reported as
+    # AI-driven (28); their user + plain commits are non-tracked (4 + 10), never
+    # claimed as their own human lines.
+    assert author_stats["ai_insertions"] == 28
+    assert author_stats["nontracked_insertions"] == 14
 
 
 def test_render_dashboard_contains_all_sections(tmp_path):
@@ -157,11 +181,11 @@ def test_render_dashboard_contains_all_sections(tmp_path):
         assert heading in text
     assert "aGiT-tracked commits: 5/7" in text
     assert "claude-opus-4-8" in text
-    # The three line-provenance classes are spelled out, never conflating
-    # untracked changes with human ones.
-    assert "AI (agent + covered)" in text
-    assert "Human (user commits, aGiT)" in text
-    assert "Non-tracked (outside aGiT)" in text
+    # Lines are split only two ways now — tracked AI vs non-tracked — with no
+    # "human" category, since a user commit's lines may still be AI-produced.
+    assert "aGiT-tracked AI:" in text
+    assert "Non-tracked:" in text
+    assert "Human (" not in text and "human (own code)" not in text
 
 
 def test_pr_merge_commit_does_not_double_count_the_cover_turn(tmp_path):
@@ -190,6 +214,54 @@ def test_pr_merge_commit_does_not_double_count_the_cover_turn(tmp_path):
     assert merged.by_backend["claude"]["output_tokens"] == base.by_backend["claude"]["output_tokens"]
 
 
+# --- committer identity merging ------------------------------------------------
+
+
+def _person(name: str, email: str, kind: str = "agent") -> CommitStat:
+    return CommitStat(sha=name + email, author=name, email=email, subject="", kind=kind)
+
+
+def test_resolve_committers_merges_name_variants_sharing_an_email():
+    stats = [
+        _person("Pat Example", "pat@example.com"),
+        _person("Pat Example", "pat@example.com"),
+        _person("Patricia Example", "pat@example.com"),
+    ]
+    labels = resolve_committers(stats)
+    # One identity, labelled with the most frequent name.
+    assert set(labels.values()) == {"Pat Example"}
+
+
+def test_resolve_committers_bridges_personal_and_noreply_via_login():
+    stats = [
+        _person("dev", "octodev@example.com"),
+        _person("Dev Example", "octodev@users.noreply.github.com"),
+    ]
+    labels = resolve_committers(stats)
+    # Same GitHub login across a personal email and a no-reply address (the
+    # personal email's local-part matches the login) → one identity, labelled
+    # with the login.
+    assert set(labels.values()) == {"octodev"}
+
+
+def test_resolve_committers_merges_same_name_across_two_emails():
+    stats = [
+        _person("Sam Sample", "sam@sample.test"),
+        _person("Sam Sample", "sam.sample@example.com"),
+    ]
+    # No login signal, but the identical name yields the same label, so the two
+    # collapse to one committer downstream.
+    assert set(resolve_committers(stats).values()) == {"Sam Sample"}
+
+
+def test_resolve_committers_keeps_distinct_people_apart():
+    stats = [
+        _person("Alice Example", "alice@example.com"),
+        _person("Bob Example", "bob@example.com"),
+    ]
+    assert len(set(resolve_committers(stats).values())) == 2
+
+
 # --- loop detection ------------------------------------------------------------
 
 
@@ -197,6 +269,7 @@ def _agent_stat(sha: str, prompt: str, output: int = 10, user_prompts: list[str]
     return CommitStat(
         sha=sha,
         author="a",
+        email="a@example.com",
         subject=f"<aGiT> {prompt}",
         kind="agent",
         tokens={"output": output},

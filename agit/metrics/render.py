@@ -47,15 +47,11 @@ def format_dashboard(dash: Dashboard) -> str:
     lines.append("")
 
     ai_ins, ai_del = dash.ai_lines
-    human_ins, human_del = dash.human_lines
     nt_ins, nt_del = dash.nontracked_lines
-    total_lines = ai_ins + ai_del + human_ins + human_del + nt_ins + nt_del
+    total_lines = ai_ins + ai_del + nt_ins + nt_del
     lines.append("Code changes (lines)")
-    lines.append(f"  AI (agent + covered):       +{ai_ins:,} / -{ai_del:,}{_share(ai_ins + ai_del, total_lines)}")
-    lines.append(
-        f"  Human (user commits, aGiT): +{human_ins:,} / -{human_del:,}{_share(human_ins + human_del, total_lines)}"
-    )
-    lines.append(f"  Non-tracked (outside aGiT): +{nt_ins:,} / -{nt_del:,}{_share(nt_ins + nt_del, total_lines)}")
+    lines.append(f"  aGiT-tracked AI: +{ai_ins:,} / -{ai_del:,}{_share(ai_ins + ai_del, total_lines)}")
+    lines.append(f"  Non-tracked:     +{nt_ins:,} / -{nt_del:,}{_share(nt_ins + nt_del, total_lines)}")
     lines.append("")
 
     lines.append("Tokens (from aGiT commit metadata)")
@@ -73,13 +69,12 @@ def format_dashboard(dash: Dashboard) -> str:
     lines.extend(_group_section("By backend", dash.by_backend))
     lines.extend(_group_section("By model", dash.by_model))
 
-    lines.append("By committer")
-    for author, stats in sorted(dash.by_author.items(), key=lambda item: -item[1]["commits"]):
-        lines.append(
-            f"  {author}: {stats['commits']:,} commits"
-            f" ({stats.get('agit_commits', 0):,} via aGiT),"
-            f" +{stats['insertions']:,} / -{stats['deletions']:,}"
-        )
+    lines.append("By committer (identities merged by email / GitHub login)")
+    for author, stats in sorted(dash.by_author.items(), key=lambda item: -item[1].get("ai_insertions", 0)):
+        ai = (stats.get("ai_insertions", 0), stats.get("ai_deletions", 0))
+        nt = (stats.get("nontracked_insertions", 0), stats.get("nontracked_deletions", 0))
+        lines.append(f"  {author}: {stats['commits']:,} commits ({stats.get('agit_commits', 0):,} via aGiT)")
+        lines.append(f"    AI-driven +{ai[0]:,} / -{ai[1]:,} | non-tracked +{nt[0]:,} / -{nt[1]:,}")
     lines.append("")
 
     lines.append("Possible loops (near-identical repeated prompts)")

@@ -26,7 +26,7 @@ Commit classification:
 from __future__ import annotations
 
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 
 from agit.commits import METADATA_HEADER
@@ -36,6 +36,13 @@ _NUMSTAT_RE = re.compile(r"^(\d+|-)\t(\d+|-)\t")
 _TOKEN_KEY_PREFIX = "tokens_since_last_commit_"
 _RECORD_SEP = "\x00"
 _FIELD_SEP = "\x01"
+
+# A GitHub no-reply address (optionally `ID+`-prefixed) carries the user's
+# login verbatim — the only GitHub identity that lives in `git log` itself.
+_NOREPLY_RE = re.compile(
+    r"^(?:\d+\+)?([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)@users\.noreply\.github\.com$",
+    re.IGNORECASE,
+)
 
 # Same word-overlap rule as commit_engine._same_prompt: editing artifacts and
 # rephrasings shuffle words, genuinely different prompts share few.
@@ -52,6 +59,7 @@ class CommitStat:
 
     sha: str
     author: str
+    email: str
     subject: str
     kind: str  # agent | covered | agent-merge | user | untracked
     backend: str | None = None
@@ -114,21 +122,17 @@ class Dashboard:
 
     @property
     def ai_lines(self) -> tuple[int, int]:
-        # AI work: agent commits, the backend-made commits an aGiT cover commit
-        # accounts for (#58), and agent-resolved merges.
+        # aGiT-tracked AI work: agent commits, the backend-made commits an aGiT
+        # cover commit accounts for (#58), and agent-resolved merges.
         return self.lines_changed("agent", "covered", "agent-merge")
 
     @property
-    def human_lines(self) -> tuple[int, int]:
-        # True human work: only user commits made *inside* aGiT carry the
-        # metadata that proves a human authored them.
-        return self.lines_changed("user")
-
-    @property
     def nontracked_lines(self) -> tuple[int, int]:
-        # No aGiT metadata: could be a human commit made outside aGiT, or an
-        # agent's commit that was never tracked. Deliberately NOT called human.
-        return self.lines_changed("untracked")
+        # Everything aGiT did not track as AI — user commits and plain commits
+        # alike. We do NOT call these "human": even a user-made commit can
+        # contain lines an agent produced off the record, so the only honest
+        # claim is that aGiT did not track them as AI.
+        return self.lines_changed("user", "untracked")
 
     @property
     def token_totals(self) -> dict[str, int]:
@@ -185,16 +189,120 @@ class Dashboard:
         return self.group_by(lambda stat: stat.model)
 
     @property
+    def committer_labels(self) -> dict[tuple[str, str], str]:
+        """Map each ``(author name, email)`` to a merged committer label, so
+        name variants of one person collapse to a single identity."""
+        return resolve_committers(self.stats)
+
+    def label_of(self, stat: CommitStat) -> str:
+        return self.committer_labels.get((stat.author or "", (stat.email or "").strip().lower())) or "unknown"
+
+    @property
     def by_author(self) -> dict[str, dict[str, int]]:
+        """Per committer, lines split into aGiT-tracked AI and non-tracked.
+        Agent commits are git-authored by whoever ran aGiT but written by the
+        model, so they count as that person's AI-driven lines; their user and
+        plain commits are non-tracked (not claimed as human)."""
+        labels = self.committer_labels
         groups: dict[str, dict[str, int]] = {}
         for stat in self.stats:
-            bucket = groups.setdefault(stat.author or "unknown", defaultdict(int))
+            label = labels.get((stat.author or "", (stat.email or "").strip().lower())) or "unknown"
+            bucket = groups.setdefault(label, defaultdict(int))
             bucket["commits"] += 1
             if stat.kind != "untracked":
                 bucket["agit_commits"] += 1
-            bucket["insertions"] += stat.insertions
-            bucket["deletions"] += stat.deletions
+            if stat.kind in ("agent", "covered", "agent-merge"):
+                bucket["ai_insertions"] += stat.insertions
+                bucket["ai_deletions"] += stat.deletions
+            else:
+                bucket["nontracked_insertions"] += stat.insertions
+                bucket["nontracked_deletions"] += stat.deletions
         return {label: dict(bucket) for label, bucket in groups.items()}
+
+
+# ---------------------------------------------------------------------------
+# Committer identity: collapse name variants of the same person (#54)
+# ---------------------------------------------------------------------------
+
+
+def _login_of(email: str) -> str | None:
+    match = _NOREPLY_RE.match(email.strip())
+    return match.group(1).lower() if match else None
+
+
+class _Union:
+    """Tiny union-find over hashable nodes."""
+
+    def __init__(self) -> None:
+        self._parent: dict[object, object] = {}
+
+    def find(self, node: object) -> object:
+        self._parent.setdefault(node, node)
+        root = node
+        while self._parent[root] != root:
+            root = self._parent[root]
+        while self._parent[node] != root:
+            self._parent[node], node = root, self._parent[node]
+        return root
+
+    def union(self, a: object, b: object) -> None:
+        ra, rb = self.find(a), self.find(b)
+        if ra != rb:
+            self._parent[ra] = rb
+
+
+def resolve_committers(stats: list[CommitStat]) -> dict[tuple[str, str], str]:
+    """Map every ``(author name, email)`` pair to a single committer label.
+
+    Identities are merged when they share an email, share a GitHub login (from a
+    no-reply address), or when an email's local-part equals a known login — this
+    is what links ``user@gmail.com`` to ``user@users.noreply.github.com``. The
+    label prefers the GitHub login; otherwise it is the person's most frequent
+    name. All of this is derived from ``git log`` alone, so it stays identical on
+    every clone (no GitHub API, works offline). Two people who genuinely share a
+    name but never a login or email cannot be told apart here and may merge."""
+    union = _Union()
+    logins: set[str] = set()
+    for stat in stats:
+        email = (stat.email or "").strip().lower()
+        node = ("pair", stat.author or "", email)
+        union.find(node)
+        if email:
+            union.union(node, ("email", email))
+            login = _login_of(email)
+            if login:
+                union.union(node, ("login", login))
+                logins.add(login)
+    # Bridge a plain email to a login when its local-part is that login.
+    for stat in stats:
+        email = (stat.email or "").strip().lower()
+        local = email.split("@", 1)[0]
+        if email and local in logins:
+            union.union(("email", email), ("login", local))
+
+    root_logins: dict[object, set[str]] = defaultdict(set)
+    root_names: dict[object, Counter[str]] = defaultdict(Counter)
+    for stat in stats:
+        email = (stat.email or "").strip().lower()
+        root = union.find(("pair", stat.author or "", email))
+        if stat.author:
+            root_names[root][stat.author] += 1
+        login = _login_of(email)
+        if login:
+            root_logins[root].add(login)
+
+    labels: dict[tuple[str, str], str] = {}
+    for stat in stats:
+        email = (stat.email or "").strip().lower()
+        root = union.find(("pair", stat.author or "", email))
+        if root_logins[root]:
+            label = sorted(root_logins[root])[0]
+        elif root_names[root]:
+            label = root_names[root].most_common(1)[0][0]
+        else:
+            label = email or "unknown"
+        labels[(stat.author or "", email)] = label
+    return labels
 
 
 def collect_commit_stats(repo: GitRepo, ref: str = "HEAD") -> list[CommitStat]:
@@ -202,7 +310,7 @@ def collect_commit_stats(repo: GitRepo, ref: str = "HEAD") -> list[CommitStat]:
     # %x00/%x01 are git's own escapes: a literal NUL is not representable in
     # an argv string, but git happily PRINTS one as a record separator.
     log = repo._run(
-        ["git", "log", "--format=%H%x01%an%x01%B%x00", ref],
+        ["git", "log", "--format=%H%x01%an%x01%ae%x01%B%x00", ref],
         check=False,
     ).stdout
     stats: list[CommitStat] = []
@@ -211,8 +319,9 @@ def collect_commit_stats(repo: GitRepo, ref: str = "HEAD") -> list[CommitStat]:
         if not record.strip():
             continue
         sha, _, rest = record.partition(_FIELD_SEP)
-        author, _, body = rest.partition(_FIELD_SEP)
-        stats.append(_parse_commit(sha.strip(), author, body))
+        author, _, rest = rest.partition(_FIELD_SEP)
+        email, _, body = rest.partition(_FIELD_SEP)
+        stats.append(_parse_commit(sha.strip(), author, email, body))
 
     stats = _drop_inherited_metadata(repo, ref, stats)
 
@@ -282,8 +391,16 @@ def build_dashboard(repo: GitRepo, ref: str = "HEAD") -> Dashboard:
 # ---------------------------------------------------------------------------
 
 
-def _parse_commit(sha: str, author: str, body: str) -> CommitStat:
+def _parse_commit(sha: str, author: str, email: str, body: str) -> CommitStat:
     subject = body.splitlines()[0] if body.splitlines() else ""
+    # A clean aGiT turn carries exactly one metadata block. More than one means
+    # the message is an aggregate — a squash or PR merge that concatenated
+    # several commits' blocks — whose first `commit_type` would otherwise credit
+    # the WHOLE squashed diff to one person (e.g. a 1,800-line squash counted as
+    # "human" because its first block happened to be a user commit). Its
+    # provenance cannot be cleanly attributed, so treat it as non-tracked.
+    if body.count(METADATA_HEADER) > 1:
+        return CommitStat(sha=sha, author=author, email=email, subject=subject, kind="untracked")
     metadata = _parse_metadata(body)
     commit_type = metadata.get("commit_type")
     if commit_type == "agent":
@@ -305,6 +422,7 @@ def _parse_commit(sha: str, author: str, body: str) -> CommitStat:
     return CommitStat(
         sha=sha,
         author=author,
+        email=email,
         subject=subject,
         kind=kind,
         backend=metadata.get("backend"),
