@@ -72,6 +72,8 @@ def dashboard_data(dash: Dashboard) -> dict:
     return {
         "repo": dash.repo,
         "branch": dash.branch,
+        # HEAD sha lets the live page skip re-rendering when nothing changed.
+        "head": dash.stats[-1].sha if dash.stats else "",
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         "committers": sorted({stat.author for stat in dash.stats if stat.author}),
         "backends": sorted({c["eff_backend"] for c in commits if c["eff_backend"]}),
@@ -201,11 +203,13 @@ h2.section::before{content:"# ";color:var(--amber)}
   background:var(--ink);border:2px solid var(--phosphor-dim)}
 .entry.ai::before{border-color:var(--phosphor);box-shadow:0 0 8px rgba(61,255,160,.5)}
 .entry.human::before{border-color:var(--amber)}
+.entry.nontracked::before{border-color:var(--fg-dim);background:var(--panel-2)}
 .entry .sha{color:var(--amber);font-size:12.5px}
 .entry .ksub{flex:1;min-width:200px;color:var(--fg)}
 .entry .badge{font-size:10.5px;letter-spacing:.5px;text-transform:uppercase;padding:1px 7px;border:1px solid var(--line);color:var(--fg-dim)}
 .entry .badge.ai{color:var(--phosphor);border-color:var(--phosphor-dim)}
 .entry .badge.human{color:var(--amber);border-color:var(--amber-dim)}
+.entry .badge.nontracked{color:var(--fg-dim)}
 .entry .lc{font-size:12px;color:var(--fg-dim)}
 .entry .lc .add{color:var(--phosphor)} .entry .lc .rem{color:var(--red)}
 .more{padding:12px 0;color:var(--fg-dim);font-size:12.5px}
@@ -263,17 +267,18 @@ footer{margin-top:46px;padding-top:22px;border-top:1px dashed var(--line);color:
 <script type="application/json" id="agit-data">__DATA__</script>
 <script>
 "use strict";
-const DATA = JSON.parse(document.getElementById("agit-data").textContent);
-const COMMITS = DATA.commits;
+let DATA = JSON.parse(document.getElementById("agit-data").textContent);
+let COMMITS = DATA.commits;
 const AI_KINDS = new Set(["agent","covered","agent-merge"]);
-const HUMAN_KINDS = new Set(["user","untracked"]);
+const HUMAN_KINDS = new Set(["user"]);          // user commits made inside aGiT — provably human
+const NONTRACKED_KINDS = new Set(["untracked"]); // no aGiT metadata — human OR agent outside aGiT
 const TRACKED = new Set(["agent","covered","agent-merge","user"]);
 const TOKEN_ORDER = [["input","input"],["output","output"],["reasoning","reasoning"],
   ["cache_read","cache read"],["cache_write","cache write"],
   ["subagent_input","subagent input"],["subagent_output","subagent output"],
   ["subagent_cache_read","subagent cache read"],["subagent_cache_write","subagent cache write"],
   ["summary_input","summarizer input"],["summary_output","summarizer output"]];
-const SIM_THRESHOLD = 0.6, LOOP_MIN_RUN = 3, LOG_CAP = 80;
+const SIM_THRESHOLD = 0.6, LOOP_MIN_RUN = 3, LOG_CAP = 80, REFRESH_MS = 5000;
 
 const state = {author:"", backend:"", model:""};
 const $ = id => document.getElementById(id);
@@ -359,11 +364,12 @@ function render(){
   const cs = filtered();
   const total = cs.length;
   const tracked = cs.filter(c=>TRACKED.has(c.kind)).length;
-  const ai = sumLines(cs, AI_KINDS), human = sumLines(cs, HUMAN_KINDS);
+  const ai = sumLines(cs, AI_KINDS), human = sumLines(cs, HUMAN_KINDS), nt = sumLines(cs, NONTRACKED_KINDS);
+  const allLines = ai.total + human.total + nt.total;
   const tok = tokenTotals(cs);
   const eff = tok.output ? (ai.total/tok.output*1000) : null;
 
-  $("genat").textContent = "generated " + DATA.generated_at;
+  $("genat").textContent = "updated " + DATA.generated_at;
   $("scope").innerHTML = state.author ? `scope: <b>${esc(state.author)}</b>` : `scope: <b>entire team</b>`;
   $("count").textContent = `${fmt(total)} commits shown of ${fmt(COMMITS.length)}`;
 
@@ -371,21 +377,23 @@ function render(){
   const kinds = k => cs.filter(c=>c.kind===k).length;
   $("cards").innerHTML = [
     card("commits", fmt(total), `${fmt(tracked)} via aGiT`),
-    card("aGiT coverage", pct(tracked,total), `${fmt(total-tracked)} untracked`, true),
-    card("AI lines", "+"+fmt(ai.ins), `−${fmt(ai.del)} · ${pct(ai.total, ai.total+human.total)} of changes`),
-    card("human lines", "+"+fmt(human.ins), `−${fmt(human.del)}`, true),
+    card("aGiT coverage", pct(tracked,total), `${fmt(total-tracked)} non-tracked`, true),
+    card("AI lines", "+"+fmt(ai.ins), `−${fmt(ai.del)} · ${pct(ai.total, allLines)} of changes`),
+    card("human lines", "+"+fmt(human.ins), `−${fmt(human.del)} · user commits in aGiT`, true),
+    card("non-tracked lines", "+"+fmt(nt.ins), `−${fmt(nt.del)} · outside aGiT`),
     card("output tokens", fmt(tok.output||0), `${fmt(tok.input||0)} input`),
     card("efficiency", eff===null?"—":eff.toFixed(1), "AI lines / 1k output tok", true),
   ].join("");
 
-  // lines panel
+  // lines panel: three provenance classes, never conflating untracked with human
+  const lineRow = (label, sub, v, amber) =>
+    `<div class="row"><div class="name">${label} <small>${sub}</small></div>`+
+      `<div class="bar"><i class="${amber?"amber":""}" style="width:${allLines?v.total/allLines*100:0}%"></i></div>`+
+      `<div class="num"><b>+${fmt(v.ins)}</b> / −${fmt(v.del)}</div></div>`;
   $("lines").innerHTML =
-    `<div class="row"><div class="name">AI <small>agent+covered</small></div>`+
-      `<div class="bar"><i style="width:${ai.total+human.total?ai.total/(ai.total+human.total)*100:0}%"></i></div>`+
-      `<div class="num"><b>+${fmt(ai.ins)}</b> / −${fmt(ai.del)}</div></div>`+
-    `<div class="row"><div class="name">Human <small>user+untracked</small></div>`+
-      `<div class="bar"><i class="amber" style="width:${ai.total+human.total?human.total/(ai.total+human.total)*100:0}%"></i></div>`+
-      `<div class="num"><b>+${fmt(human.ins)}</b> / −${fmt(human.del)}</div></div>`+
+    lineRow("AI", "agent + covered + merge", ai, false) +
+    lineRow("Human", "user commits, tracked", human, true) +
+    lineRow("Non-tracked", "possibly human / outside aGiT", nt, false) +
     `<div class="row"><div class="name">agent ${kinds("agent")} · covered ${kinds("covered")} · merge ${kinds("agent-merge")}</div>`+
       `<div class="bar"></div><div class="num">user ${kinds("user")} · untracked ${kinds("untracked")}</div></div>`;
 
@@ -423,8 +431,8 @@ function render(){
   // commit log (newest first)
   const ordered = cs.slice().reverse();
   const head = ordered.slice(0, LOG_CAP).map(c => {
-    const ai_ = AI_KINDS.has(c.kind), cls = ai_?"ai":(HUMAN_KINDS.has(c.kind)?"human":"");
-    const badge = ai_?`<span class="badge ai">${c.kind}</span>`:`<span class="badge human">${c.kind}</span>`;
+    const cls = AI_KINDS.has(c.kind) ? "ai" : (HUMAN_KINDS.has(c.kind) ? "human" : "nontracked");
+    const badge = `<span class="badge ${cls}">${c.kind}</span>`;
     const lc = (c.ins||c.del)?`<span class="lc"><span class="add">+${fmt(c.ins)}</span> <span class="rem">−${fmt(c.del)}</span></span>`:"";
     const m = c.eff_model?` <span class="lc">${esc(c.eff_model)}</span>`:"";
     return `<div class="entry ${cls}"><span class="sha">${esc(c.short)}</span>${badge}`+
@@ -447,24 +455,43 @@ function groupPanel(groups){
       `+${fmt(b.ins)}/−${fmt(b.del)}${b.output?` · <b>${fmt(b.output)}</b> tok`:""}`)).join("");
 }
 
-function fillSelect(id, values, allLabel){
+function fillSelect(id, values, allLabel, keep){
+  // Repopulate options while preserving the current selection across refreshes.
   const sel = $(id);
   sel.innerHTML = `<option value="">${allLabel}</option>` +
     values.map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join("");
+  sel.value = (keep && values.includes(keep)) ? keep : "";
+}
+function syncFilters(){
+  fillSelect("f-author", DATA.committers, "— entire team —", state.author);
+  fillSelect("f-backend", DATA.backends, "— all backends —", state.backend);
+  fillSelect("f-model", DATA.models, "— all models —", state.model);
+  // A selection whose value vanished from the data falls back to "all".
+  if(!DATA.committers.includes(state.author)) state.author = "";
+  if(!DATA.backends.includes(state.backend)) state.backend = "";
+  if(!DATA.models.includes(state.model)) state.model = "";
+}
+async function refresh(){
+  try {
+    const r = await fetch("data", {cache:"no-store"});
+    if(!r.ok) return;
+    const next = await r.json();
+    if(next.head === DATA.head) return;  // nothing changed; don't disturb the view
+    DATA = next; COMMITS = next.commits;
+    syncFilters(); render();
+  } catch(e) { /* server stopped or offline (static file): keep the last view */ }
 }
 function init(){
-  fillSelect("f-author", DATA.committers, "— entire team —");
-  fillSelect("f-backend", DATA.backends, "— all backends —");
-  fillSelect("f-model", DATA.models, "— all models —");
+  syncFilters();
   $("f-author").onchange = e => { state.author = e.target.value; render(); };
   $("f-backend").onchange = e => { state.backend = e.target.value; render(); };
   $("f-model").onchange = e => { state.model = e.target.value; render(); };
   $("reset").onclick = () => {
     state.author=state.backend=state.model="";
-    $("f-author").value=$("f-backend").value=$("f-model").value="";
-    render();
+    syncFilters(); render();
   };
   render();
+  setInterval(refresh, REFRESH_MS);
 }
 init();
 </script>

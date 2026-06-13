@@ -240,15 +240,17 @@ scripts/demo.sh --model haiku --dir /tmp/agit-demo
 
 ### Repository dashboard
 
-`agit --dashboard` prints repository metrics computed entirely from the aGiT metadata in commit messages — no extra state, so the numbers are identical on every clone:
+`agit --dashboard` (or `-d`) opens a live web dashboard of repository metrics computed entirely from the aGiT metadata in commit messages — no extra state, so the numbers are identical on every clone. It is served on `localhost`, opens in your browser, and **auto-refreshes** (the page polls the server, which recomputes from `git log` on each request), so you can watch metrics update as an agent commits. Press Ctrl-C to stop.
 
-- **Coverage**: how many commits are aGiT-tracked (agent commits, backend-made commits covered by an aGiT cover commit, agent-resolved merges, user commits) versus untracked.
-- **Code changes**: lines added/removed by AI versus by humans. Cover commits are merges and contribute no line counts of their own, so a turn's lines are never double-counted.
+- **Coverage**: how many commits are aGiT-tracked (agent commits, backend-made commits covered by an aGiT cover commit, agent-resolved merges, user commits) versus non-tracked.
+- **Code changes**: lines added/removed split three ways — **AI** (agent commits + the backend-made commits an aGiT cover commit accounts for + agent-resolved merges), **human** (only user commits made *inside* aGiT, which carry the metadata that proves a human authored them), and **non-tracked** (commits with no aGiT metadata — possibly a human's, possibly an agent's made outside aGiT; deliberately not labelled "human"). Cover commits are merges and contribute no line counts of their own, so a turn's lines are never double-counted.
 - **Tokens**: totals per category (input, output, reasoning, cache read/write, sub-agents, summarizer) and an efficiency ratio — AI-changed lines per 1k output tokens.
 - **Breakdowns** by backend, by model (a cover commit's bucket includes the lines of the backend-made commits it covers), and by committer.
 - **Possible loops**: runs of three or more consecutive turns with near-identical prompts (or the same prompt repeated within one turn's trace), with the output tokens they consumed — a sign the conversation is going in circles.
 
-`agit --dashboard html` writes the same metrics to a self-contained web page (styled like the [project page](https://github.com/core-aix/agit/tree/main/docs)) and opens it in your browser. The page embeds the per-commit data and recomputes every metric client-side, so you can **filter live** — narrow the whole dashboard to one committer or view the entire team, and slice by backend or model. It also includes a filtered commit-log timeline. No server: the HTML opens straight from disk and works on any clone.
+The web page (styled like the [project page](https://github.com/core-aix/agit/tree/main/docs)) recomputes every metric client-side, so you can **filter live** — narrow the whole dashboard to one committer or view the entire team, and slice by backend or model — and it includes a filtered commit-log timeline.
+
+`agit --dashboard text` (or `-d text`) prints the same metrics as a one-shot plain-text report instead of serving — handy for piping or pasting into an issue.
 
 The dashboard is read-only in either form: it never commits, never prompts, and skips the privacy acknowledgment.
 
