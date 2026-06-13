@@ -1053,17 +1053,25 @@ function resetZoom(){ tsView=null; tsHover=-1; const s=$("ts-look"); if(s) s.val
 // Keep the "show" dropdown in sync after a manual wheel/drag zoom: a narrowed
 // window reads as "custom", a full one as "all history".
 function tsSyncLookSelect(){ const s=$("ts-look"); if(s) s.value = tsView ? "custom" : "0"; }
-// The easy zoom: set the visible window to the most recent <days> of history
-// (0 = all). Operates on the already-loaded buckets, like the wheel/drag zoom.
-function applyLookback(days){
+// The easy zoom: the visible window for "show the most recent <days>" (0 = all),
+// computed from the loaded bucket timestamps. Returns null for the full range.
+function tsLookbackWindow(days){
   const t = TS.t||[], n = t.length;
-  if(n<=1 || !days){ tsView = null; }
-  else {
-    const cutoff = t[n-1] - days*DAY;       // bucket starts within the window
-    let lo = 0; while(lo < n-1 && t[lo] < cutoff) lo++;
-    tsView = (lo<=0) ? null : [lo, n-1];
-  }
-  tsHover = -1; renderChart();
+  if(n<=1 || !days) return null;
+  const cutoff = t[n-1] - days*DAY;         // bucket starts within the window
+  let lo = 0; while(lo < n-1 && t[lo] < cutoff) lo++;
+  return (lo<=0) ? null : [lo, n-1];
+}
+function applyLookback(days){ tsView = tsLookbackWindow(days); tsHover = -1; renderChart(); }
+// Re-apply the current SHOW selection to a freshly-loaded bucket set (after a
+// filter/granularity change or a live refresh) WITHOUT resetting it — the old
+// pixel indices can't carry over, but the chosen lookback duration can. A manual
+// "custom" wheel/drag zoom has no duration to re-apply, so it falls back to all.
+function reapplyLookback(){
+  const sel = $("ts-look"), v = sel ? sel.value : "0";
+  if(v === "custom"){ tsView = null; if(sel) sel.value = "0"; }
+  else { tsView = tsLookbackWindow(+v); }
+  tsHover = -1;
 }
 function renderTimeseries(){ renderLegend(); renderChart(); }
 
@@ -1138,16 +1146,17 @@ function syncFilters(){
 }
 
 // A filter change refetches the aggregates and resets the log to its first page.
-// The plot's zoom window is tied to the old bucket set, so reset it too.
+// The SHOW/PER selections are preserved: PER stays in state, and the SHOW
+// lookback is re-applied to the new bucket set (its old pixel window can't carry).
 async function applyFilters(){
-  resetZoom();
   await loadAgg(); await loadLog(0);
+  reapplyLookback();
   syncFilters(); renderAgg(); renderLog();
 }
 async function refresh(){
   const prev = HEAD;
   if(await loadAgg() && HEAD !== prev){  // new commits landed — refresh the view
-    resetZoom();  // the bucket set changed; an old window would mis-map
+    reapplyLookback();  // keep the chosen SHOW window over the new buckets
     await loadLog(LOGPAGE.offset||0);
     syncFilters(); renderAgg(); renderLog();
   }
@@ -1194,9 +1203,10 @@ function init(){
     const key = btn.dataset.key; tsOn[key] = !tsOn[key];
     renderTimeseries();
   });
-  // Bucket granularity: refetch the (re-bucketed) series, reset zoom, redraw plot.
+  // Bucket granularity: refetch the (re-bucketed) series and redraw the plot,
+  // keeping the SHOW lookback applied to the new buckets.
   $("ts-gran").value = state.granularity;
-  $("ts-gran").onchange = async e => { state.granularity = e.target.value; resetZoom(); if(await loadAgg()) renderTimeseries(); };
+  $("ts-gran").onchange = async e => { state.granularity = e.target.value; if(await loadAgg()){ reapplyLookback(); renderTimeseries(); } };
   // Easy zoom: pick how far back the plot's x axis looks (over loaded buckets).
   $("ts-look").onchange = e => { if(e.target.value !== "custom") applyLookback(+e.target.value); };
   // Zoom/pan the x axis over the loaded buckets: wheel zooms (anchored on the
