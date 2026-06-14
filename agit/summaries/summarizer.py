@@ -43,12 +43,46 @@ _UNUSABLE_SUMMARY_RE = re.compile(
 )
 
 
+# Phrases that only ever appear in the summarizer's *prompt* (its system
+# instructions and scaffolding), never in a real summary. Some headless backend
+# runs return the input prompt verbatim as the "response" with a zero exit code;
+# without this guard that echoed prompt became the commit message — the bug where
+# a commit subject was "You are a technical summarizer for a coding session…".
+# Matched anywhere in the text (an echo restates these), and chosen to be
+# distinctive enough that a genuine code-change summary never contains them.
+_PROMPT_ECHO_MARKERS = (
+    "you are a technical summarizer",
+    "you are maintaining a running session summary",
+    "you are capturing the full context of a coding session",
+    "recent conversation turns:",
+)
+
+
 def summary_is_usable(text: str | None) -> bool:
-    """True when *text* looks like an actual summary, not a backend error."""
-    first_line = next((line for line in (text or "").strip().splitlines() if line.strip()), "")
+    """True when *text* looks like an actual summary — not a backend error, and
+    not an echo of the summarizer's own prompt."""
+    stripped = (text or "").strip()
+    first_line = next((line for line in stripped.splitlines() if line.strip()), "")
     if not first_line:
         return False
-    return _UNUSABLE_SUMMARY_RE.search(first_line) is None
+    if _UNUSABLE_SUMMARY_RE.search(first_line) is not None:
+        return False
+    lowered = stripped.lower()
+    return not any(marker in lowered for marker in _PROMPT_ECHO_MARKERS)
+
+
+def _looks_like_prompt_echo(prompt: str, response: str) -> bool:
+    """The backend returned (a leading chunk of) the prompt we sent instead of a
+    summary. Independent of which prompt was used: an echo restates the prompt
+    from the top, so the normalised openings match. This backstops
+    :data:`_PROMPT_ECHO_MARKERS` if the prompt wording ever changes."""
+
+    def norm(text: str) -> str:
+        return " ".join(text.split()).lower()
+
+    prompt_norm, response_norm = norm(prompt), norm(response)
+    window = min(len(prompt_norm), len(response_norm), 80)
+    return window >= 40 and prompt_norm[:window] == response_norm[:window]
 
 
 def summary_scratch_dir() -> Path:
@@ -114,11 +148,14 @@ class Summarizer:
             self.tokens_input += int(getattr(tokens, "input", 0) or 0)
             self.tokens_output += int(getattr(tokens, "output", 0) or 0)
         text = result.final_response.strip()
-        # A failed run must raise rather than return its error text, or the
-        # error becomes the commit subject (issue #8). Callers already treat a
-        # raising summarizer as "no summary" and keep the prompt-led message.
+        # A failed/echoed run must raise rather than return its text, or the error
+        # (or the prompt itself) becomes the commit subject (issue #8). Callers
+        # already treat a raising summarizer as "no summary" and keep the
+        # prompt-led message.
         if result.exit_code != 0:
             raise UnusableSummaryError(f"summarizer backend exited with {result.exit_code}: {text[:200]}")
+        if _looks_like_prompt_echo(prompt, text):
+            raise UnusableSummaryError(f"summarizer echoed its prompt instead of summarizing: {text[:200]}")
         if not summary_is_usable(text):
             raise UnusableSummaryError(f"summarizer returned an error message: {text[:200]}")
         return text

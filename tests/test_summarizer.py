@@ -280,3 +280,68 @@ def test_summary_is_usable_keeps_topical_mentions_of_limits_and_errors() -> None
         "Handle the usage limits page in the settings UI",
     ]:
         assert summary_is_usable(summary) is True, summary
+
+
+def test_summary_is_usable_rejects_echoed_prompt() -> None:
+    from agit.summaries import summary_is_usable
+    from agit.summaries.prompts import COMMIT_SUMMARY_SYSTEM, PRE_COMPACTION_SYSTEM, SESSION_UPDATE_SYSTEM
+
+    # The exact bug: the backend echoed its own system prompt, which then became
+    # the commit subject/body. Every system prompt and the scaffolding must be
+    # recognised as not-a-summary.
+    assert summary_is_usable(COMMIT_SUMMARY_SYSTEM) is False
+    assert summary_is_usable(SESSION_UPDATE_SYSTEM) is False
+    assert summary_is_usable(PRE_COMPACTION_SYSTEM) is False
+    assert summary_is_usable("Recent conversation turns:\nUser: hi\nAgent: hello") is False
+    # A real summary that happens to mention conversations still passes.
+    assert summary_is_usable("Refactored the conversation parser and added tests.") is True
+
+
+def test_summarizer_raises_when_backend_echoes_the_prompt() -> None:
+    import pytest
+    from agit.summaries import UnusableSummaryError
+
+    # Simulate the backend returning the *entire prompt* it was given (the
+    # observed failure mode) — the summarizer must reject it so the commit keeps
+    # its prompt-led message rather than a prompt-dump.
+    captured: dict[str, str] = {}
+
+    def echo_run(prompt, *, model=None, session_id=None):
+        captured["prompt"] = prompt
+        return _result(prompt)  # echo the prompt back as the response
+
+    backend = Mock()
+    backend.run.side_effect = echo_run
+    summarizer = Summarizer(backend)
+    with pytest.raises(UnusableSummaryError):
+        summarizer.summarize_commit(turns=[_turn()], diff="+x", session_summary=None)
+    assert captured["prompt"].startswith("You are a technical summarizer")
+
+
+def test_looks_like_prompt_echo_is_marker_independent() -> None:
+    from agit.summaries.summarizer import _looks_like_prompt_echo
+
+    # The general (marker-independent) check: a response that restates the prompt
+    # from the top is an echo even if no fixed marker matches.
+    prompt = "Please produce a one-line summary of the following changes in plain prose."
+    assert _looks_like_prompt_echo(prompt, prompt) is True
+    assert _looks_like_prompt_echo(prompt, prompt + " extra trailing text") is True
+    assert _looks_like_prompt_echo(prompt, "A concise, unrelated summary of the work.") is False
+    # Short responses can't be confused with an echo of a long prompt.
+    assert _looks_like_prompt_echo(prompt, "Done.") is False
+
+
+def test_session_update_rejects_echoed_prompt() -> None:
+    import pytest
+    from agit.summaries import UnusableSummaryError
+
+    # The session-update path goes through the same _run guard; echoing the
+    # received prompt must be rejected too.
+    def echo_run(prompt, *, model=None, session_id=None):
+        return _result(prompt)
+
+    backend = Mock()
+    backend.run.side_effect = echo_run
+    summarizer = Summarizer(backend)
+    with pytest.raises(UnusableSummaryError):
+        summarizer.update_session_summary(current_summary=None, turns=[_turn()], diff="+x", commit_summary="x")
