@@ -1067,6 +1067,22 @@ class GitRepo:
             self._restore_config(restore)
         return ok
 
+    def is_partial_clone(self) -> bool:
+        """Whether this clone fetches objects lazily from a promisor remote — the state
+        ``git clone --filter=blob:none`` (or ``--filter=blob:limit=…``) leaves behind.
+
+        It is the difference between two answers to "how many lines did this commit change?".
+        Counting from LOCAL blobs is exact on an ordinary clone and can be remembered forever;
+        on a partial clone it is only a floor, because the blobs a big commit touched may still
+        live on the remote, so the commits actually being displayed are recounted with fetching
+        allowed. Asking git which kind of repo this is lets the ordinary case skip that recount
+        entirely (see metrics.collect)."""
+        found = self._run(
+            ["git", "config", "--get-regexp", r"^(remote\..*\.promisor|extensions\.partialclone)$"],
+            check=False,
+        )
+        return bool(found.stdout.strip())
+
     def _config_snapshot(self, keys: list[str]) -> dict[str, str | None]:
         """Each key's current local value, or None when unset. Local scope only: this is for
         restoring config aGiTrack is about to disturb, and a global/system value is not ours."""
