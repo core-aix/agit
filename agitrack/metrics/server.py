@@ -25,6 +25,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import urllib.parse
 import webbrowser
 from pathlib import Path
@@ -38,6 +39,7 @@ from agitrack.metrics import story as story_page
 from agitrack.metrics.collect import Dashboard, build_dashboard, viewable_branches
 from agitrack.metrics.files import FileBrowser, git_browser
 from agitrack.metrics.insights import build_insights, context_from_browser
+from agitrack.metrics import progress
 from agitrack.metrics.github import cached_logins
 from agitrack.metrics.routing import Response, html_response, json_response
 from agitrack.metrics.web import (
@@ -126,6 +128,13 @@ class RepoScope:
         self._insights_cache: dict[tuple, list[dict]] = {}
         # The built Dashboard itself, keyed by the refs it was built from (see _dashboard).
         self._dash_cache: dict[tuple, Dashboard] = {}
+        # One build at a time per repository. The server is threaded, so a page fetching /data
+        # while another tab (or the hub) asks for the same thing had every thread indexing the
+        # SAME history in parallel: the full first-load cost paid twice over, and both writing
+        # the same rows into the cache. Whoever arrives second waits for the first and then
+        # finds the answer in the cache above. Re-entrant because the file browser's build asks
+        # for the dashboard it belongs to.
+        self._build_lock = threading.RLock()
 
     @property
     def root(self) -> "Path":
@@ -164,6 +173,11 @@ class RepoScope:
             # the time the first /data poll lands, so committers show as their IDs almost at once.
             cached_logins(self.repo, ref)
             return html_response(shell_html(self.repo))
+        if path == "/progress":
+            # How far along a build running on ANOTHER thread is (metrics.progress). Answered
+            # without touching git or building anything: the whole point is that it stays
+            # instant while the request it describes is still crunching the history.
+            return json_response(progress.snapshot(self.root))
         if path == "/data":
             payload = aggregates_payload(
                 self._dashboard(ref),
@@ -183,21 +197,25 @@ class RepoScope:
             payload["empty_state"] = self._empty_state(self._dashboard(ref))
             return json_response(payload)
         if path == "/log":
-            return json_response(
-                log_page(
-                    self._dashboard(ref),
-                    repo=self.repo,
-                    author=author,
-                    backend=backend,
-                    model=model,
-                    meta=meta,
-                    frm=frm,
-                    to=to,
-                    offset=_int(query, "offset", 0),
-                    limit=_int(query, "limit", 50),
-                    sort=_str(query, "sort"),
+            # Also published: on a repository being indexed for the first time this page's exact
+            # line counts are fetched here, after /data has done the history, and the loading
+            # screen is still up in front of it.
+            with progress.publishing(self.root):
+                return json_response(
+                    log_page(
+                        self._dashboard(ref),
+                        repo=self.repo,
+                        author=author,
+                        backend=backend,
+                        model=model,
+                        meta=meta,
+                        frm=frm,
+                        to=to,
+                        offset=_int(query, "offset", 0),
+                        limit=_int(query, "limit", 50),
+                        sort=_str(query, "sort"),
+                    )
                 )
-            )
         if path == "/diff":
             # This commit's file diffs, straight from the local clone — so the dashboard shows
             # changes without GitHub. The sha is validated as a hex id in commit_diff.
@@ -359,10 +377,17 @@ class RepoScope:
         hit = self._dash_cache.get(key)
         if hit is not None:
             return hit
-        dash = build_dashboard(self.repo, ref, sha_logins=logins, email_logins=self.email_logins)
-        self._dash_cache.clear()  # only the current state is worth keeping
-        self._dash_cache[key] = dash
-        return dash
+        with self._build_lock:
+            hit = self._dash_cache.get(key)
+            if hit is not None:
+                return hit  # another thread built it while this one waited
+            # The one place a request can block for minutes (a repository whose commits have
+            # never been diffed), so it is the one place that says how far along it is.
+            with progress.publishing(self.root):
+                dash = build_dashboard(self.repo, ref, sha_logins=logins, email_logins=self.email_logins)
+            self._dash_cache.clear()  # only the current state is worth keeping
+            self._dash_cache[key] = dash
+            return dash
 
     def _ref_state(self, ref: str) -> str:
         """A cheap fingerprint of everything the dashboard reads: the shown branch's tip, the
@@ -399,9 +424,13 @@ class RepoScope:
         key = (ref, head)
         hit = self._browser_cache.get(key)
         if hit is None:
-            hit = git_browser(self.repo, dash.stats, ref)
-            self._browser_cache.clear()  # keep only the latest tip's browser — bounded memory
-            self._browser_cache[key] = hit
+            with self._build_lock:
+                hit = self._browser_cache.get(key)  # another thread may have just indexed it
+                if hit is None:
+                    with progress.publishing(self.root):
+                        hit = git_browser(self.repo, dash.stats, ref)
+                    self._browser_cache.clear()  # keep only the latest tip's — bounded memory
+                    self._browser_cache[key] = hit
         return hit
 
     _INSIGHTS_CACHE_MAX = 16

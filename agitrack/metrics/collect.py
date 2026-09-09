@@ -45,6 +45,7 @@ from agitrack.commits import METADATA_HEADER
 from agitrack.commits.message import is_fully_tracked_message
 from agitrack.commits.message import mask_paths
 from agitrack.git import GitRepo
+from agitrack.metrics import progress
 
 _NUMSTAT_RE = re.compile(r"^(\d+|-)\t(\d+|-)\t")
 _TOKEN_KEY_PREFIX = "tokens_since_last_commit_"
@@ -1377,15 +1378,23 @@ def _apply_numstat(repo: GitRepo, ref: str, by_sha: dict[str, CommitStat]) -> No
         stat.deletions += entry[1]
     if not missing:
         return
-    fresh, seen = _numstat_of(repo, missing, allow_lazy_fetch=False)
-    for sha in missing:
-        by_sha[sha].insertions += fresh[sha].insertions
-        by_sha[sha].deletions += fresh[sha].deletions
     # On an ordinary clone every blob is present, so a local count IS the exact one and nothing
     # ever needs to diff that commit again.
     partial = repo.is_partial_clone()
     tier = _NUMSTAT_LOCAL if partial else _NUMSTAT_EXACT
-    _write_numstat_cache(repo, cached, _cache_rows(fresh, seen if partial else set(missing), tier))
+    # A chunk at a time, for the two things a single call could not do: report progress to a
+    # page that is waiting on this (metrics.progress), and bank what has been computed so far —
+    # a first index that is interrupted (the tab closed, the daemon restarted) now resumes from
+    # where it stopped instead of starting the whole history again.
+    for start in range(0, len(missing), _NUMSTAT_CHUNK):
+        progress.step("counting changed lines", start, len(missing))
+        batch = missing[start : start + _NUMSTAT_CHUNK]
+        fresh, seen = _numstat_of(repo, batch, allow_lazy_fetch=False)
+        for sha in batch:
+            by_sha[sha].insertions += fresh[sha].insertions
+            by_sha[sha].deletions += fresh[sha].deletions
+        _write_numstat_cache(repo, cached, _cache_rows(fresh, seen if partial else set(batch), tier))
+    progress.step("counting changed lines", len(missing), len(missing))
 
 
 def apply_numstat_for(repo: GitRepo, shas: list[str], by_sha: dict[str, CommitStat]) -> None:
@@ -1413,12 +1422,16 @@ def apply_numstat_for(repo: GitRepo, shas: list[str], by_sha: dict[str, CommitSt
         missing.append(sha)
     if not missing:
         return
-    fresh, seen = _numstat_of(repo, missing, allow_lazy_fetch=True)
-    for sha in seen:
-        by_sha[sha].insertions = fresh[sha].insertions
-        by_sha[sha].deletions = fresh[sha].deletions
-    record = seen if repo.is_partial_clone() else set(missing)
-    _write_numstat_cache(repo, cached, _cache_rows(fresh, record, _NUMSTAT_EXACT))
+    partial = repo.is_partial_clone()
+    for start in range(0, len(missing), _EXACT_CHUNK):
+        progress.step("fetching exact line counts", start, len(missing))
+        batch = missing[start : start + _EXACT_CHUNK]
+        fresh, seen = _numstat_of(repo, batch, allow_lazy_fetch=True)
+        for sha in seen:
+            by_sha[sha].insertions = fresh[sha].insertions
+            by_sha[sha].deletions = fresh[sha].deletions
+        _write_numstat_cache(repo, cached, _cache_rows(fresh, seen if partial else set(batch), _NUMSTAT_EXACT))
+    progress.step("fetching exact line counts", len(missing), len(missing))
 
 
 def _numstat_of(repo: GitRepo, shas: list[str], *, allow_lazy_fetch: bool) -> tuple[dict[str, CommitStat], set[str]]:
@@ -1446,6 +1459,14 @@ def _numstat_of(repo: GitRepo, shas: list[str], *, allow_lazy_fetch: bool) -> tu
 # displayed, which apply_numstat_for recounts and then records as EXACT.
 _NUMSTAT_EXACT = "E"
 _NUMSTAT_LOCAL = "L"
+# Commits per git call when filling the cache. Small enough that the loading page's bar moves
+# several times a second on a slow history, large enough that git's own start-up cost stays
+# noise next to the diffing.
+_NUMSTAT_CHUNK = 32
+# Smaller for the exact pass: those diffs may FETCH the blobs they need, so a handful of commits
+# can take as long as hundreds of local ones, and a bar that does not move is the thing this is
+# all here to avoid.
+_EXACT_CHUNK = 8
 _NUMSTAT_CACHE_LIMIT = 100_000  # entries before the file is rewritten instead of appended to
 
 

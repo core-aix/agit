@@ -1004,6 +1004,14 @@ body.booting .wrap>*:not(header):not(#booting){display:none}
 #booting .bdots::after{content:"";animation:bdots 1.4s steps(4,end) infinite}
 @keyframes bdots{0%{content:""}25%{content:"."}50%{content:".."}75%{content:"..."}}
 #booting .bsub{font-size:13px;color:var(--fg-dim)}
+/* The real progress bar, shown only once the server reports a build it can measure (see
+   metrics/progress.py). Hidden until then, so a repo that loads instantly never flashes a bar
+   at 0%. The [hidden] rule is explicit because the width/height rules below would otherwise
+   out-specify the browser's own `[hidden]{display:none}`. */
+#booting .bbar{width:min(420px,70vw);height:8px;border:1px solid var(--phosphor-dim);overflow:hidden}
+#booting .bbar[hidden]{display:none}
+#booting .bbar i{display:block;height:100%;width:0;background:var(--phosphor);
+  box-shadow:0 0 12px rgba(61,255,160,.45);transition:width .25s linear}
 /* Every top-of-page notice lives in ONE sticky strip so they STACK instead of covering each
    other. They used to position themselves independently — the offline banner `fixed` at z-40,
    the backtrace/update banners `sticky` at z-60 — so on a backtrace dashboard the higher banner
@@ -1519,7 +1527,8 @@ __UPDATE_BANNER__
   <div class="booting" id="booting">
     <span class="spin"></span>
     <div class="bmsg">reading commit history<span class="bdots"></span></div>
-    <div class="bsub">crunching the git log: a large repo can take a few seconds</div>
+    <div class="bbar" id="bbar" hidden><i id="bfill"></i></div>
+    <div class="bsub" id="bsub">crunching the git log: a large repo can take a few seconds</div>
   </div>
 
   <div class="controls">
@@ -1792,6 +1801,38 @@ function snapshotRestore(){
     LOGPAGE=d.log; if(d.branch) state.branch=d.branch;
     return true;
   }catch(e){ return false; }
+}
+
+// --- first-load progress ---------------------------------------------------------------
+// The boot fetches below can take minutes on a repository whose commits have never been
+// diffed (the dashboard indexes the whole history once, then caches it per commit). The
+// server publishes how far along that is; ask it while the fetch is in flight, so the
+// loading screen shows real movement instead of a spinner and a promise of "a few seconds".
+let BOOTPOLL = null;
+function bootProgress(on){
+  if(BOOTPOLL){ clearInterval(BOOTPOLL); BOOTPOLL = null; }
+  if(!on) return;
+  const bar = $("bbar"), fill = $("bfill"), sub = $("bsub");
+  if(!bar || !fill || !sub) return;
+  const tick = async () => {
+    try{
+      const r = await fetch("progress", {cache:"no-store"});
+      if(!r.ok) return;                       // an export (or an older server) has no such route
+      const p = await r.json();
+      // Nothing measurable yet — a build that has not reached a counted phase, or one that is
+      // simply fast. Leave the plain spinner alone rather than flashing an empty bar.
+      if(!p || !p.active || !p.total) return;
+      const pct = Math.min(100, Math.max(1, Math.round(100 * p.done / p.total)));
+      bar.hidden = false;
+      fill.style.width = pct + "%";
+      // No em-dash: this is page prose (AGENTS.md), and it is the sentence that tells someone
+      // watching a minute-long first load that it is a one-off, not how this repo always is.
+      sub.textContent = p.stage + ": " + p.done.toLocaleString() + " of " + p.total.toLocaleString()
+        + " commits (" + pct + "%). Done once, then cached.";
+    }catch(e){}                               // a poll that fails changes nothing on screen
+  };
+  tick();
+  BOOTPOLL = setInterval(tick, 500);
 }
 
 async function loadAgg(){
@@ -2896,7 +2937,9 @@ async function init(){
       document.body.classList.remove("booting");
       syncFilters(); renderAgg(); renderLog();
     }
-    await loadAgg(); await loadLog(0);
+    bootProgress(true);
+    try{ await loadAgg(); await loadLog(0); }
+    finally{ bootProgress(false); }           // always stop polling, even if a fetch failed
     document.body.classList.remove("booting");
   }
   // Whether the data is in hand (embedded, or just fetched). If the boot fetch failed

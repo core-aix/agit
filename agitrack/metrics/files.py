@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable
 
+from agitrack.metrics import progress
 from agitrack.metrics.collect import CommitStat
 
 # A provider that returns the files a commit/turn changed, each as ``(path, insertions,
@@ -315,19 +316,26 @@ def _numstat_by_commit(repo, known: set[str]) -> dict[str, list[tuple[str, int, 
     missing = sorted(known - computed)
     if not missing:
         return out
-    output = repo._run(
-        ["git", "log", "--no-walk=unsorted", "--numstat", "--format=%x01%H", "--stdin", "--"],
-        input_text="".join(f"{sha}\n" for sha in missing),
-        check=False,
-        allow_lazy_fetch=False,
-    ).stdout
-    fresh = _parse_numstat_rows(output, set(missing))
-    out.update(fresh)
     # On a partial clone a commit with no rows may simply be one whose blobs are still on the
     # remote, so only what git really answered is remembered; on an ordinary clone "no files" is
     # the final answer (a merge, an empty commit) and worth remembering as such.
-    record = set(fresh) if repo.is_partial_clone() else set(missing)
-    _write_file_numstat_cache(repo, computed, {sha: fresh.get(sha, []) for sha in record})
+    partial = repo.is_partial_clone()
+    # A chunk at a time so the loading page can be told how far along this is, and so an index
+    # that is interrupted keeps what it had already computed (see metrics.collect for both).
+    for start in range(0, len(missing), _FILE_CHUNK):
+        progress.step("indexing changed files", start, len(missing))
+        batch = missing[start : start + _FILE_CHUNK]
+        output = repo._run(
+            ["git", "log", "--no-walk=unsorted", "--numstat", "--format=%x01%H", "--stdin", "--"],
+            input_text="".join(f"{sha}\n" for sha in batch),
+            check=False,
+            allow_lazy_fetch=False,
+        ).stdout
+        fresh = _parse_numstat_rows(output, set(batch))
+        out.update(fresh)
+        record = set(fresh) if partial else set(batch)
+        _write_file_numstat_cache(repo, computed, {sha: fresh.get(sha, []) for sha in record})
+    progress.step("indexing changed files", len(missing), len(missing))
     return out
 
 
@@ -361,6 +369,7 @@ def _parse_numstat_rows(output: str, wanted: set[str]) -> dict[str, list[tuple[s
 # makes a second record for the same commit (two dashboards appending at once) replace the first
 # instead of doubling it: the reader applies records in file order.
 _FILE_CACHE_LIMIT = 300_000  # lines before the file is rewritten instead of appended to
+_FILE_CHUNK = 32  # commits per git call while filling the cache (see collect._NUMSTAT_CHUNK)
 
 
 def _file_numstat_cache_path(repo) -> Path:
