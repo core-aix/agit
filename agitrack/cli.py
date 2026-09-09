@@ -14,7 +14,7 @@ from agitrack.backends.setup import backend_installed, select_default_backend, s
 from agitrack.backends.proxy_agents import available_backends, backend_phrase
 from agitrack.git import GitError, GitRepo, RepoLock, already_running_message
 from agitrack.proc import UTF8_TEXT, console_isolation_kwargs
-from agitrack.console import stdin_is_interactive, stdout_is_interactive
+from agitrack.console import stdin_is_interactive, stdout_is_interactive, timestamp_output
 from agitrack.config import GlobalConfig, settings
 from agitrack.shell import AgitrackShell
 
@@ -807,6 +807,15 @@ def _dispatch(argv: list[str] | None = None) -> int:
     # argparse leaves a single leading "--" separator in the remainder; drop it.
     if backend_args and backend_args[0] == "--":
         backend_args = backend_args[1:]
+    # A detached daemon has no terminal: its stdout and stderr ARE its log file
+    # (`.agitrack/background.log` for the tracker, `dashboard.log`, the hub's, the backtrace
+    # daemon's). Stamp every line each of them writes from here on — as early as this, so the
+    # first "aGiTrack is starting..." carries a time too — because those logs are only ever read
+    # after the fact, and "did it start, and how long did it take?" cannot be answered from
+    # unstamped lines. Nothing PARSES them (every reader is a human following a "see the log for
+    # details" message), so a prefix costs nothing.
+    if args.background_serve or args.dashboard_serve or args.backtrace_serve or args.hub_serve:
+        timestamp_output()
     # `agitrack --repo <path> stop` — the command after its options, which is how half of all
     # CLIs are typed. `_split_command` only claims position 0 (so a prompt starting with the word
     # is safe), and everything else falls through to the backend as a prompt; a lone leftover

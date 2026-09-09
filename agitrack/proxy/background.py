@@ -29,7 +29,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Callable, cast
 
 from agitrack import __version__, tracking_gap
 from agitrack.backends.proxy_agents import make_proxy_agent
@@ -762,6 +762,20 @@ def start_background_daemon(repo: GitRepo, *, extra_args: list[str], timeout: fl
         print(f"\nRestarting the aGiTrack background tracker (was PID {running}, {info.get('mode', '?')}).")
     proc = spawn_background_daemon(repo, extra_args=extra_args)
     record = wait_for_handshake(repo, pid=proc.pid, timeout=timeout)
+    if record is None and pid_alive(proc.pid):
+        # STILL STARTING is not FAILED. The daemon publishes its handshake last, after the git
+        # work that arms the repo (hooks, the latent-ref prune, the trailer), and on a big
+        # repository that work outruns this wait: a 14 GB repo measured ~9.5s to arm, so a start
+        # that was working perfectly was reported as "did not start" — and, because that answer
+        # was an error, the dashboard was not opened either. Saying so honestly, and returning
+        # success, leaves the tracker that IS coming up alone; a child that has actually died is
+        # a different answer, below, and this branch cannot reach it because the process is gone.
+        print(
+            f"\naGiTrack background tracker (PID {proc.pid}) is still starting — this repository is "
+            f"taking longer than {timeout:.0f}s to arm. It keeps coming up in the background; check it "
+            f"with `agitrack -b status`, or see {background_log_path(repo)} if it never arrives."
+        )
+        return 0
     if record is None:
         print(f"\nThe aGiTrack background tracker did not start. See {background_log_path(repo)} for details.")
         return 1
@@ -1223,15 +1237,23 @@ class BackgroundRunner:
         # sweep. Everything after it can take seconds, and a daemon nobody can see for seconds
         # is a daemon that gets left behind.
         self._register_daemon()
+        # Time each startup phase (verbose only). Arming a repo is git work, and on a large one
+        # it can take long enough that `agitrack -b` stops waiting for the handshake — at which
+        # point the only question worth asking is WHICH phase is slow, and the log could not
+        # answer it.
+        mark = self._startup_timer()
         self.state.ensure_local_ignore()  # git-ignore .agitrack/ before we write any state there
         # Keep git's comment char off '#', or editing any commit we write (amend, rebase reword)
         # silently strips its '# Interaction Trace' / '# aGiTrack Metadata' headings.
         self.repo.ensure_comment_char_preserves_headings()
         write_background_mode(self.repo, manual=self._manual_commits)  # so an auto-start resumes this mode
         self._report_open_stop()
+        mark("repo state")
         self._load_tracked_head()  # persistent coverage watermark (survives restarts)
         self._clear_stale_worktree_guard()
+        mark("tracked head")
         self._manual.setup()
+        mark("manual-commit setup")
         if getattr(self._manual, "dropped_chains", None):
             count = len(self._manual.dropped_chains)
             chains = "chain" if count == 1 else "chains"
@@ -1241,6 +1263,7 @@ class BackgroundRunner:
             )
         self._install_autotrack_hook()
         self._install_commit_guidance()
+        mark("hooks")
         # LAST, not first. The handshake is what `agitrack -b` waits on before printing "daemon
         # live" and returning the shell, so anything written after it is a race the user can
         # lose: `agitrack -b && agitrack -s` reported "Auto-start: not armed — no aGiTrack hook
@@ -1249,6 +1272,7 @@ class BackgroundRunner:
         # nothing armed at all. Publishing it only once the repo really is in the advertised
         # state costs the launcher that fraction of a second and makes every reading true.
         self._write_handshake()
+        mark("handshake")
         self._is_live_daemon = True
         self._install_signal_handlers()
         mode = "manual (user-triggered) commits" if self._manual_commits else "auto commits"
@@ -1333,6 +1357,23 @@ class BackgroundRunner:
             self._manual.setup()
             self._install_autotrack_hook()
             self._write_handshake()
+
+    def _startup_timer(self) -> Callable[[str], None]:
+        """A ``mark(phase)`` that logs how long each startup phase took, and the total so far.
+
+        Verbose-only: normal starts stay quiet, but when a start is slow enough to be reported
+        as a failure, `agitrack -b -v` says which phase spent the seconds instead of leaving the
+        log with a start line, an end line and nothing in between."""
+        started = time.monotonic()
+        last = started
+
+        def mark(phase: str) -> None:
+            nonlocal last
+            now = time.monotonic()
+            self._debug(f"startup: {phase} took {now - last:.2f}s ({now - started:.2f}s in)")
+            last = now
+
+        return mark
 
     def _report_open_stop(self) -> None:
         """Say so when this tracker is running with the user's stop still standing.

@@ -123,14 +123,30 @@ class ManualCommitTracker:
                 )
         except Exception as error:
             self._debug(f"manual-commit hook install failed: {error!r}")
-        self.reset_stale_ref()
+        # ONE snapshot for the two questions below, which are the same question ("is the working
+        # tree still what HEAD says?") asked milliseconds apart. Taking it twice doubled the cost
+        # of arming a repo, and on a large one that is not a rounding error: 9.4s of a tracker's
+        # startup, enough that `agitrack -b` stopped waiting for the handshake and reported a
+        # perfectly healthy tracker as one that "did not start".
+        try:
+            worktree_tree: str | None = self.repo.snapshot_worktree_tree()
+        except Exception as error:
+            self._debug(f"startup worktree snapshot failed: {error!r}")
+            worktree_tree = None  # each caller falls back to taking its own
+        self.reset_stale_ref(worktree_tree=worktree_tree)
         # …and drop turns left behind by sessions that are gone, so they never ride into an
         # unrelated commit. Startup is the natural moment: any ref other than ours belongs to a
         # session that is no longer running. See `prune_abandoned_refs` for the rule.
         try:
             # Recorded rather than only logged: the driver surfaces it, because AI attribution
             # going away must never be something the user can only discover with --verbose.
-            self.dropped_chains = prune_abandoned_refs(self.repo, self.ref(), self.pending_refs(), debug=self._debug)
+            self.dropped_chains = prune_abandoned_refs(
+                self.repo,
+                self.ref(),
+                self.pending_refs(),
+                worktree_tree=worktree_tree,
+                debug=self._debug,
+            )
         except Exception as error:
             self._debug(f"abandoned-ref prune failed: {error!r}")
         try:
@@ -350,18 +366,24 @@ class ManualCommitTracker:
 
     # --- reconciliation with the user's own commits -------------------------
 
-    def reset_stale_ref(self) -> bool:
+    def reset_stale_ref(self, *, worktree_tree: str | None = None) -> bool:
         """Reset the latent ref to HEAD when its recorded turns are STALE, so they are never
         re-folded into an unrelated future commit. Turns are stale when the tip is an ANCESTOR of
         HEAD (already committed/folded) or the working tree is CLEAN (nothing left to fold). A
         DIRTY tree with a diverged tip means real uncommitted work remains, so the turns are kept.
-        Never merges — the ref is only ever reset. Returns True when it reset the ref."""
+        Never merges — the ref is only ever reset. Returns True when it reset the ref.
+
+        ``worktree_tree`` is an already-taken snapshot of the working tree to reuse. Taking one
+        is the single most expensive thing aGiTrack asks of git — it stages the whole worktree
+        into a throwaway index, which has no stat cache, so every tracked file is re-hashed
+        (measured: 4.4s on one large repo) — and :meth:`setup` needs the same answer twice."""
         try:
             head = self.repo.rev_parse("HEAD")
             tip = self.repo.ref_sha(self.ref())
             if not tip:
                 return False
-            clean = self.repo.snapshot_worktree_tree() == self.repo.comparable_tree("HEAD")
+            snapshot = worktree_tree if worktree_tree is not None else self.repo.snapshot_worktree_tree()
+            clean = snapshot == self.repo.comparable_tree("HEAD")
             if clean or self.repo.is_ancestor(tip, head):
                 self.repo.update_ref(self.ref(), head)
                 return True
@@ -433,6 +455,7 @@ def prune_abandoned_refs(
     own_ref: str,
     refs: list[str],
     *,
+    worktree_tree: str | None = None,
     debug: Callable[[str], None] | None = None,
 ) -> list[str]:
     """Drop latent turns from ABANDONED sessions that no longer explain any uncommitted work.
@@ -469,7 +492,10 @@ def prune_abandoned_refs(
         # Scaffolding-stripped on BOTH sides of every comparison below (the snapshot, and the
         # latent trees the tail-trim walks), or a repo tracking `.claude/` never prunes anything.
         head_tree = repo.comparable_tree("HEAD")
-        working_tree_is_clean = repo.snapshot_worktree_tree() == head_tree
+        # Reuse the caller's snapshot when it has one (see reset_stale_ref): startup asks this
+        # same question twice, moments apart, and the snapshot is the expensive half of it.
+        snapshot = worktree_tree if worktree_tree is not None else repo.snapshot_worktree_tree()
+        working_tree_is_clean = snapshot == head_tree
     except Exception as error:
         log(f"abandoned-ref prune skipped: {error!r}")
         return changed

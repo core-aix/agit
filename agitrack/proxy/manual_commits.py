@@ -96,7 +96,15 @@ class ManualCommitsMixin(RunnerHost):
         self._install_autotrack_precommit_hook()
         # Recovery: drop a stale latent chain left by a prior run (e.g. the user committed
         # outside aGiTrack after exiting) so its turns aren't re-folded into a later commit.
-        self._reset_stale_manual_ref()
+        # ONE snapshot for both recovery steps below: they ask the same question ("does the
+        # working tree still match HEAD?") a moment apart, and taking it twice doubled the cost
+        # of starting on a large repo (measured at 4.4s per snapshot on one).
+        try:
+            worktree_tree: str | None = self.repo.snapshot_worktree_tree()
+        except Exception as error:
+            self._debug(f"startup worktree snapshot failed: {error!r}")
+            worktree_tree = None  # each step falls back to taking its own
+        self._reset_stale_manual_ref(worktree_tree=worktree_tree)
         # …and the same for chains left by sessions that are GONE — a crash, a Ctrl-C, a mode
         # switch, or edits the user discarded. `_reset_stale_manual_ref` only ever looks at our
         # own ref, so nothing revisited those and their turns rode into an unrelated later
@@ -105,7 +113,11 @@ class ManualCommitsMixin(RunnerHost):
             from agitrack.commits.manual import prune_abandoned_refs
 
             dropped = prune_abandoned_refs(
-                self.repo, self._manual_ref(), self._manual_pending_refs(), debug=self._debug
+                self.repo,
+                self._manual_ref(),
+                self._manual_pending_refs(),
+                worktree_tree=worktree_tree,
+                debug=self._debug,
             )
             if dropped:
                 # Say so. Discarding a chain is the right call (its work is no longer uncommitted),
@@ -378,7 +390,7 @@ class ManualCommitsMixin(RunnerHost):
         self._render_manual_trailer()
         return self.repo.short_sha(sha)
 
-    def _reset_stale_manual_ref(self) -> bool:
+    def _reset_stale_manual_ref(self, *, worktree_tree: str | None = None) -> bool:
         """Reset the latent ref to HEAD when its recorded turns are STALE, so they are never
         re-folded into an unrelated future commit. The one rule, applied both at startup and
         on every poll: turns are stale when either
@@ -396,13 +408,20 @@ class ManualCommitsMixin(RunnerHost):
 
         A DIRTY tree with a diverged tip means real uncommitted work remains, so the turns are
         kept and fold on the next commit. Never merges — the ref is only ever reset, so there
-        is no git conflict. Returns True when it reset the ref."""
+        is no git conflict. Returns True when it reset the ref.
+
+        ``worktree_tree`` is an already-taken snapshot to reuse, for the one caller that needs
+        this answer twice in a row (see :meth:`_setup_manual_commit_mode`). A snapshot stages the
+        whole working tree into a throwaway index with no stat cache, so it re-hashes every
+        tracked file — seconds on a large repo, and the most expensive thing aGiTrack asks of
+        git."""
         try:
             head = self.repo.rev_parse("HEAD")
             tip = self.repo.ref_sha(self._manual_ref())
             if not tip:
                 return False
-            clean = self.repo.snapshot_worktree_tree() == self.repo.comparable_tree("HEAD")
+            snapshot = worktree_tree if worktree_tree is not None else self.repo.snapshot_worktree_tree()
+            clean = snapshot == self.repo.comparable_tree("HEAD")
             if clean and is_in_flight_only_message(self.repo.commit_message(head)):
                 # A clean tree normally means the fold hook already combined the pending turns
                 # INTO HEAD, so they are redundant. It does NOT when HEAD carries only an

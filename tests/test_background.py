@@ -1006,6 +1006,49 @@ def test_start_background_daemon_reports_failure_when_child_dies(tmp_path, capsy
     assert "did not start" in capsys.readouterr().out
 
 
+def test_a_slow_start_is_not_reported_as_a_failed_one(tmp_path, capsys, monkeypatch):
+    """The daemon publishes its handshake LAST, after the git work that arms the repo, and on a
+    large repository that work outran the launcher's wait: a tracker that was coming up perfectly
+    was announced as one that "did not start", and — because that answer was an error — the
+    dashboard was not opened for it either. A child that is still alive is still starting."""
+    from agitrack.proxy import background as bg
+
+    repo = _init_repo(tmp_path)
+
+    class _FakeProc:
+        pid = 4244
+
+    # Alive, but slower to arm than the wait: no handshake by the deadline.
+    monkeypatch.setattr(bg, "spawn_background_daemon", lambda r, *, extra_args: _FakeProc())
+    monkeypatch.setattr(bg, "pid_alive", lambda pid: True)
+
+    assert bg.start_background_daemon(repo, extra_args=[], timeout=0.2) == 0
+    out = capsys.readouterr().out
+    assert "still starting" in out and "4244" in out
+    assert "did not start" not in out
+
+
+def test_startup_takes_one_worktree_snapshot_for_both_recovery_steps(tmp_path, monkeypatch):
+    """Snapshotting the working tree stages it into a throwaway index with no stat cache, so it
+    re-hashes every tracked file — 4.4s on one 14 GB repo, taken TWICE by startup for the same
+    question, which is most of why arming outran the launcher's handshake wait."""
+    runner, repo, state, backend = _runner(tmp_path, manual=True)
+    (tmp_path / "a.txt").write_text("uncommitted\n", encoding="utf-8")
+    runner._manual.record("turn one")  # a latent tip, so reset_stale_ref does not return early
+
+    real = repo.snapshot_worktree_tree
+    calls: list[str] = []
+
+    def counted():
+        calls.append("snapshot")
+        return real()
+
+    monkeypatch.setattr(repo, "snapshot_worktree_tree", counted)
+    runner._manual.setup()
+
+    assert len(calls) == 1, f"startup re-snapshotted the working tree: {len(calls)} snapshots"
+
+
 def test_daemon_installs_autotrack_hook_by_default_and_skips_when_off(tmp_path):
     from agitrack.git import hooks as git_hooks
 
