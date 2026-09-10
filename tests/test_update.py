@@ -740,6 +740,12 @@ def _capture_restart(monkeypatch, argv):
     return captured
 
 
+# What re-invoking aGiTrack as a module looks like, minus the interpreter: the safe-path flag
+# that keeps a stray `agitrack` directory in the restart's working directory off `sys.path`
+# (agitrack.proc.agitrack_invocation), then `-m agitrack`. Python 3.10 has no such flag.
+_MODULE_ARGS = ["-P", "-m", "agitrack"] if sys.version_info >= (3, 11) else ["-m", "agitrack"]
+
+
 @_posix_only
 def test_restart_agitrack_appends_extra_args(monkeypatch):
     from agitrack.update import restart_agitrack
@@ -747,7 +753,7 @@ def test_restart_agitrack_appends_extra_args(monkeypatch):
     captured = _capture_restart(monkeypatch, ["agitrack", "--backend", "claude"])
     restart_agitrack(["--skip-privacy-ack"])
 
-    assert captured[0][1:] == ["-m", "agitrack", "--backend", "claude", "--skip-privacy-ack"]
+    assert captured[0][1:] == [*_MODULE_ARGS, "--backend", "claude", "--skip-privacy-ack"]
 
 
 @_posix_only
@@ -792,7 +798,7 @@ def test_restart_agitrack_windows_relaunches_and_waits(monkeypatch):
         restart_agitrack(["--skip-privacy-ack"])
 
     assert exc.value.code == 7  # propagates the child's exit code
-    assert launched["cmd"] == ["py", "-m", "agitrack", "--backend", "claude", "--skip-privacy-ack"]
+    assert launched["cmd"] == ["py", *_MODULE_ARGS, "--backend", "claude", "--skip-privacy-ack"]
     assert launched["waited"]
 
 
@@ -805,7 +811,7 @@ def test_restart_agitrack_without_extra_args_preserves_argv(monkeypatch):
     captured = _capture_restart(monkeypatch, ["agitrack", "--verbose"])
     restart_agitrack()
 
-    assert captured[0][1:] == ["-m", "agitrack", "--verbose"]
+    assert captured[0][1:] == [*_MODULE_ARGS, "--verbose"]
     assert "--skip-privacy-ack" not in captured[0]
 
 

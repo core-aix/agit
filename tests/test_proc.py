@@ -241,3 +241,91 @@ def test_fs_path_round_trips_a_real_non_ascii_directory(tmp_path, monkeypatch):
     # ENCODE side can be checked on a UTF-8 host: `is_dir()` would use this host's real codec,
     # not the latin-1 one being simulated.)
     assert _encodes_back_to(str(proc.fs_path(printed)), "latin-1") == os.fsencode(target)
+
+
+# --------------------------------------------------------------------------- import isolation
+#
+# Run aGiTrack in the folder that HOLDS your projects — the one whose subfolders you have been
+# tracking, aGiTrack's own source checkout among them — and every `python -m agitrack` child
+# used to import `./agitrack` instead of the installed package. Because a stray directory has
+# no `__init__.py` it arrives as a NAMESPACE package, so the child died on `ImportError: cannot
+# import name '__version__' from 'agitrack' (unknown location)` inside a log file, while the
+# launcher that spawned it reported the daemon live.
+
+
+def test_agitrack_invocation_keeps_the_working_directory_off_sys_path(monkeypatch):
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
+    monkeypatch.setattr(sys, "executable", "/usr/bin/python3")
+    command = proc.agitrack_invocation()
+    assert command[0] == "/usr/bin/python3"
+    assert command[-2:] == ["-m", "agitrack"]
+    if sys.version_info >= (3, 11):
+        assert "-P" in command
+    else:  # pragma: no cover - 3.10 rejects the flag outright, so it must not be passed
+        assert "-P" not in command
+
+
+def test_agitrack_invocation_frozen_build_gets_no_interpreter_flags(monkeypatch):
+    # `-P` is as invalid an argument to agitrack.exe as `-m agitrack` is.
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", r"C:\PF\aGiTrack\agitrack.exe")
+    assert proc.agitrack_invocation() == [r"C:\PF\aGiTrack\agitrack.exe"]
+
+
+def test_isolated_env_sets_the_safe_path_and_keeps_the_rest(monkeypatch):
+    monkeypatch.setenv("AGITRACK_SOMETHING", "kept")
+    env = proc.isolated_env()
+    assert env["PYTHONSAFEPATH"] == "1"
+    assert env["AGITRACK_SOMETHING"] == "kept"
+    assert proc.isolated_env({"ONLY": "this"}) == {"ONLY": "this", "PYTHONSAFEPATH": "1"}
+
+
+def test_shadowing_agitrack_package_finds_a_stray_directory(tmp_path):
+    (tmp_path / "agitrack").mkdir()
+    assert proc.shadowing_agitrack_package(tmp_path) == tmp_path / "agitrack"
+
+
+def test_shadowing_agitrack_package_finds_a_stray_module(tmp_path):
+    (tmp_path / "agitrack.py").write_text("", encoding="utf-8")
+    assert proc.shadowing_agitrack_package(tmp_path) == tmp_path / "agitrack.py"
+
+
+def test_shadowing_agitrack_package_ignores_an_ordinary_directory(tmp_path):
+    (tmp_path / "notes").mkdir()
+    assert proc.shadowing_agitrack_package(tmp_path) is None
+
+
+def test_agitrack_own_checkout_does_not_shadow_itself():
+    # The `agitrack/` directory in aGiTrack's own repo IS the package this code was imported
+    # from, so a daemon started there loads exactly what its launcher was running.
+    checkout = Path(proc.__file__).resolve().parent.parent
+    assert proc.shadowing_agitrack_package(checkout) is None
+
+
+def test_safe_spawn_cwd_keeps_a_clean_directory(tmp_path):
+    assert proc.safe_spawn_cwd(tmp_path) == tmp_path
+
+
+def test_safe_spawn_cwd_moves_out_of_a_shadowed_directory(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGITRACK_CONFIG_DIR", str(tmp_path / "config"))
+    (tmp_path / "agitrack").mkdir()
+    chosen = proc.safe_spawn_cwd(tmp_path)
+    assert chosen == tmp_path / "config"
+    assert chosen.is_dir()  # a cwd a child cannot enter is no better than a shadowed one
+
+
+def test_a_child_started_in_a_shadowed_directory_still_imports_agitrack(tmp_path):
+    """The end-to-end property, run for real: a `python -m agitrack` child launched the way
+    aGiTrack launches its daemons imports the installed package even when the directory it
+    starts in holds one named the same."""
+    (tmp_path / "agitrack").mkdir()  # the shadow: a namespace package with no __init__.py
+    command = [*proc.agitrack_invocation(), "--version"]
+    done = subprocess.run(
+        command,
+        cwd=proc.safe_spawn_cwd(tmp_path),
+        env=proc.isolated_env(),
+        capture_output=True,
+        **proc.UTF8_TEXT,
+    )
+    assert done.returncode == 0, done.stderr
+    assert "unknown location" not in done.stderr

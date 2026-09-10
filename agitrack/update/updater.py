@@ -1073,18 +1073,19 @@ def _restart_command(extra_args: Sequence[str] = ()) -> list[str]:
     """The argv to re-launch the running aGiTrack with the original CLI arguments.
 
     A normal (pip/source) install is a Python interpreter, so it is re-run as
-    ``python -m agitrack …`` — robust to a package upgrade that rewrote the console
-    script. A **frozen** build (the PyInstaller/MSI ``agitrack.exe``) is NOT a Python
-    interpreter: ``-m agitrack`` is not a valid argument there and argparse would reject
-    it, so the frozen executable is re-run directly with the saved arguments instead.
+    ``python -P -m agitrack …`` — robust to a package upgrade that rewrote the console
+    script, and to an ``agitrack`` directory in the working directory it is restarted in
+    (``proc.agitrack_invocation``). A **frozen** build (the PyInstaller/MSI ``agitrack.exe``)
+    is NOT a Python interpreter: ``-m agitrack`` is not a valid argument there and argparse
+    would reject it, so the frozen executable is re-run directly with the saved arguments.
     """
+    from agitrack.proc import agitrack_invocation
+
     args = list(sys.argv[1:])
     for arg in extra_args:
         if arg not in args:
             args.append(arg)
-    if getattr(sys, "frozen", False):
-        return [sys.executable, *args]
-    return [sys.executable, "-m", "agitrack", *args]
+    return [*agitrack_invocation(), *args]
 
 
 def restart_agitrack(extra_args: Sequence[str] = ()) -> NoReturn:

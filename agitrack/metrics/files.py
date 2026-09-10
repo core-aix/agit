@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable
 
+from agitrack.metrics import progress
 from agitrack.metrics.collect import CommitStat
 
 # A provider that returns the files a commit/turn changed, each as ``(path, insertions,
@@ -211,8 +212,11 @@ def git_browser(repo, stats: list[CommitStat], ref: str = "HEAD") -> FileBrowser
     Only commits present in ``stats`` are attributed, so it matches the dashboard's scope. Every
     file in ``ref``'s tree is listed — including ones no AI commit ever touched — while a
     since-deleted file's changes still count toward the totals but don't clutter the file tab."""
-    known = {stat.sha for stat in stats}
-    numstat = _numstat_by_commit(repo, ref, known)
+    # Pending (manual-mode latent) turns are deliberately left out: they are not reachable from
+    # ``ref``, so the history walk this replaced never attributed them either, and the file tab
+    # describes what the branch contains.
+    known = {stat.sha for stat in stats if stat.sha and not stat.pending}
+    numstat = _numstat_by_commit(repo, known)
     current = _current_files(repo, ref)
 
     def changed(stat: CommitStat) -> list[tuple[str, int, int]]:
@@ -294,20 +298,56 @@ def _current_files(repo, ref: str) -> set[str]:
     return {name for name in out.split("\x00") if name}
 
 
-def _numstat_by_commit(repo, ref: str, known: set[str]) -> dict[str, list[tuple[str, int, int]]]:
-    """Parse ``git log --numstat`` for ``ref`` into ``sha -> [(path, insertions, deletions)]``,
-    keeping only commits the dashboard knows. Reads local blobs only, like the dashboard's
-    line-count pass, so it never triggers a blobless clone to lazily fetch history."""
-    out: dict[str, list[tuple[str, int, int]]] = {}
-    output = repo._run(
-        ["git", "log", "--numstat", "--format=%x01%H", ref, "--"], check=False, allow_lazy_fetch=False
-    ).stdout
+def _numstat_by_commit(repo, known: set[str]) -> dict[str, list[tuple[str, int, int]]]:
+    """``sha -> [(path, insertions, deletions)]`` for the commits the dashboard knows, computing
+    only the ones the on-disk cache does not already hold.
+
+    This is the SECOND whole-history diff a dashboard used to run on every new commit (the first
+    is the line-count pass in metrics.collect), and on a large repo it is just as expensive:
+    30.8s, measured, rebuilt whenever the branch tip moved — which on a tracked repo is every
+    turn, and it sits on the ``/data`` poll path via the efficiency insights, not only on the
+    files tab. Which files a commit touched is fixed once the commit exists, so it is cached
+    per sha in ``.agitrack/numstat-files.cache`` and only new commits are diffed.
+
+    Reads local blobs only, like the dashboard's line-count pass, so it never triggers a
+    blobless clone to lazily fetch history."""
+    cached, computed = _read_file_numstat_cache(repo)
+    out: dict[str, list[tuple[str, int, int]]] = {sha: rows for sha, rows in cached.items() if sha in known}
+    missing = sorted(known - computed)
+    if not missing:
+        return out
+    # On a partial clone a commit with no rows may simply be one whose blobs are still on the
+    # remote, so only what git really answered is remembered; on an ordinary clone "no files" is
+    # the final answer (a merge, an empty commit) and worth remembering as such.
+    partial = repo.is_partial_clone()
+    # A chunk at a time so the loading page can be told how far along this is, and so an index
+    # that is interrupted keeps what it had already computed (see metrics.collect for both).
+    for start in range(0, len(missing), _FILE_CHUNK):
+        progress.step("indexing changed files", start, len(missing))
+        batch = missing[start : start + _FILE_CHUNK]
+        output = repo._run(
+            ["git", "log", "--no-walk=unsorted", "--numstat", "--format=%x01%H", "--stdin", "--"],
+            input_text="".join(f"{sha}\n" for sha in batch),
+            check=False,
+            allow_lazy_fetch=False,
+        ).stdout
+        fresh = _parse_numstat_rows(output, set(batch))
+        out.update(fresh)
+        record = set(fresh) if partial else set(batch)
+        _write_file_numstat_cache(repo, computed, {sha: fresh.get(sha, []) for sha in record})
+    progress.step("indexing changed files", len(missing), len(missing))
+    return out
+
+
+def _parse_numstat_rows(output: str, wanted: set[str]) -> dict[str, list[tuple[str, int, int]]]:
+    """Parse ``git log --numstat`` output into per-commit file rows, keeping only *wanted*."""
+    rows: dict[str, list[tuple[str, int, int]]] = {}
     current: str | None = None
     for line in output.splitlines():
         if line.startswith("\x01"):
             current = line[1:].strip()
             continue
-        if current is None or current not in known:
+        if current is None or current not in wanted:
             continue
         parts = line.split("\t")
         if len(parts) < 3:
@@ -317,10 +357,75 @@ def _numstat_by_commit(repo, ref: str, known: set[str]) -> dict[str, list[tuple[
         # (best-effort — renames are rare and this only affects which file the change lists under).
         if "=>" in path:
             path = path.replace("{", "").replace("}", "").split("=>")[-1].strip().replace("//", "/")
-        out.setdefault(current, []).append(
+        rows.setdefault(current, []).append(
             (path, int(adds) if adds.isdigit() else 0, int(dels) if dels.isdigit() else 0)
         )
-    return out
+    return rows
+
+
+# The on-disk per-file cache. A commit's record is a header line (`<sha>\t*`, "this commit was
+# diffed") followed by one `<sha>\t<ins>\t<del>\t<path>` line per file it touched. The header is
+# what lets a commit that touched NO files be remembered rather than re-diffed forever, and what
+# makes a second record for the same commit (two dashboards appending at once) replace the first
+# instead of doubling it: the reader applies records in file order.
+_FILE_CACHE_LIMIT = 300_000  # lines before the file is rewritten instead of appended to
+_FILE_CHUNK = 32  # commits per git call while filling the cache (see collect._NUMSTAT_CHUNK)
+
+
+def _file_numstat_cache_path(repo) -> Path:
+    return Path(repo.repo) / ".agitrack" / "numstat-files.cache"
+
+
+def _read_file_numstat_cache(repo) -> tuple[dict[str, list[tuple[str, int, int]]], set[str]]:
+    """``(sha -> file rows, the shas that were diffed)``. Best-effort: an unreadable or
+    half-written cache is a miss, never an error — git can always recompute it."""
+    try:
+        text = _file_numstat_cache_path(repo).read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return {}, set()
+    rows: dict[str, list[tuple[str, int, int]]] = {}
+    computed: set[str] = set()
+    for line in text.splitlines():
+        parts = line.split("\t", 3)
+        if len(parts) == 2 and parts[1] == "*":
+            rows[parts[0]] = []  # a fresh record for this commit replaces anything before it
+            computed.add(parts[0])
+            continue
+        if len(parts) != 4 or parts[0] not in computed:
+            continue  # a torn line, or rows whose header never arrived
+        try:
+            rows[parts[0]].append((parts[3], int(parts[1]), int(parts[2])))
+        except ValueError:
+            continue
+    return rows, computed
+
+
+def _write_file_numstat_cache(repo, existing: set[str], fresh: dict[str, list[tuple[str, int, int]]]) -> None:
+    """Append the newly diffed commits to the cache. Best-effort: a repo whose ``.agitrack/``
+    cannot be written simply keeps recomputing."""
+    if not fresh:
+        return
+    path = _file_numstat_cache_path(repo)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        text = _file_numstat_lines(fresh)
+        if len(existing) + sum(len(rows) + 1 for rows in fresh.values()) > _FILE_CACHE_LIMIT:
+            # Rewritten, not grown without bound: only what was just asked for is kept, so a
+            # repo whose branches have moved on does not carry their commits forever.
+            path.write_text(text, encoding="utf-8")
+            return
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(text)
+    except OSError:
+        pass
+
+
+def _file_numstat_lines(fresh: dict[str, list[tuple[str, int, int]]]) -> str:
+    out: list[str] = []
+    for sha, rows in fresh.items():
+        out.append(f"{sha}\t*\n")
+        out += [f"{sha}\t{ins}\t{dels}\t{path}\n" for path, ins, dels in rows]
+    return "".join(out)
 
 
 def _git_file_diff(repo, sha: str, path: str) -> str:

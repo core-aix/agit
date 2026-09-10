@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from agitrack import __version__
+from agitrack.paths import contains_segments
 from agitrack.proc import UTF8_TEXT, console_isolation_kwargs, detach_kwargs, pid_alive, terminate_pid
 
 # Human-readable name for each daemon kind, shown in `--daemons`.
@@ -87,10 +88,12 @@ def _entry_path(pid: int) -> Path:
 
 def _daemon_command() -> list[str]:
     """The command that would re-launch THIS daemon process — its own argv. A frozen build runs
-    the exe directly; a normal install re-invokes ``python -m agitrack``."""
-    if getattr(sys, "frozen", False):
-        return [sys.executable, *sys.argv[1:]]
-    return [sys.executable, "-m", "agitrack", *sys.argv[1:]]
+    the exe directly; a normal install re-invokes ``python -m agitrack`` with the safe import
+    path, so a re-launch from a directory holding a stray ``agitrack`` package still loads the
+    installed one (see ``proc.agitrack_invocation``)."""
+    from agitrack.proc import agitrack_invocation
+
+    return [*agitrack_invocation(), *sys.argv[1:]]
 
 
 @dataclass
@@ -190,9 +193,21 @@ def running_repos(*, scan: bool = False) -> list[str]:
     return list(seen)
 
 
+# An aGiTrack session worktree lives at ``<base>/.agitrack/worktrees/<name>``, and a daemon
+# recorded against one IS a daemon for the base repo.
+_WORKTREE_SEGMENTS = "/.agitrack/worktrees/"
+
+
 def _serves_repo(info: DaemonInfo, repo: str | os.PathLike[str]) -> bool:
     """Whether ``info`` is a daemon for ``repo``. Paths are resolved so a symlinked or
-    relatively-recorded repo still matches; a daemon with no recorded repo never does."""
+    relatively-recorded repo still matches; a daemon with no recorded repo never does.
+
+    A daemon recorded on a path INSIDE ``repo`` counts only when that path is one of aGiTrack's
+    own session worktrees. Any descendant used to count, which is wrong the moment a repository
+    contains another one — a vendored checkout, a submodule, or simply the folder of projects
+    that someone has since turned into a repository of its own. ``agitrack stop`` in the outer
+    repo then reached into the inner one and ended a live session that had nothing to do with
+    it, and ``--daemons stop`` scoped to the outer repo did the same."""
     if not info.repo:
         return False
     try:
@@ -200,7 +215,9 @@ def _serves_repo(info: DaemonInfo, repo: str | os.PathLike[str]) -> bool:
         have = Path(info.repo).expanduser().resolve()
     except OSError:
         return str(info.repo) == str(repo)
-    return have == want or want in have.parents
+    if have == want:
+        return True
+    return want in have.parents and contains_segments(str(have), _WORKTREE_SEGMENTS)
 
 
 def _registry_entries() -> list[DaemonInfo]:
@@ -320,11 +337,15 @@ def restart_all(*, exclude_pid: int | None = None, log=lambda message: None) -> 
     Called from the update restart path. The current process (``exclude_pid``, this pid by default)
     is skipped — it restarts itself via the caller's own re-exec. Each daemon is SIGTERM'd (its
     handler shuts it down and deregisters), then re-launched from its recorded command. Re-spawned
-    from the home dir with ``PYTHONSAFEPATH`` so ``python -m agitrack`` can never pick up a stray
-    ``agitrack`` package in some directory. Best-effort and independent per daemon."""
+    from a neutral directory with the safe import path, so ``python -m agitrack`` can never pick up
+    a stray ``agitrack`` package in some directory — the RECORDED command line may predate the
+    ``-P`` that ``proc.agitrack_invocation`` now bakes in. Best-effort and independent per
+    daemon."""
+    from agitrack.proc import isolated_env, safe_spawn_cwd
+
     skip = exclude_pid if exclude_pid is not None else os.getpid()
-    env = {**os.environ, "PYTHONSAFEPATH": "1"}
-    home = str(Path.home())
+    env = isolated_env()
+    home = str(safe_spawn_cwd(Path.home()))
     restarted = 0
     for info in _signal_targets(_stoppable([i for i in list_running() if i.pid != skip and i.cmd])):
         if info.pid == skip or not info.cmd:

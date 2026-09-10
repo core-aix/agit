@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import os
 import re
@@ -13,7 +14,7 @@ from agitrack.backends.setup import backend_installed, select_default_backend, s
 from agitrack.backends.proxy_agents import available_backends, backend_phrase
 from agitrack.git import GitError, GitRepo, RepoLock, already_running_message
 from agitrack.proc import UTF8_TEXT, console_isolation_kwargs
-from agitrack.console import stdin_is_interactive, stdout_is_interactive
+from agitrack.console import stdin_is_interactive, stdout_is_interactive, timestamp_output
 from agitrack.config import GlobalConfig, settings
 from agitrack.shell import AgitrackShell
 
@@ -806,6 +807,15 @@ def _dispatch(argv: list[str] | None = None) -> int:
     # argparse leaves a single leading "--" separator in the remainder; drop it.
     if backend_args and backend_args[0] == "--":
         backend_args = backend_args[1:]
+    # A detached daemon has no terminal: its stdout and stderr ARE its log file
+    # (`.agitrack/background.log` for the tracker, `dashboard.log`, the hub's, the backtrace
+    # daemon's). Stamp every line each of them writes from here on — as early as this, so the
+    # first "aGiTrack is starting..." carries a time too — because those logs are only ever read
+    # after the fact, and "did it start, and how long did it take?" cannot be answered from
+    # unstamped lines. Nothing PARSES them (every reader is a human following a "see the log for
+    # details" message), so a prefix costs nothing.
+    if args.background_serve or args.dashboard_serve or args.backtrace_serve or args.hub_serve:
+        timestamp_output()
     # `agitrack --repo <path> stop` — the command after its options, which is how half of all
     # CLIs are typed. `_split_command` only claims position 0 (so a prompt starting with the word
     # is safe), and everything else falls through to the backend as a prompt; a lone leftover
@@ -874,7 +884,7 @@ def _dispatch(argv: list[str] | None = None) -> int:
         try:
             stop_repo = GitRepo.discover(Path(args.repo).expanduser())
         except (GitError, OSError) as error:
-            print(error)
+            print(_no_repo_message(Path(args.repo).expanduser(), error))
             return 1
         from agitrack.stop import stop_everything
 
@@ -1226,7 +1236,7 @@ def _dispatch(argv: list[str] | None = None) -> int:
         try:
             status_repo = GitRepo.discover(Path(args.repo).expanduser())
         except (GitError, OSError) as error:
-            print(error)
+            print(_no_repo_message(Path(args.repo).expanduser(), error))
             return 1
         from agitrack.proxy.background import repo_status
 
@@ -2121,6 +2131,13 @@ def _open_dashboard_on_start(repo: GitRepo, config, *, scripted: bool = False) -
         # `starting_tracking`: this is `-b` or `-i`, which is the user saying "record this
         # repository from now on". The reconstruction is the inferred history of what happened
         # BEFORE, so it is never what to open here — asking for it has its own command.
+        #
+        # Said out loud first, because the call below can take a couple of seconds and is the last
+        # thing between the user and the mode they asked for: it starts the hub daemon if this is
+        # the first repository of the day, then gives an already-open dashboard tab its chance to
+        # take the navigation before a new one is opened. Silence there reads as aGiTrack hanging
+        # on startup for no reason; one line makes the same wait obviously purposeful.
+        print("Opening the aGiTrack dashboard in your browser…", flush=True)
         open_dashboard(repo.repo, quiet=True, starting_tracking=True)
     except Exception:
         pass  # a dashboard that will not open must never stop the mode the user asked for
@@ -2633,10 +2650,80 @@ def _version_line() -> str:
     return version_line()
 
 
+# How many of a folder's repositories to name before summarising the rest.
+_NESTED_REPO_SAMPLE = 5
+
+# How many directory entries to look at when asking "does this folder HOLD repositories?".
+# A projects folder shows its hand in the first few entries; the cap keeps the question cheap
+# in a directory with thousands of them.
+_NESTED_REPO_SCAN_LIMIT = 500
+
+
+def _repositories_inside(path: Path) -> list[str]:
+    """The names of ``path``'s immediate subfolders that are themselves Git repositories.
+
+    ``.git`` is tested for EXISTENCE, not for being a directory: a linked worktree and a
+    submodule both record it as a file, and either is still a repository someone works in."""
+    found: list[str] = []
+    try:
+        entries = list(itertools.islice(path.iterdir(), _NESTED_REPO_SCAN_LIMIT))
+    except OSError:
+        return []
+    for entry in entries:
+        try:
+            if (entry / ".git").exists():
+                found.append(entry.name)
+        except OSError:  # pragma: no cover - an entry that disappeared mid-scan
+            continue
+    return sorted(found)
+
+
+def _folder_of_repositories_note(path: Path, found: list[str]) -> str:
+    """Why aGiTrack cannot start in a folder that merely CONTAINS repositories.
+
+    Running aGiTrack one directory too high — in the folder that holds the projects rather than
+    in a project — is an easy mistake to make and, answered with a bare "Not a Git repository",
+    an opaque one: the folder is full of repositories, so it looks like a place aGiTrack should
+    work. It is not. aGiTrack tracks ONE repository, whose commits carry the conversation; a
+    ``git init`` here would make a single new project out of the whole folder, and would still
+    not track a thing in the repositories inside it (git does not descend into them, so their
+    work would land as nothing but a name in the enclosing tree)."""
+    shown = ", ".join(found[:_NESTED_REPO_SAMPLE])
+    if len(found) > _NESTED_REPO_SAMPLE:
+        shown += f", and {len(found) - _NESTED_REPO_SAMPLE} more"
+    plural = "" if len(found) == 1 else "s"
+    return (
+        f"{_display_path(path)} is not a Git repository itself, but {len(found)} folder{plural} "
+        f"inside it {'is' if len(found) == 1 else 'are'}:\n"
+        f"  {shown}\n"
+        "aGiTrack tracks one repository at a time, so `cd` into the project you want and run it "
+        "there."
+    )
+
+
+# Said only where a repository is about to be CREATED — the reason the offer below defaults to no.
+_INIT_HERE_WARNING = (
+    "Initializing a repository HERE would make one project out of the whole folder, and would\n"
+    "still not track the work in those subfolders."
+)
+
+
+def _no_repo_message(path: Path, error: Exception) -> str:
+    """A failed ``GitRepo.discover`` as a message for a read-only command (``status``, ``stop``).
+
+    "Not a Git repository: ." is true and useless in the folder that holds the user's projects,
+    which is exactly where someone lands who ran the command one directory too high."""
+    found = _repositories_inside(path)
+    return f"{error}\n{_folder_of_repositories_note(path, found)}" if found else str(error)
+
+
 def _discover_or_init(path: Path) -> GitRepo | None:
     """Find the Git repository for ``path``, or offer to create one. aGiTrack cannot
     run outside a Git repository, so if the user declines (or we can't prompt),
-    return None and let the caller stop."""
+    return None and let the caller stop.
+
+    A folder that HOLDS repositories is the one case where the offer is not the helpful
+    default — see :func:`_folder_of_repositories_note`."""
     try:
         repo = GitRepo.discover(path)
         # A user who ran `git init` themselves leaves an unborn HEAD (no commits),
@@ -2647,16 +2734,36 @@ def _discover_or_init(path: Path) -> GitRepo | None:
         return repo
     except GitError:
         pass
+    nested = _repositories_inside(path)
     if not (stdin_is_interactive() and stdout_is_interactive()):
+        if nested:
+            print(_folder_of_repositories_note(path, nested))
+            return None
         print(f"Not a Git repository: {path}\naGiTrack requires a Git repository to run.")
         return None
     try:
-        # Default YES: aGiTrack cannot track anything without a repo, so declining ends the run.
-        # Enter should take the path that lets the user get started, not the one that quits.
-        answer = _ask(f"{path} is not a Git repository. Initialize one here with `git init`? [Y/n] ").strip().lower()
+        if nested:
+            # Default NO here, and only here. `git init` in a folder of projects is a big,
+            # surprising thing to do on an accidental Enter — it makes every one of those
+            # projects a subdirectory of a new repository — and it is not what someone who
+            # ran aGiTrack one level too high meant to ask for.
+            print(f"{_folder_of_repositories_note(path, nested)}\n{_INIT_HERE_WARNING}")
+            answer = _ask("Initialize a repository here anyway with `git init`? [y/N] ").strip().lower()
+            if answer not in {"y", "yes"}:
+                print("aGiTrack not started.")
+                return None
+        else:
+            # Default YES: aGiTrack cannot track anything without a repo, so declining ends the
+            # run. Enter should take the path that lets the user get started, not the one that
+            # quits.
+            answer = (
+                _ask(f"{path} is not a Git repository. Initialize one here with `git init`? [Y/n] ").strip().lower()
+            )
+            if answer in {"n", "no"}:
+                print("aGiTrack cannot run outside a Git repository. Exiting.")
+                return None
     except (EOFError, KeyboardInterrupt):
-        answer = "n"  # no way to answer ⇒ do NOT create a repo the user never asked for
-    if answer in {"n", "no"}:
+        # No way to answer ⇒ do NOT create a repo the user never asked for.
         print("aGiTrack cannot run outside a Git repository. Exiting.")
         return None
     try:

@@ -141,3 +141,49 @@ def test_the_interactive_checks_never_raise_on_a_broken_stream(monkeypatch):
     monkeypatch.setattr(console.sys, "stdout", Broken())
     assert console.stdin_is_interactive() is False
     assert console.stdout_is_interactive() is False
+
+
+def test_the_daemon_log_stamps_every_line_with_the_time(monkeypatch):
+    """The background tracker's stdout IS <repo>/.agitrack/background.log, read only after the
+    fact. Unstamped, a start that timed out, a restart loop and a tracker up since Tuesday all
+    read identically — which is exactly the log that could not answer "why did it not start?"."""
+    import io
+    import re
+
+    buffer = io.StringIO()
+    monkeypatch.setattr(console.sys, "stdout", buffer)
+    monkeypatch.setattr(console.sys, "stderr", buffer)
+    console.timestamp_output()
+
+    print("aGiTrack is starting...")
+    print("half", end="")  # print emits the text and the newline as separate writes…
+    print(" a line")  # …and a continued line must not be stamped in the middle
+
+    lines = buffer.getvalue().splitlines()
+    assert len(lines) == 2
+    assert re.fullmatch(r"\[\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3}\] aGiTrack is starting\.\.\.", lines[0])
+    assert lines[1].endswith("] half a line")
+
+
+def test_stamping_output_is_idempotent_and_keeps_the_stream_usable(monkeypatch):
+    """Called once per process, but a second call must not double-stamp — and the wrapper has to
+    stay a drop-in for sys.stdout: print(flush=True), fileno() and isatty() all keep working."""
+    import io
+
+    class _Stream(io.StringIO):
+        def __init__(self):
+            super().__init__()
+            self.flushed = 0
+
+        def flush(self):
+            self.flushed += 1
+
+    stream = _Stream()
+    monkeypatch.setattr(console.sys, "stdout", stream)
+    console.timestamp_output()
+    console.timestamp_output()
+
+    print("once", flush=True)
+    assert console.sys.stdout is not stream
+    assert stream.flushed >= 1  # flush reached the real stream
+    assert stream.getvalue().count("] ") == 1  # one stamp, not two

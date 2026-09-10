@@ -1656,6 +1656,9 @@ def test_finish_parse_invokes_cancel_handler_and_advances_watermark(tmp_path):
     assert commits == []  # no normal commit for a response-less turn
     assert len(seen) == 1
     assert state.last_backend_message_id == "a1"
+    # ...with the mark's TIME, like every other advance: turns_after falls back to it when a
+    # compaction stops the id matching a turn boundary, and a stale one re-exports committed turns.
+    assert state.backend_message_marked_at_for(state.backend_session_id)
 
 
 def test_finish_parse_cancel_handler_keep_does_not_advance_watermark(tmp_path):
@@ -1772,6 +1775,84 @@ def test_finish_parse_defers_a_genuinely_mid_flight_turn(tmp_path):
     )
     assert result is None  # deferred, not committed
     assert commits == []
+
+
+def _codex_interrupted_exported(reply: str = "partial"):
+    """A turn the user interrupted, shaped the way CODEX records it.
+
+    Claude resolves an interrupt to ``complete=True``; Codex closes the aborted turn with
+    ``complete=False`` (``turn_aborted``/``task_aborted``/``turn_interrupted``). Both mean the
+    same thing — the turn is over — so both must commit the same way.
+    """
+    return ExportedSession(
+        "ses-1",
+        "m",
+        None,
+        [
+            SessionTurn(
+                "u1",
+                "a1",
+                "big refactor",
+                reply,
+                TokenUsage(total=1, output=1),
+                None,
+                complete=False,
+                interrupted=True,
+            )
+        ],
+    )
+
+
+def test_finish_parse_commits_an_interrupted_turn_the_backend_left_incomplete(tmp_path):
+    # An INTERRUPTED turn can never receive more messages, so the mid-flight gate must not hold
+    # it: on Codex (which closes an aborted turn with complete=False) the commit was deferred on
+    # every poll and the agent's partial edits were never committed at all — the same Esc on
+    # Claude (complete=True) committed immediately.
+    session = Session.bare()
+    engine, state, commits, commit_fn = _make_finish_helpers(tmp_path, session, _codex_interrupted_exported())
+
+    result, _ = engine.finish_parse_if_ready(
+        session=session,
+        quiet=True,
+        prompt_untracked=False,
+        require_complete=True,
+        awaited_followups=[],
+        agent_is_active_fn=lambda: False,
+        debug_fn=lambda *a, **k: None,
+        note_session_change_fn=lambda sid: None,
+        mirror_fn=lambda sid: None,
+        commit_fn=commit_fn,
+    )
+    assert result is True
+    assert len(commits) == 1
+    # Anchored on the ASSISTANT id, not the user id: the turn is finished, and a user-id anchor
+    # would re-export it inclusively on the next parse and commit its trace a second time.
+    assert state.last_backend_message_id == "a1"
+    assert state.partial_turn_usage() is None
+
+
+def test_finish_parse_offers_an_incomplete_interrupted_turn_to_the_cancel_handler(tmp_path):
+    # Same shape, but the interrupt landed before any committable response: it must reach the
+    # keep/commit/discard offer (which lives past the mid-flight gate), not be deferred forever.
+    session = Session.bare()
+    engine, state, commits, commit_fn = _make_finish_helpers(tmp_path, session, _codex_interrupted_exported(""))
+    seen = []
+
+    result, _ = engine.finish_parse_if_ready(
+        session=session,
+        quiet=True,
+        prompt_untracked=False,
+        require_complete=True,
+        awaited_followups=[],
+        agent_is_active_fn=lambda: False,
+        debug_fn=lambda *a, **k: None,
+        note_session_change_fn=lambda sid: None,
+        mirror_fn=lambda sid: None,
+        commit_fn=commit_fn,
+        on_cancelled_fn=lambda turns: seen.append(turns) or True,
+    )
+    assert result is False
+    assert commits == [] and len(seen) == 1
 
 
 def test_finish_parse_exit_commits_dangling_no_text_turn(tmp_path):

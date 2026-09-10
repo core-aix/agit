@@ -1630,19 +1630,15 @@ def _spawn_backtrace_child(directory: Path, *, owner_pid: int | None = None, por
     """Launch the detached backtrace child (shared by the CLI start and the update-restart
     handoff). The child must load the INSTALLED aGiTrack, never a stray ``agitrack/``
     package in the target directory: the backtraced directory can itself be the aGiTrack
-    source checkout, and ``python -m agitrack`` would otherwise import that (older) copy
-    from cwd — so it runs from a neutral state dir with PYTHONSAFEPATH keeping cwd off
-    ``sys.path``."""
-    import os
+    source checkout (or the folder that HOLDS it), and ``python -m agitrack`` would otherwise
+    import that copy from cwd — so it runs from a neutral state dir, with the safe import path
+    of ``proc.agitrack_invocation``/``proc.isolated_env`` keeping cwd off ``sys.path``."""
     import subprocess
-    import sys
 
-    from agitrack.proc import detach_kwargs
+    from agitrack.proc import agitrack_invocation, detach_kwargs, isolated_env
 
     cmd = [
-        sys.executable,
-        "-m",
-        "agitrack",
+        *agitrack_invocation(),
         "--repo",
         str(directory),
         "--backtrace-serve",
@@ -1653,8 +1649,7 @@ def _spawn_backtrace_child(directory: Path, *, owner_pid: int | None = None, por
         cmd += ["--dashboard-port", str(port)]
     state_dir = _state_dir()
     state_dir.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ)
-    env["PYTHONSAFEPATH"] = "1"
+    env = isolated_env()
     log = _open_log(directory)
     try:
         return subprocess.Popen(

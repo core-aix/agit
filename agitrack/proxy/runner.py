@@ -48,7 +48,7 @@ from agitrack.git import RepoLock, already_running_message
 from agitrack.proxy import host_prompt, sandbox
 from agitrack.config import AgitrackState
 from agitrack.git import WorktreeInfo, WorktreeManager, _sanitize_name, is_managed_branch
-from agitrack.proxy.commit_engine import CommitEngine
+from agitrack.proxy.commit_engine import CommitEngine, turn_is_finished
 from agitrack.proxy.integration import IntegrationService, MergeContext, MergePhase
 from agitrack.proxy.platform import make_child_process, make_host_terminal, make_waker
 from agitrack.proxy.process import BackendProcess
@@ -9385,7 +9385,9 @@ class ProxyRunner(BranchWatchMixin, ManualCommitsMixin, SessionSharingMixin, Upd
         # own commit would attribute it before the turn finished. When the last turn is incomplete
         # we leave those commits uncovered — a later cycle (or a resumed session) covers them once
         # the final response lands. Normal turns always arrive complete, so this is a no-op there.
-        turn_complete = bool(turns) and bool(getattr(turns[-1], "complete", True))
+        # An INTERRUPTED turn counts as finished (`turn_is_finished`): no later response is coming,
+        # so waiting for one strands the attribution of a commit the agent made before the Esc.
+        turn_complete = bool(turns) and turn_is_finished(turns[-1])
         uncovered = self._uncovered_backend_commits() if turn_complete else []
         # The agent committed its own work MID-TURN and left nothing further to commit, so the
         # tree is clean. The latent gate only fires on a CHANGED tree, so it would record
@@ -10694,8 +10696,10 @@ class ProxyRunner(BranchWatchMixin, ManualCommitsMixin, SessionSharingMixin, Upd
         session auto-resumes. Best-effort; never raises.
         """
         try:
-            args = " ".join(shlex.quote(arg) for arg in sys.argv[1:])
-            command = f"{shlex.quote(sys.executable)} -m agitrack {args}".rstrip()
+            from agitrack.proc import agitrack_invocation
+
+            args = " ".join(shlex.quote(arg) for arg in [*agitrack_invocation()[1:], *sys.argv[1:]])
+            command = f"{shlex.quote(sys.executable)} {args}".rstrip()
             host_prompt.reopen_in_new_terminal(command, str(self.base_repo.repo))
         except Exception as error:
             self._debug(f"reopen in new window failed: {error!r}")

@@ -1120,14 +1120,33 @@ def _limit_trace_turns(trace: list[dict], turn_limit: int) -> list[dict]:
     the last three and dropped the opening prompt with eight follow-ups — and because that turn's
     work was committed there, the words that asked for it survived in no commit at all.
 
-    A turn is opened by a user message or by a background EVENT that woke the agent with nobody
-    saying anything (:data:`TRACE_EVENT_ROLE`) — an event-driven turn is a turn, and counting only
-    `user` entries let a long run of wake-ups read as one. `starts_turn=False`, recorded for a
-    message known to have been queued into a turn already under way, keeps such a message out of
-    the count even where a reply happens to precede it; it is absent on entries written by older
-    installs, so its default preserves their meaning."""
+    PROMPTS AND WAKE-UPS ARE BUDGETED SEPARATELY, and this is the whole point of the function:
+
+        the unit of the limit is a user-agent PAIR. A turn nobody asked for — the harness woke
+        the agent with a background event (:data:`TRACE_EVENT_ROLE`) and it answered — is not a
+        pair, and can never push a prompt out of the trace.
+
+    Both kinds are still bounded, each to `turn_limit` of its own, because they run away for
+    different reasons and neither bound can do the other's job:
+
+      * Counting wake-ups as turns loses the prompt. A real commit here traced seven turns —
+        an opening instruction, five wake-ups from timers the agent had queued while waiting on
+        CI, and a second instruction. Five one-sentence replies saying "still waiting" spent the
+        entire budget of 5, so the instruction that motivated the commit was the one thing
+        evicted, while five notes about a stale timer were kept.
+      * Not counting them at all leaves the trace unbounded: a monitor that ticks for an hour
+        wakes the agent every few minutes, those turns are deferred rather than committed (they
+        change nothing), and the pending trace keeps growing. A wake-up may evict an OLDER
+        wake-up — that is the one thing a burst of them should cost.
+
+    A wake-up older than the oldest surviving prompt goes with it: an event note is context for
+    the exchange it sits in, and reading one stranded above the first prompt tells nobody
+    anything. `starts_turn=False`, recorded for a message known to have been queued into a turn
+    already under way, keeps such a message out of the count even where a reply happens to
+    precede it; it is absent on entries written by older installs, so its default preserves
+    their meaning."""
     limit = turn_limit if isinstance(turn_limit, int) and turn_limit > 0 else 5
-    starts: list[int] = []
+    starts: list[tuple[int, str]] = []
     answered = True  # nothing is in flight yet, so the first thing said opens a turn
     for index, item in enumerate(trace):
         role = str(item.get("role", "")).strip().lower()
@@ -1135,11 +1154,27 @@ def _limit_trace_turns(trace: list[dict], turn_limit: int) -> list[dict]:
             answered = True  # the agent replied: whatever is said next begins a new exchange
             continue
         if answered and item.get("starts_turn", True) is not False:
-            starts.append(index)
+            starts.append((index, role))
         answered = False
-    if len(starts) <= limit:
+    prompts = [index for index, role in starts if role == "user"]
+    events = [index for index, role in starts if role != "user"]
+    if len(prompts) <= limit and len(events) <= limit:
         return trace
-    return trace[starts[-limit] :]
+    kept_prompts = prompts[-limit:]
+    kept_events = events[-limit:]
+    if kept_prompts:
+        # Never strand a wake-up above the oldest prompt still in the trace.
+        kept_events = [index for index in kept_events if index > kept_prompts[0]]
+    kept = set(kept_prompts) | set(kept_events)
+    opens = {index for index, _ in starts}
+    limited: list[dict] = []
+    keeping = False  # entries ahead of the first turn belong to none of them
+    for index, item in enumerate(trace):
+        if index in opens:
+            keeping = index in kept
+        if keeping:
+            limited.append(item)
+    return limited
 
 
 def mask_paths(text: str) -> str:

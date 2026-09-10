@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -729,7 +730,10 @@ def test_restart_command_non_frozen_uses_module(monkeypatch):
     monkeypatch.setattr("agitrack.update.updater.sys.argv", ["agitrack", "--repo", "x"])
     monkeypatch.setattr("agitrack.update.updater.sys.executable", "/usr/bin/python3")
     cmd = _restart_command()
-    assert cmd == ["/usr/bin/python3", "-m", "agitrack", "--repo", "x"]
+    # `-P` (3.11+) keeps a stray `agitrack` directory in the restart's working directory off
+    # `sys.path`; see agitrack.proc.agitrack_invocation.
+    flags = ["-P"] if sys.version_info >= (3, 11) else []
+    assert cmd == ["/usr/bin/python3", *flags, "-m", "agitrack", "--repo", "x"]
 
 
 def test_restart_command_dedupes_extra_args(monkeypatch):

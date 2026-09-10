@@ -172,7 +172,7 @@ def _backtrace_commit_locked(repo, root: Path, new_branch: str, *, _input=input)
     if not commits:
         print("This repository has no commits yet — nothing to reconstruct.")
         return 0
-    changed = filesmod._numstat_by_commit(repo, "HEAD", set(commits))
+    changed = filesmod._numstat_by_commit(repo, set(commits))
     ai_map = _match_turns_to_commits(repo, commits, changed, turns)
     # AI commits that already record AI WORK (a repo that used aGiTrack for part of its life) are
     # left untouched — only agent-made commits without that record are annotated. The test is

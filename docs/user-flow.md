@@ -231,7 +231,8 @@ owner-terminal watchdog**, so it keeps tracking after the terminal closes — st
 `agitrack -b stop`. `agitrack -b status` reports whether one is running; **`agitrack status`** (also `--status` / `-s`)
 reports the mode of whatever is tracking the repo (interactive vs background, auto/manual,
 worktree/no-worktree, or not running) and whether **auto-start on commit** is enabled. The daemon
-logs activity to `<repo>/.agitrack/background.log`, appends notable events to a user `--log-file`,
+logs activity to `<repo>/.agitrack/background.log` (every line stamped with the local time, since that
+log is only ever read after the fact), appends notable events to a user `--log-file`,
 and reminds you (never auto-installs) when an aGiTrack update is available. Auto commits are **clean
 agent commits** (subject = the LLM summary, one metadata block); the daemon waits briefly for the
 summary before folding since it never amends HEAD. Only one aGiTrack runs per repo (the shared repo

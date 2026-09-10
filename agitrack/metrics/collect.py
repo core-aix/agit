@@ -45,6 +45,7 @@ from agitrack.commits import METADATA_HEADER
 from agitrack.commits.message import is_fully_tracked_message
 from agitrack.commits.message import mask_paths
 from agitrack.git import GitRepo
+from agitrack.metrics import progress
 
 _NUMSTAT_RE = re.compile(r"^(\d+|-)\t(\d+|-)\t")
 _TOKEN_KEY_PREFIX = "tokens_since_last_commit_"
@@ -1345,45 +1346,194 @@ def _extract_user_prompts(body: str) -> list[str]:
 
 
 def _apply_numstat(repo: GitRepo, ref: str, by_sha: dict[str, CommitStat]) -> None:
-    # Line counts for the WHOLE history, computed from the LOCAL blobs only
-    # (allow_lazy_fetch=False). On a blobless partial clone (`git clone --filter=blob:none`)
-    # diffing every commit would otherwise lazily fetch every historical blob from the
-    # promisor remote — tens of seconds per dashboard poll, and the interrupted fetches
-    # litter `.git/objects/pack` with `tmp_pack_*` files — so the dashboard appears to hang
-    # with no commits. Counting from local blobs keeps the poll instant; the commits the user
-    # is actually viewing get their exact counts via apply_numstat_for (which fetches just
-    # that page). Merge commits (cover commits #58, integration merges) report no numstat by
-    # default, so a turn's lines are counted exactly once — on the commits that introduced them.
-    # ``--`` disambiguates a ref that collides with a path name (see collect_commit_stats).
-    output = repo._run(
-        ["git", "log", "--numstat", "--format=%x01%H", ref, "--"], check=False, allow_lazy_fetch=False
-    ).stdout
-    _accumulate_numstat(output, by_sha)
+    """Fill in every commit's insertions/deletions for the WHOLE history, computing only the
+    commits the on-disk cache does not already answer.
+
+    WHY A CACHE. Diffing the whole history is BY FAR the most expensive thing the dashboard
+    does, and it was redone whenever a ref moved — which, on a tracked repo, is every single
+    turn. Measured on one repository (915 commits, a 10 GB pack): 34.7s of a 35.5s dashboard
+    build, against 0.04s to read every commit MESSAGE. That is why a big repo's dashboard
+    "takes a very long time": not the log, and not the diffs the user opens, but a full-history
+    ``git log --numstat`` on every rebuild. A commit's diff against its parent never changes,
+    so the answer is cacheable forever, per sha, and every later rebuild costs the new commits
+    alone.
+
+    Counted from LOCAL blobs only (allow_lazy_fetch=False). On a partial clone
+    (`git clone --filter=blob:none`) diffing every commit would otherwise lazily fetch every
+    historical blob from the promisor remote — tens of seconds per dashboard poll, and the
+    interrupted fetches litter `.git/objects/pack` with `tmp_pack_*` files — so the dashboard
+    appears to hang with no commits. There, a local count is a FLOOR, so it is cached as such
+    (see :data:`_NUMSTAT_LOCAL`) and the commits actually displayed are recounted exactly by
+    :func:`apply_numstat_for`. Merge commits (cover commits #58, integration merges) report no
+    numstat by default, so a turn's lines are counted exactly once — on the commits that
+    introduced them."""
+    cached = _read_numstat_cache(repo)
+    missing: list[str] = []
+    for sha, stat in by_sha.items():
+        entry = cached.get(sha)  # either tier answers this pass: both are at least the floor
+        if entry is None:
+            missing.append(sha)
+            continue
+        stat.insertions += entry[0]
+        stat.deletions += entry[1]
+    if not missing:
+        return
+    # On an ordinary clone every blob is present, so a local count IS the exact one and nothing
+    # ever needs to diff that commit again.
+    partial = repo.is_partial_clone()
+    tier = _NUMSTAT_LOCAL if partial else _NUMSTAT_EXACT
+    # A chunk at a time, for the two things a single call could not do: report progress to a
+    # page that is waiting on this (metrics.progress), and bank what has been computed so far —
+    # a first index that is interrupted (the tab closed, the daemon restarted) now resumes from
+    # where it stopped instead of starting the whole history again.
+    for start in range(0, len(missing), _NUMSTAT_CHUNK):
+        progress.step("counting changed lines", start, len(missing))
+        batch = missing[start : start + _NUMSTAT_CHUNK]
+        fresh, seen = _numstat_of(repo, batch, allow_lazy_fetch=False)
+        for sha in batch:
+            by_sha[sha].insertions += fresh[sha].insertions
+            by_sha[sha].deletions += fresh[sha].deletions
+        _write_numstat_cache(repo, cached, _cache_rows(fresh, seen if partial else set(batch), tier))
+    progress.step("counting changed lines", len(missing), len(missing))
 
 
 def apply_numstat_for(repo: GitRepo, shas: list[str], by_sha: dict[str, CommitStat]) -> None:
-    """Recompute insertions/deletions for SPECIFIC commits, fetching only those commits'
-    blobs (allow_lazy_fetch stays on). This is how the dashboard gets exact line counts for
-    the log page it is about to show without pulling the rest of a blobless clone's history:
-    only what is displayed is fetched. A commit whose blobs still can't be reached (offline,
-    or an aGiTrack-only ref the remote doesn't have) keeps the local-blob count it already
-    had, rather than being zeroed."""
+    """Give SPECIFIC commits their exact insertions/deletions, fetching only those commits'
+    blobs (allow_lazy_fetch stays on). This is how the dashboard gets exact line counts for the
+    log page it is about to show, and for manual mode's pending turns, without pulling the rest
+    of a partial clone's history: only what is displayed is fetched. A commit whose blobs still
+    can't be reached (offline, or an aGiTrack-only ref the remote doesn't have) keeps the count
+    it already had, rather than being zeroed.
+
+    Cached, and only an EXACT cache entry is accepted: a floor recorded by the whole-history
+    pass is exactly what this function exists to improve on. Measured on one partial clone,
+    where the lazy fetches dominate: 18.3s for a 50-commit log page and 12.1s for 20 pending
+    turns, on EVERY dashboard rebuild, both of which the cache turns into a one-off."""
     targets = {sha for sha in shas if sha and sha in by_sha}
     if not targets:
         return
-    # `--no-walk` shows exactly the named commits (each diffed against its parent for numstat)
-    # without traversing ancestry, so the fetch is bounded to this page.
+    cached = _read_numstat_cache(repo)
+    missing: list[str] = []
+    for sha in sorted(targets):
+        entry = cached.get(sha)
+        if entry is not None and entry[2] == _NUMSTAT_EXACT:
+            by_sha[sha].insertions, by_sha[sha].deletions = entry[0], entry[1]
+            continue
+        missing.append(sha)
+    if not missing:
+        return
+    partial = repo.is_partial_clone()
+    for start in range(0, len(missing), _EXACT_CHUNK):
+        progress.step("fetching exact line counts", start, len(missing))
+        batch = missing[start : start + _EXACT_CHUNK]
+        fresh, seen = _numstat_of(repo, batch, allow_lazy_fetch=True)
+        for sha in seen:
+            by_sha[sha].insertions = fresh[sha].insertions
+            by_sha[sha].deletions = fresh[sha].deletions
+        _write_numstat_cache(repo, cached, _cache_rows(fresh, seen if partial else set(batch), _NUMSTAT_EXACT))
+    progress.step("fetching exact line counts", len(missing), len(missing))
+
+
+def _numstat_of(repo: GitRepo, shas: list[str], *, allow_lazy_fetch: bool) -> tuple[dict[str, CommitStat], set[str]]:
+    """Line counts for exactly *shas*, as throwaway stats plus the set git emitted a diff for.
+
+    ``--no-walk`` diffs each named commit against its parent with no ancestry traversal, so the
+    work (and, when fetching is allowed, the network) is bounded to the commits asked for.
+    ``--stdin`` carries them with no argv length limit — a history of any size is one call."""
     output = repo._run(
-        ["git", "log", "--no-walk=unsorted", "--numstat", "--format=%x01%H", *sorted(targets), "--"],
+        ["git", "log", "--no-walk=unsorted", "--numstat", "--format=%x01%H", "--stdin", "--"],
+        input_text="".join(f"{sha}\n" for sha in shas),
         check=False,
+        allow_lazy_fetch=allow_lazy_fetch,
     ).stdout
-    fresh: dict[str, CommitStat] = {
-        sha: CommitStat(sha=sha, author="", email="", subject="", kind="") for sha in targets
-    }
-    seen = _accumulate_numstat(output, fresh)
-    for sha in seen:
-        by_sha[sha].insertions = fresh[sha].insertions
-        by_sha[sha].deletions = fresh[sha].deletions
+    fresh: dict[str, CommitStat] = {sha: CommitStat(sha=sha, author="", email="", subject="", kind="") for sha in shas}
+    return fresh, _accumulate_numstat(output, fresh)
+
+
+# The on-disk cache: one line per commit, `<sha> <insertions> <deletions> <tier>`.
+#
+# The tier says how the count was obtained, and it is the whole reason two callers can share one
+# file. EXACT means every blob the diff touches was available, so the number is final. LOCAL
+# means it was counted on a partial clone without fetching, so it is a floor: good enough for
+# the whole-history aggregates (which must never trigger a fetch) but not for a commit being
+# displayed, which apply_numstat_for recounts and then records as EXACT.
+_NUMSTAT_EXACT = "E"
+_NUMSTAT_LOCAL = "L"
+# Commits per git call when filling the cache. Small enough that the loading page's bar moves
+# several times a second on a slow history, large enough that git's own start-up cost stays
+# noise next to the diffing.
+_NUMSTAT_CHUNK = 32
+# Smaller for the exact pass: those diffs may FETCH the blobs they need, so a handful of commits
+# can take as long as hundreds of local ones, and a bar that does not move is the thing this is
+# all here to avoid.
+_EXACT_CHUNK = 8
+_NUMSTAT_CACHE_LIMIT = 100_000  # entries before the file is rewritten instead of appended to
+
+
+def _numstat_cache_path(repo: GitRepo) -> Path:
+    return Path(repo.repo) / ".agitrack" / "numstat.cache"
+
+
+def _cache_rows(fresh: dict[str, CommitStat], record: set[str], tier: str) -> dict[str, tuple[int, int, str]]:
+    """The counts worth remembering, as cache rows.
+
+    *record* is every sha whose count is trustworthy. On an ordinary clone that is all of them,
+    zero included: a commit git emitted no diff row for is a merge or an empty commit, and a
+    remembered 0 is what stops the rebuild after this one from diffing it again. On a PARTIAL
+    clone it is only the commits that produced rows, because there "no rows" can equally mean
+    "the blobs are still on the remote", and caching that 0 would freeze the commit at zero for
+    good once they arrive."""
+    return {sha: (fresh[sha].insertions, fresh[sha].deletions, tier) for sha in record}
+
+
+def _read_numstat_cache(repo: GitRepo) -> dict[str, tuple[int, int, str]]:
+    """The cached per-commit line counts. Best-effort: an unreadable or half-written cache is a
+    cache miss, never an error — every number in it is recomputable from git. Later lines win,
+    which is what promotes a LOCAL row to the EXACT one appended after it."""
+    try:
+        text = _numstat_cache_path(repo).read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return {}
+    counts: dict[str, tuple[int, int, str]] = {}
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) != 4 or parts[3] not in (_NUMSTAT_EXACT, _NUMSTAT_LOCAL):
+            continue  # a torn last line from a concurrent append, or a format we do not know
+        try:
+            counts[parts[0]] = (int(parts[1]), int(parts[2]), parts[3])
+        except ValueError:
+            continue
+    return counts
+
+
+def _write_numstat_cache(
+    repo: GitRepo,
+    existing: dict[str, tuple[int, int, str]],
+    fresh: dict[str, tuple[int, int, str]],
+) -> None:
+    """Add *fresh* entries to the on-disk cache, APPENDING rather than rewriting so two readers
+    (the per-repo dashboard and the hub) racing can only duplicate a line, which the reader
+    resolves in favour of the last one. Best-effort: a repo whose ``.agitrack/`` cannot be
+    written simply keeps recomputing."""
+    if not fresh:
+        return
+    path = _numstat_cache_path(repo)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if len(existing) + len(fresh) > _NUMSTAT_CACHE_LIMIT:
+            # Rewritten, not grown without bound: rebases and deleted branches leave entries no
+            # history reaches any more. Anything dropped that is still wanted costs one diff.
+            keep = list({**existing, **fresh}.items())[-_NUMSTAT_CACHE_LIMIT // 2 :]
+            path.write_text(_numstat_lines(dict(keep)), encoding="utf-8")
+            return
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(_numstat_lines(fresh))
+    except OSError:
+        pass
+
+
+def _numstat_lines(rows: dict[str, tuple[int, int, str]]) -> str:
+    return "".join(f"{sha} {ins} {dels} {tier}\n" for sha, (ins, dels, tier) in rows.items())
 
 
 def _accumulate_numstat(output: str, by_sha: dict[str, CommitStat]) -> set[str]:

@@ -78,8 +78,9 @@ def test_a_background_event_is_never_rendered_as_a_user_message():
 
 
 def test_a_background_event_starts_a_turn_for_the_trace_limit():
-    # An event-driven turn IS a turn. Counting only `user` entries let a long run of background
-    # wake-ups read as ONE turn, keeping the whole run in the trace well past the limit.
+    # A wake-up is bounded like anything else: it may evict an OLDER wake-up, which is the one
+    # thing a burst of them should cost. Without this a monitor ticking for an hour keeps every
+    # tick in the trace, since none of those turns is committed on its own.
     trace = []
     for i in range(5):
         trace.append({"role": TRACE_EVENT_ROLE, "content": "(background monitor update)"})
@@ -88,6 +89,64 @@ def test_a_background_event_starts_a_turn_for_the_trace_limit():
 
     assert "tick 4" in rendered and "tick 3" in rendered
     assert "tick 0" not in rendered
+
+
+def test_background_wake_ups_never_evict_the_prompt_that_asked_for_the_work():
+    """THE BUG, measured on a real commit: the turn limit counted a background wake-up as a turn,
+    so five of them spent the whole budget of 5 and the session's opening instruction — "check
+    the dependabot PRs and merge if there are no issues" — was evicted from its own commit.
+
+    The wake-ups were timers the agent had queued while waiting on a slow CI job, and every one
+    of them was answered with a sentence saying it was still waiting. Nobody asked for those
+    turns; they cannot be what a trace of five turns is spent on. A turn is a user-agent PAIR."""
+    trace = [
+        {"role": "user", "content": "the instruction that started the work"},
+        {"role": "agent", "content": "on it"},
+    ]
+    for i in range(5):
+        trace.append({"role": TRACE_EVENT_ROLE, "content": "(background task completed)"})
+        trace.append({"role": "agent", "content": f"still waiting {i}"})
+    trace.append({"role": "user", "content": "a second instruction"})
+    trace.append({"role": "agent", "content": "done"})
+
+    rendered = render_interaction_trace(trace, trace_turn_limit=5)
+
+    assert "the instruction that started the work" in rendered
+    assert "a second instruction" in rendered
+    assert "still waiting 0" in rendered  # seven turns, but only two of them are pairs
+
+
+def test_a_storm_of_wake_ups_is_trimmed_around_the_prompt_it_follows():
+    # Both budgets apply at once: the pair survives whole, and the wake-ups it drags behind it
+    # are cut to the most recent `trace_turn_limit` — bounded, without costing the prompt.
+    trace = [{"role": "user", "content": "start the long watch"}, {"role": "agent", "content": "watching"}]
+    for i in range(20):
+        trace.append({"role": TRACE_EVENT_ROLE, "content": "(background monitor update)"})
+        trace.append({"role": "agent", "content": f"tick {i}"})
+
+    rendered = render_interaction_trace(trace, trace_turn_limit=2)
+
+    assert "start the long watch" in rendered
+    assert "tick 19" in rendered and "tick 18" in rendered
+    assert "tick 17" not in rendered and "tick 0" not in rendered
+
+
+def test_a_wake_up_older_than_every_surviving_prompt_is_dropped_with_it():
+    # An event note reads as context for the exchange around it, so one left stranded above the
+    # oldest surviving prompt would explain a turn that is no longer in the trace.
+    trace = [
+        {"role": TRACE_EVENT_ROLE, "content": "(background task completed)"},
+        {"role": "agent", "content": "ancient"},
+    ]
+    for i in range(4):
+        trace.append({"role": "user", "content": f"prompt {i}"})
+        trace.append({"role": "agent", "content": f"answer {i}"})
+
+    rendered = render_interaction_trace(trace, trace_turn_limit=2)
+
+    assert "ancient" not in rendered
+    assert "prompt 3" in rendered and "prompt 2" in rendered
+    assert "prompt 1" not in rendered
 
 
 def test_a_message_queued_mid_turn_does_not_count_as_a_turn_of_its_own():

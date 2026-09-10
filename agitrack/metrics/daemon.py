@@ -24,7 +24,6 @@ import json
 import os
 import signal
 import subprocess
-import sys
 import threading
 import time
 from pathlib import Path
@@ -138,11 +137,15 @@ def spawn_dashboard_daemon(
 
     ``port`` requests a specific port (used when restarting to keep the previous URL);
     the child still falls back to an OS-assigned port if it is taken.
+
+    Like every other daemon child it is launched with import isolation, so an ``agitrack``
+    directory inside the repository cannot be imported in place of the installed package (see
+    ``proc.agitrack_invocation``).
     """
+    from agitrack.proc import agitrack_invocation, isolated_env, safe_spawn_cwd
+
     cmd = [
-        sys.executable,
-        "-m",
-        "agitrack",
+        *agitrack_invocation(),
         "--repo",
         str(repo.repo),
         "--dashboard-serve",
@@ -151,7 +154,7 @@ def spawn_dashboard_daemon(
         cmd += ["--dashboard-owner-pid", str(owner_pid)]
     if port is not None:
         cmd += ["--dashboard-port", str(port)]
-    env = dict(os.environ)
+    env = isolated_env()
     if email_logins:
         env[EMAIL_LOGINS_ENV] = json.dumps(email_logins)
     else:
@@ -163,7 +166,7 @@ def spawn_dashboard_daemon(
             stdin=subprocess.DEVNULL,
             stdout=log,
             stderr=log,
-            cwd=str(repo.repo),
+            cwd=str(safe_spawn_cwd(repo.repo)),
             env=env,
             **detach_kwargs(),
         )

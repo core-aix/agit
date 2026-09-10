@@ -179,3 +179,70 @@ def progress_ticker(
         # costs nothing in the normal case. The timeout is the guarantee that an `output_fn`
         # which never returns cannot turn a progress message into a hang.
         thread.join(timeout=_TICKER_JOIN_SECONDS)
+
+
+class TimestampedStream:
+    """A text stream that stamps every line written through it with the local time.
+
+    Wraps the BACKGROUND TRACKER's stdout/stderr, whose destination is not a terminal but
+    ``<repo>/.agitrack/background.log`` — a file read minutes, or days, after the fact, when
+    "the background tracker stopped" and "aGiTrack is starting..." are only useful next to the
+    moment they happened. Without a stamp the log answers "what happened" and never "when", so
+    a start that timed out, a restart loop and a tracker that has been up since Tuesday all read
+    the same.
+
+    Stamping at the STREAM rather than at each ``print`` is what makes that complete: everything
+    the daemon process emits is covered, including the tracebacks of a start that died on the way
+    up and any chatter from a library that prints. State is carried across writes because
+    ``print`` emits its text and its newline separately (and code may write half a line at a
+    time), so a prefix is added only where a line actually begins."""
+
+    def __init__(self, stream: Any) -> None:
+        self._stream = stream
+        self._at_line_start = True
+
+    def __getattr__(self, name: str) -> Any:
+        # flush/fileno/isatty/encoding/close/… stay the wrapped stream's, so the wrapper is a
+        # drop-in for `sys.stdout` (print(flush=True), subprocess inheriting the fd, and the
+        # interactivity probes above all keep working).
+        return getattr(self._stream, name)
+
+    def write(self, data: str) -> int:
+        if not data:
+            return 0
+        try:
+            # One clock read, not two: reading the seconds and the milliseconds separately
+            # straddles a second boundary and stamps a line a whole second off.
+            now = time.time()
+            stamp = f"[{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(now))}.{int(now % 1 * 1000):03d}] "
+            parts: list[str] = []
+            for line in data.splitlines(keepends=True):
+                if self._at_line_start:
+                    parts.append(stamp)
+                parts.append(line)
+                self._at_line_start = line.endswith(("\n", "\r"))
+            payload = "".join(parts)
+        except Exception:  # a broken clock must never cost the daemon its log line
+            payload = data
+        self._stream.write(payload)
+        return len(data)
+
+    def writelines(self, lines: Any) -> None:
+        for line in lines:
+            self.write(line)
+
+
+def timestamp_output() -> None:
+    """Stamp this process's stdout and stderr lines with the local time, idempotently.
+
+    For processes whose output IS a log file rather than a terminal — the detached background
+    tracker. Called once, as early in the run as possible, so the very first line ("aGiTrack is
+    starting...") is stamped too."""
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        if stream is None or isinstance(stream, TimestampedStream):
+            continue
+        try:
+            setattr(sys, name, TimestampedStream(stream))
+        except Exception:  # pragma: no cover - sys.stdout is always assignable in practice
+            pass

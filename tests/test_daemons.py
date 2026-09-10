@@ -268,3 +268,41 @@ def test_every_kind_aGiTrack_can_leave_running_is_either_restarted_or_deliberate
     deliberate_exemptions = {"session"}
 
     assert set(daemons.KIND_LABELS) - daemons._STOPPABLE_KINDS == deliberate_exemptions
+
+
+# --- scoping a daemon to a repository, with another repository inside it -----
+#
+# `agitrack stop` and `--daemons stop <repo>` narrow the registry to the daemons serving one
+# repository. "Serving" has to include a daemon recorded against one of aGiTrack's session
+# worktrees (they live at `<repo>/.agitrack/worktrees/<name>`) and must NOT include a daemon
+# for a repository that merely sits inside this one — a vendored checkout, a submodule, or the
+# folder of projects someone has since made a repository of its own. Stopping the outer one
+# was ending live sessions in the inner one.
+
+
+def _info(repo: str) -> daemons.DaemonInfo:
+    return daemons.DaemonInfo(pid=1, kind="session", repo=repo)
+
+
+def test_serves_repo_matches_the_repo_itself(tmp_path):
+    assert daemons._serves_repo(_info(str(tmp_path)), tmp_path) is True
+
+
+def test_serves_repo_matches_one_of_this_repos_session_worktrees(tmp_path):
+    worktree = tmp_path / ".agitrack" / "worktrees" / "coral"
+    worktree.mkdir(parents=True)
+    assert daemons._serves_repo(_info(str(worktree)), tmp_path) is True
+
+
+def test_serves_repo_ignores_a_repository_nested_inside_this_one(tmp_path):
+    nested = tmp_path / "vendor" / "other-project"
+    nested.mkdir(parents=True)
+    assert daemons._serves_repo(_info(str(nested)), tmp_path) is False
+
+
+def test_serves_repo_ignores_the_enclosing_folder(tmp_path):
+    child = tmp_path / "project"
+    child.mkdir()
+    # The daemon is the inner repo's; asking about it from the outer folder is not a match, and
+    # neither is the reverse.
+    assert daemons._serves_repo(_info(str(tmp_path)), child) is False

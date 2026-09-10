@@ -47,7 +47,11 @@ def _plugin_source(command: list[str]) -> str:
     The child is detached with its streams ignored, and unref'd: a tracker must outlive the
     OpenCode process that happened to start it, and a plugin that waits on it would hold up the
     user's session. Every failure is swallowed for the same reason — a plugin that throws breaks
-    OpenCode's startup, which is a far worse outcome than not starting a tracker."""
+    OpenCode's startup, which is a far worse outcome than not starting a tracker.
+
+    It spawns in the project directory, where an ``agitrack`` folder may well sit (a repository
+    that holds your projects, aGiTrack's own checkout among them), so ``PYTHONSAFEPATH`` is
+    passed the way every other aGiTrack child gets it — see ``proc.isolated_env``."""
     return f"""// {MARKER} — written and removed by aGiTrack; do not edit.
 // Starts aGiTrack's background tracker when an OpenCode session opens in this project, which is
 // what the SessionStart hooks do for Claude Code and Codex. See
@@ -60,6 +64,7 @@ export const AgitrackAutostart = async ({{ directory, worktree }}) => {{
   try {{
     const child = spawn(COMMAND[0], COMMAND.slice(1), {{
       cwd: worktree || directory || process.cwd(),
+      env: {{ ...process.env, PYTHONSAFEPATH: "1" }},
       detached: true,
       stdio: "ignore",
     }})

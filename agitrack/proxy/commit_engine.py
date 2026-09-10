@@ -214,6 +214,26 @@ def _is_dialog_keystroke(turn) -> bool:
     return True
 
 
+def turn_is_finished(turn) -> bool:
+    """Whether *turn* can still receive more messages from the backend.
+
+    ``complete`` alone is not that question. A turn the user INTERRUPTED is over — the backend
+    stopped, and nothing will ever be added to it — but the transcripts do not agree on how to
+    say so: Claude resolves an interrupt to ``complete=True`` (``_finalize_turn``: "a turn the
+    user interrupted can never receive more messages, so treating it as in-progress would stall
+    the commit loop forever"), while Codex closes the aborted turn with ``complete=False``
+    (``turn_aborted``/``task_aborted``/``turn_interrupted`` in ``transcripts/codex.py``).
+
+    Reading ``complete`` on its own therefore made Esc behave differently per backend: on Codex
+    the "latest turn still in progress" gate below deferred the commit of a turn that would never
+    finish, so the agent's partial edits were never committed and the interactive
+    keep/commit/discard offer — which lives past that gate — was never even reached. The work sat
+    in the tree until the exit finalize (``require_complete=False``) swept it up, or another turn
+    happened to carry it. Interruption is terminal on every backend, so it is treated as terminal
+    here."""
+    return bool(getattr(turn, "complete", True)) or bool(getattr(turn, "interrupted", False))
+
+
 def _prompt_covered_by(pending: str, prompt: str) -> bool:
     """True when *pending* is already represented WITHIN *prompt*. A single turn's ``user_prompt``
     can aggregate several messages — a base prompt plus the follow-ups the user QUEUED while the
@@ -884,7 +904,7 @@ class CommitEngine:
         # metadata at all. Computed here, the one place that already holds both the export and
         # the watermark, so every mode gets the same answer from the same evidence.
         if note_in_flight_fn is not None:
-            running = all_turns[-1] if all_turns and not all_turns[-1].complete else None
+            running = all_turns[-1] if all_turns and not turn_is_finished(all_turns[-1]) else None
             facts = None
             if running is not None:
                 try:
@@ -915,7 +935,7 @@ class CommitEngine:
                 return None, awaited
             awaited = []  # committing now — drop cancelled queue entries
 
-        if require_complete and all_turns and not all_turns[-1].complete:
+        if require_complete and all_turns and not turn_is_finished(all_turns[-1]):
             debug_fn(f"deferring agent commit: latest turn still in progress session_id={new_session_id}")
             return None, awaited
 
@@ -986,6 +1006,12 @@ class CommitEngine:
                     last_turn.assistant_message_id
                     or last_turn.user_message_id
                     or self.state.backend_message_id_for(self.state.backend_session_id),
+                    # With the mark's TIME, like every other advance: `set_backend_message_id`
+                    # only writes the time when it is given one, so omitting it left this
+                    # session's previous (older) mark in place. turns_after falls back to that
+                    # time whenever a compaction stops the id matching a turn boundary, and an
+                    # older time there re-exports turns already committed.
+                    marked_at=(last_turn.ended_at or last_turn.started_at or time.time()),
                 )
                 debug_fn(
                     f"agent parse consumed without final response (cancelled) "
@@ -1049,10 +1075,13 @@ class CommitEngine:
             # reads that as "aGiTrack updated on disk" and restarts. Reproduced by replaying a
             # real transcript truncated at 25/50/75% through a turn — the turn vanished from
             # every later commit each time (2026-08-15).
+            # An INTERRUPTED turn is finished, not mid-flight: anchoring it on its user id would
+            # re-export it inclusively on the next parse (see turns_after) and commit its trace a
+            # second time. Only a turn that can still grow needs the user-id anchor.
             anchor_on_user = (
                 watermark is not None
                 and bool(watermark.user_message_id)
-                and (not watermark.assistant_message_id or not watermark.complete)
+                and (not watermark.assistant_message_id or not turn_is_finished(watermark))
             )
             if watermark is None:
                 mark_id = None

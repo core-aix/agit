@@ -5,7 +5,7 @@ import sys
 import pytest
 
 from agitrack import cli
-from agitrack.git import GitRepo
+from agitrack.git import GitError, GitRepo
 
 
 def _has_git() -> bool:
@@ -318,6 +318,89 @@ def test_discover_or_init_non_interactive_does_not_prompt(tmp_path, monkeypatch)
     monkeypatch.setattr("builtins.input", lambda *a: (_ for _ in ()).throw(AssertionError("should not prompt")))
 
     assert cli._discover_or_init(tmp_path) is None
+
+
+# --- a folder that HOLDS repositories ---------------------------------------
+#
+# Running aGiTrack one directory too high — in `~/Code` rather than in `~/Code/my-project` —
+# lands in a folder full of repositories that is not one itself. "Not a Git repository: ." is
+# an opaque answer there, and `git init` (the offer's default everywhere else) is an actively
+# bad one: it makes a single project out of the whole folder and still tracks nothing inside it.
+
+
+def _folder_of_repos(tmp_path, count: int = 3):
+    for index in range(count):
+        (tmp_path / f"project-{index}" / ".git").mkdir(parents=True)
+    (tmp_path / "not-a-repo").mkdir()
+    return tmp_path
+
+
+def test_repositories_inside_lists_child_repos_only(tmp_path):
+    _folder_of_repos(tmp_path, count=2)
+    # A linked worktree / submodule records `.git` as a FILE, and is still a repository.
+    (tmp_path / "worktree").mkdir()
+    (tmp_path / "worktree" / ".git").write_text("gitdir: /elsewhere\n", encoding="utf-8")
+
+    assert cli._repositories_inside(tmp_path) == ["project-0", "project-1", "worktree"]
+
+
+def test_repositories_inside_is_empty_for_an_ordinary_folder(tmp_path):
+    (tmp_path / "notes").mkdir()
+    assert cli._repositories_inside(tmp_path) == []
+
+
+def test_discover_or_init_explains_a_folder_of_repositories_instead_of_prompting(tmp_path, monkeypatch, capsys):
+    _force_tty(monkeypatch, stdin=False)
+    _folder_of_repos(tmp_path)
+
+    assert cli._discover_or_init(tmp_path) is None
+
+    out = capsys.readouterr().out
+    assert "3 folders inside it are" in out
+    assert "project-0" in out and "not-a-repo" not in out
+    assert "`cd` into the project you want" in out
+
+
+def test_discover_or_init_defaults_to_NOT_creating_a_repo_around_a_folder_of_repositories(
+    tmp_path, monkeypatch, capsys
+):
+    _force_tty(monkeypatch, stdin=True)
+    prompts: list = []
+    monkeypatch.setattr("builtins.input", lambda p="": prompts.append(p) or "")  # bare Enter
+
+    _folder_of_repos(tmp_path)
+
+    assert cli._discover_or_init(tmp_path) is None
+    assert not (tmp_path / ".git").exists()  # Enter must not git-init a folder of projects
+    assert "[y/N]" in prompts[0]  # ...and the prompt says which way it leans
+    assert "would make one project out of the whole folder" in capsys.readouterr().out
+
+
+def test_discover_or_init_still_initializes_a_folder_of_repositories_when_asked(tmp_path, monkeypatch):
+    """The offer is de-emphasised, not removed: a vendored checkout inside a new project is a
+    real (if rarer) thing to want."""
+    _force_tty(monkeypatch, stdin=True)
+    monkeypatch.setattr("builtins.input", lambda *a: "y")
+
+    _folder_of_repos(tmp_path)
+
+    repo = cli._discover_or_init(tmp_path)
+    assert repo is not None and (tmp_path / ".git").exists()
+
+
+def test_no_repo_message_explains_a_folder_of_repositories(tmp_path):
+    """`agitrack status` / `stop` one directory too high get the same explanation, without the
+    `git init` half — those commands create nothing."""
+    _folder_of_repos(tmp_path)
+    message = cli._no_repo_message(tmp_path, GitError("Not a Git repository: ."))
+
+    assert message.startswith("Not a Git repository: .")
+    assert "3 folders inside it are" in message
+    assert "would make one project out of the whole folder" not in message
+
+
+def test_no_repo_message_leaves_an_ordinary_failure_alone(tmp_path):
+    assert cli._no_repo_message(tmp_path, GitError("Not a Git repository: .")) == "Not a Git repository: ."
 
 
 # --- backend passthrough args (#32) -----------------------------------------

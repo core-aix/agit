@@ -67,18 +67,90 @@ def fs_path(printed: str) -> Path:
     return Path(printed.encode("utf-8", "surrogateescape").decode(encoding, "surrogateescape"))
 
 
+# ``python -m agitrack`` puts the CURRENT DIRECTORY at the front of ``sys.path``, where a
+# directory named ``agitrack`` beats the installed package. That is not hypothetical: it is
+# what happens the moment aGiTrack is run in the folder that HOLDS your projects — the folder
+# whose subfolders you have been tracking, aGiTrack's own source checkout among them.
+#
+# The failure is worse than "an older copy was imported". A stray ``agitrack/`` directory has
+# no ``__init__.py``, so it is picked up as a NAMESPACE package: submodules still resolve (via
+# the installed package's own finder) but the package itself has no attributes, and every child
+# process dies on ``ImportError: cannot import name '__version__' from 'agitrack' (unknown
+# location)`` — inside a log file, while the launcher that spawned it reports success. Passing
+# ``-P`` is what keeps the current directory off ``sys.path``.
+#
+# ``-P`` (and its environment twin ``PYTHONSAFEPATH``, see :func:`isolated_env`) landed in
+# Python 3.11 and would be rejected outright by the 3.10 this project still supports, so on
+# 3.10 the flag is omitted and :func:`safe_spawn_cwd` carries the protection alone.
+_SAFE_PATH_ARGS = ["-P"] if sys.version_info >= (3, 11) else []
+
+
 def agitrack_invocation() -> list[str]:
     """The argv PREFIX that invokes THIS aGiTrack (append the aGiTrack args after it).
 
     A normal (pip/source/pipx) install is a Python interpreter, so it runs as
-    ``<python> -m agitrack …`` — which loads whatever version is installed for that interpreter,
-    so after a self-update it automatically runs the NEW code (the interpreter path is stable).
-    A **frozen** build (the PyInstaller/MSI ``agitrack.exe``) is not a Python interpreter — ``-m
-    agitrack`` is invalid there — so the executable is run directly; the MSI reinstalls it at the
-    same path, so it too resolves to the updated version. Mirrors ``updater._restart_command``."""
+    ``<python> -P -m agitrack …`` — which loads whatever version is installed for that
+    interpreter, so after a self-update it automatically runs the NEW code (the interpreter path
+    is stable), and never the stray ``agitrack`` directory that may sit in whatever working
+    directory the command is run from (see ``_SAFE_PATH_ARGS``). A **frozen** build (the
+    PyInstaller/MSI ``agitrack.exe``) is not a Python interpreter — ``-m agitrack`` is invalid
+    there, and so is ``-P`` — so the executable is run directly; the MSI reinstalls it at the
+    same path, so it too resolves to the updated version."""
     if getattr(sys, "frozen", False):
         return [sys.executable]
-    return [sys.executable, "-m", "agitrack"]
+    return [sys.executable, *_SAFE_PATH_ARGS, "-m", "agitrack"]
+
+
+def isolated_env(base: dict[str, str] | None = None) -> dict[str, str]:
+    """``base`` (the current environment by default) with the safe import path turned on.
+
+    The environment twin of the ``-P`` in :func:`agitrack_invocation`, for children whose
+    command line aGiTrack does not fully own — and a second belt for the ones it does, since a
+    daemon re-spawned from a command line RECORDED by an older aGiTrack carries no ``-P``."""
+    env = dict(os.environ if base is None else base)
+    env["PYTHONSAFEPATH"] = "1"
+    return env
+
+
+def shadowing_agitrack_package(directory: str | os.PathLike[str]) -> Path | None:
+    """The stray ``agitrack`` module in ``directory`` that a child started there would import
+    instead of the installed one, or None when there is none.
+
+    aGiTrack's OWN source checkout is not one: its ``agitrack/`` directory *is* the package this
+    code was imported from, so a daemon started in it loads exactly what its launcher was
+    running."""
+    package = Path(__file__).resolve().parent
+    for name in ("agitrack", "agitrack.py"):
+        candidate = Path(directory) / name
+        try:
+            if not candidate.exists() or candidate.resolve() == package:
+                continue
+        except OSError:  # pragma: no cover - an unreadable candidate cannot shadow anything
+            continue
+        return candidate
+    return None
+
+
+def safe_spawn_cwd(directory: str | os.PathLike[str]) -> Path:
+    """``directory``, unless a child started there would import a stray ``agitrack`` package —
+    then aGiTrack's own config directory, which by construction holds no such thing.
+
+    Every daemon addresses its repository by an absolute ``--repo`` path and runs git with an
+    explicit ``cwd``, so where the process itself sits is free to move; being able to import
+    aGiTrack is not. This is what protects Python 3.10, where ``-P``/``PYTHONSAFEPATH`` do not
+    exist (see ``_SAFE_PATH_ARGS``)."""
+    directory = Path(directory)
+    if shadowing_agitrack_package(directory) is None:
+        return directory
+    from agitrack.env import getenv_compat
+
+    config_dir = getenv_compat("CONFIG_DIR")
+    neutral = Path(config_dir).expanduser() if config_dir else Path.home() / ".agitrack"
+    try:
+        neutral.mkdir(parents=True, exist_ok=True)
+    except OSError:  # pragma: no cover - a home directory that cannot be written to
+        return directory
+    return neutral if shadowing_agitrack_package(neutral) is None else directory
 
 
 # The one canonical Windows flag for the package. Prefer a plain ``os.name == "nt"`` inline
