@@ -23,7 +23,7 @@ include = ["agitrack*"]
 # 0.0.0 marks an unreleased working tree.
 [project]
 name = "agitrack"
-version = "0.6.21"
+version = "0.6.22"
 description = "Interactive coding-agent CLI that commits AI changes to git with traceable metadata."
 readme = "README.md"
 requires-python = ">=3.10"
