@@ -2,7 +2,7 @@
   "name": "agitrack-vscode",
   "displayName": "aGiTrack",
   "description": "Start aGiTrack with the aG button (top-right of the editor) or \"aGiTrack: Start aGiTrack\" in the Command Palette — a coding agent (Claude Code / Codex / OpenCode) that auto-commits every turn with full provenance, run inside VSCode with no terminal typing required.",
-  "version": "0.6.21",
+  "version": "0.6.22",
   "publisher": "core-aix",
   "license": "Apache-2.0",
   "icon": "media/icon.png",
